@@ -12,7 +12,7 @@
     clipPrefix: "markframe_clip_",
   };
 
-  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom"];
+  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive"];
 
   function clipStorageKey(platform, clipId) {
     return STORAGE_KEYS.clipPrefix + platform + "_" + encodeURIComponent(clipId);
@@ -22,7 +22,8 @@
     const p = STORAGE_KEYS.clipPrefix;
     if (!key.startsWith(p)) return null;
     const rest = key.slice(p.length);
-    for (const plat of CLIP_PLATFORMS) {
+    const plats = [...CLIP_PLATFORMS].sort((a, b) => b.length - a.length);
+    for (const plat of plats) {
       const pref = plat + "_";
       if (rest.startsWith(pref)) {
         try {
@@ -42,6 +43,15 @@
   let canvas = null;
   let ctx = null;
   let videoEl = null;
+  /** Drive often plays video inside a cross-origin YouTube embed iframe — bridge via postMessage. */
+  const driveYtState = {
+    iframe: null,
+    lastTime: 0,
+    handler: null,
+    onLoad: null,
+    pollId: null,
+    mediaSurface: null,
+  };
   let resizeObs = null;
   let urlCheckTimer = null;
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
@@ -662,8 +672,441 @@
     };
   }
 
+  function isGoogleDriveSite() {
+    const h = location.hostname;
+    return h === "drive.google.com" || h === "docs.google.com";
+  }
+
+  function parseGoogleDriveFileIdFromPathAndSearch(pathname, searchParams) {
+    if (!pathname || !searchParams) return null;
+    const m = pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
+    if (m) return m[1];
+    if (pathname === "/open") {
+      const id = searchParams.get("id");
+      if (id && /^[a-zA-Z0-9_-]{10,}$/.test(id)) return id;
+    }
+    return null;
+  }
+
+  function parseGoogleDriveFileIdFromUrl() {
+    try {
+      const u = new URL(location.href);
+      if (u.hostname !== "drive.google.com" && u.hostname !== "docs.google.com") return null;
+      return parseGoogleDriveFileIdFromPathAndSearch(u.pathname, u.searchParams);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseGoogleDriveFileIdFromDom() {
+    const tryUrl = (raw) => {
+      if (!raw || typeof raw !== "string") return null;
+      try {
+        const u = new URL(raw, location.href);
+        if (u.hostname !== "drive.google.com" && u.hostname !== "docs.google.com") return null;
+        return parseGoogleDriveFileIdFromPathAndSearch(u.pathname, u.searchParams);
+      } catch (_) {
+        return null;
+      }
+    };
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    let id = tryUrl(ogUrl);
+    if (id) return id;
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    return tryUrl(canonical);
+  }
+
+  function parseGoogleDriveFileId() {
+    return parseGoogleDriveFileIdFromUrl() || parseGoogleDriveFileIdFromDom();
+  }
+
+  /** File preview / view on Drive (path contains a file id). */
+  function isGoogleDriveClipHost() {
+    if (!isGoogleDriveSite()) return false;
+    return !!parseGoogleDriveFileId();
+  }
+
+  function driveFileIdInUrl(urlStr, expectedId) {
+    if (!urlStr || !expectedId) return false;
+    try {
+      const u = new URL(urlStr, location.href);
+      if (u.hostname !== "drive.google.com" && u.hostname !== "docs.google.com") return false;
+      const fromPath = parseGoogleDriveFileIdFromPathAndSearch(u.pathname, u.searchParams);
+      return fromPath === expectedId;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** Poster / preview images in the Drive file viewer (og:image is often missing for video). */
+  function scrapeGoogleDriveViewerThumbnailDom(fileId) {
+    const viewerRoot =
+      document.getElementById("drive-viewer") ||
+      document.querySelector(".drive-viewer-root") ||
+      document.querySelector(".drive-viewer-paginated-scrollable") ||
+      document.querySelector("div[role='main']");
+    if (!viewerRoot) return null;
+    const imgs = [...viewerRoot.querySelectorAll("img[src]")].filter((img) => {
+      if (img.closest("#markframe-root")) return false;
+      const s = img.getAttribute("src") || "";
+      if (!/^https?:/i.test(s)) return false;
+      if (/\.svg(\?|$)/i.test(s)) return false;
+      if (/icon|favicon|logo/i.test(s) && !/googleusercontent|thumbnail\?/i.test(s)) return false;
+      if (
+        fileId &&
+        !s.includes(fileId) &&
+        !/googleusercontent\.com/i.test(s) &&
+        !/thumbnail\?/i.test(s) &&
+        !/\/d\/[a-zA-Z0-9_-]+/i.test(s)
+      ) {
+        return false;
+      }
+      return true;
+    });
+    let best = null;
+    let bestArea = 0;
+    for (const img of imgs) {
+      const w = img.naturalWidth || img.width || 0;
+      const h = img.naturalHeight || img.height || 0;
+      if (w < 40 || h < 40) continue;
+      const area = w * h;
+      if (area > bestArea) {
+        bestArea = area;
+        best = img.getAttribute("src");
+      }
+    }
+    return best && /^https?:/i.test(best) ? best : null;
+  }
+
+  function scrapeGoogleDrivePageMetadata(expectedId) {
+    if (!expectedId) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    let trusted = false;
+    for (const raw of [ogUrl, canonical]) {
+      if (raw && driveFileIdInUrl(raw, expectedId)) {
+        trusted = true;
+        break;
+      }
+    }
+    if (!trusted) {
+      try {
+        if (driveFileIdInUrl(location.href, expectedId)) trusted = true;
+      } catch (_) {}
+    }
+    if (!trusted && parseGoogleDriveFileIdFromUrl() === expectedId) trusted = true;
+    if (!trusted && parseGoogleDriveFileIdFromDom() === expectedId) trusted = true;
+    if (!trusted) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
+    const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
+    let title = (ogTitle || document.title || "").trim();
+    title = title.replace(/\s*[-–—]\s*Google\s+Drive\s*$/i, "").trim();
+    title = title.replace(/\s*[-–—]\s*Google\s+Docs\s*$/i, "").trim();
+    let thumbnailUrl = null;
+    if (ogImage && /^https?:/i.test(ogImage)) {
+      thumbnailUrl = ogImage;
+    }
+    if (!thumbnailUrl) {
+      thumbnailUrl = scrapeGoogleDriveViewerThumbnailDom(expectedId);
+    }
+    return {
+      title: title || null,
+      thumbnailUrl,
+      trusted: true,
+      staleThumb: false,
+    };
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onloadend = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  /**
+   * Fetches Drive's thumbnail API with the user's session and returns a data URL so the
+   * library preview works off drive.google.com (cross-origin <img> would not send cookies).
+   */
+  async function fetchGoogleDriveThumbnailDataUrl(fileId) {
+    if (!fileId) return null;
+    if (location.hostname !== "drive.google.com" && location.hostname !== "docs.google.com") {
+      return null;
+    }
+    const urls = [
+      `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w480`,
+      `https://drive.google.com/thumbnail?sz=w480&id=${encodeURIComponent(fileId)}`,
+    ];
+    for (const url of urls) {
+      try {
+        const r = await fetch(url, { credentials: "include", mode: "cors" });
+        if (!r.ok) continue;
+        const ab = await r.arrayBuffer();
+        if (ab.byteLength < 32 || ab.byteLength > 2_500_000) continue;
+        const u8 = new Uint8Array(ab);
+        let mime = (r.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+        if (!mime.startsWith("image/")) {
+          if (u8.length >= 3 && u8[0] === 0xff && u8[1] === 0xd8 && u8[2] === 0xff) mime = "image/jpeg";
+          else if (u8.length >= 8 && u8[0] === 0x89 && u8[1] === 0x50 && u8[2] === 0x4e && u8[3] === 0x47) {
+            mime = "image/png";
+          } else if (u8.length >= 6 && u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46) mime = "image/gif";
+          else continue;
+        }
+        const blob = new Blob([ab], { type: mime });
+        const dataUrl = await blobToDataUrl(blob);
+        if (typeof dataUrl === "string" && dataUrl.startsWith("data:image/")) return dataUrl;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function googleDriveVideoIsUsable(v) {
+    if (!v || v.tagName !== "VIDEO" || v.closest("#markframe-root")) return false;
+    const r = v.getBoundingClientRect();
+    return r.width >= 8 && r.height >= 8;
+  }
+
+  function findGoogleDriveNativeVideo() {
+    const selectors = [
+      "#drive-viewer video",
+      ".drive-viewer-root video",
+      ".drive-viewer-paginated-scrollable video",
+      "div[role='main'] video",
+      "video",
+    ];
+    for (const sel of selectors) {
+      const v = document.querySelector(sel);
+      if (googleDriveVideoIsUsable(v)) return v;
+    }
+    const videos = [...document.querySelectorAll("video")].filter(googleDriveVideoIsUsable);
+    let best = null;
+    let bestArea = 0;
+    const vpH = window.innerHeight;
+    const vpW = window.innerWidth;
+    for (const v of videos) {
+      const r = v.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
+      const area = w * h;
+      if (area >= 400 && area > bestArea) {
+        bestArea = area;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  function isDriveBackedYoutubeEmbedSrc(src) {
+    if (!src || typeof src !== "string") return false;
+    if (!/\/embed\/?/i.test(src)) return false;
+    if (/youtube\.googleapis\.com/i.test(src)) return true;
+    if (!isGoogleDriveSite()) return false;
+    if (/[?&]ps=docs\b/i.test(src)) return true;
+    if (/post_message_origin=/i.test(src) && /drive\.google\.com/i.test(src)) return true;
+    return false;
+  }
+
+  function findGoogleDriveYoutubeEmbedIframe() {
+    const iframes = [...document.querySelectorAll("iframe")];
+    let best = null;
+    let bestArea = 0;
+    const vpH = window.innerHeight;
+    const vpW = window.innerWidth;
+    for (const el of iframes) {
+      if (el.closest("#markframe-root")) continue;
+      const src = el.getAttribute("src") || "";
+      if (!isDriveBackedYoutubeEmbedSrc(src)) continue;
+      const r = el.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
+      const area = w * h;
+      if (area >= 64 && area > bestArea) {
+        bestArea = area;
+        best = el;
+      }
+    }
+    return best;
+  }
+
+  function driveYtEmbedOrigin(iframe) {
+    try {
+      return new URL(iframe.getAttribute("src") || iframe.src, location.href).origin;
+    } catch (_) {
+      return "https://youtube.googleapis.com";
+    }
+  }
+
+  function postToDriveYtEmbed(iframe, obj) {
+    if (!iframe?.contentWindow) return;
+    const payload = JSON.stringify(obj);
+    try {
+      iframe.contentWindow.postMessage(payload, driveYtEmbedOrigin(iframe));
+    } catch (_) {
+      try {
+        iframe.contentWindow.postMessage(payload, "*");
+      } catch (_) {}
+    }
+  }
+
+  function sendDriveYtListening(iframe) {
+    postToDriveYtEmbed(iframe, { event: "listening", id: 1, channel: "widget" });
+  }
+
+  function ingestDriveYtPlayerMessage(raw) {
+    let data = raw;
+    if (typeof data === "string") {
+      try {
+        data = JSON.parse(data);
+      } catch (_) {
+        return;
+      }
+    }
+    if (!data || typeof data !== "object") return;
+    const info = data.info;
+    if (typeof info?.currentTime === "number") {
+      driveYtState.lastTime = info.currentTime;
+    }
+  }
+
+  function teardownDriveYoutubeEmbedBridge() {
+    if (driveYtState.handler) {
+      window.removeEventListener("message", driveYtState.handler);
+      driveYtState.handler = null;
+    }
+    if (driveYtState.iframe && driveYtState.onLoad) {
+      driveYtState.iframe.removeEventListener("load", driveYtState.onLoad);
+    }
+    driveYtState.onLoad = null;
+    if (driveYtState.pollId != null) {
+      clearInterval(driveYtState.pollId);
+      driveYtState.pollId = null;
+    }
+    driveYtState.iframe = null;
+    driveYtState.lastTime = 0;
+  }
+
+  function bindDriveYoutubeEmbedBridge(iframe) {
+    if (driveYtState.iframe === iframe) {
+      sendDriveYtListening(iframe);
+      return;
+    }
+    teardownDriveYoutubeEmbedBridge();
+    driveYtState.iframe = iframe;
+    driveYtState.handler = (e) => {
+      if (e.source !== iframe.contentWindow) return;
+      ingestDriveYtPlayerMessage(e.data);
+    };
+    window.addEventListener("message", driveYtState.handler);
+    driveYtState.onLoad = () => sendDriveYtListening(iframe);
+    iframe.addEventListener("load", driveYtState.onLoad);
+    sendDriveYtListening(iframe);
+    driveYtState.pollId = window.setInterval(() => {
+      if (!driveYtState.iframe?.contentWindow) return;
+      postToDriveYtEmbed(driveYtState.iframe, {
+        event: "command",
+        func: "getCurrentTime",
+        args: [],
+      });
+    }, 450);
+  }
+
+  function ensureDriveYoutubeEmbedMediaSurface() {
+    if (!driveYtState.mediaSurface) {
+      const surface = {
+        mfDriveYoutubeEmbed: true,
+        play() {
+          const el = driveYtState.iframe;
+          if (!el?.contentWindow) return;
+          postToDriveYtEmbed(el, { event: "command", func: "playVideo", args: [] });
+        },
+      };
+      Object.defineProperty(surface, "currentTime", {
+        get() {
+          const t = driveYtState.lastTime;
+          return Number.isFinite(t) ? t : 0;
+        },
+        set(v) {
+          const el = driveYtState.iframe;
+          if (!el?.contentWindow || !Number.isFinite(v)) return;
+          postToDriveYtEmbed(el, { event: "command", func: "seekTo", args: [v, true] });
+          driveYtState.lastTime = v;
+        },
+        enumerable: true,
+        configurable: true,
+      });
+      driveYtState.mediaSurface = surface;
+    }
+    return driveYtState.mediaSurface;
+  }
+
+  function getDriveYoutubeEmbedMediaSurface() {
+    const iframe = findGoogleDriveYoutubeEmbedIframe();
+    if (!iframe) {
+      teardownDriveYoutubeEmbedBridge();
+      return null;
+    }
+    bindDriveYoutubeEmbedBridge(iframe);
+    return ensureDriveYoutubeEmbedMediaSurface();
+  }
+
+  function getGoogleDriveVideoElementForClip() {
+    const native = findGoogleDriveNativeVideo();
+    if (native) {
+      teardownDriveYoutubeEmbedBridge();
+      return native;
+    }
+    return getDriveYoutubeEmbedMediaSurface();
+  }
+
+  function getGoogleDriveOverlayParentForClip() {
+    const native = findGoogleDriveNativeVideo();
+    if (native) {
+      return (
+        native.closest("#drive-viewer") ||
+        native.closest(".drive-viewer-root") ||
+        native.closest("div[role='main']") ||
+        native.parentElement
+      );
+    }
+    const iframe = findGoogleDriveYoutubeEmbedIframe();
+    if (!iframe) return null;
+    return (
+      iframe.closest("#drive-viewer") ||
+      iframe.closest(".drive-viewer-root") ||
+      iframe.closest("div[role='main']") ||
+      iframe.parentElement
+    );
+  }
+
+  function resolveGoogleDriveClip() {
+    if (!isGoogleDriveClipHost()) return null;
+    const id = parseGoogleDriveFileId();
+    if (!id) return null;
+    const storageKey = clipStorageKey("googledrive", id);
+    return {
+      platform: "googledrive",
+      clipId: id,
+      storageKey,
+      openUrl: () => "https://drive.google.com/file/d/" + encodeURIComponent(id) + "/view",
+      getVideoElement: getGoogleDriveVideoElementForClip,
+      getOverlayParent: getGoogleDriveOverlayParentForClip,
+      scrapeMetadata: (clipId) => scrapeGoogleDrivePageMetadata(clipId),
+    };
+  }
+
   function resolveClipContext() {
-    return resolveYoutubeClip() || resolveVimeoClip() || resolveLoomClip();
+    return (
+      resolveYoutubeClip() ||
+      resolveVimeoClip() ||
+      resolveLoomClip() ||
+      resolveGoogleDriveClip()
+    );
   }
 
   function clipsMatch(a, b) {
@@ -764,6 +1207,10 @@
       const o = await fetchLoomThumbFromBackground(clip.clipId);
       if (o) thumbnailUrl = o;
     }
+    if (clip.platform === "googledrive" && clipsMatch(cur, clip) && !thumbnailUrl) {
+      const o = await fetchGoogleDriveThumbnailDataUrl(clip.clipId);
+      if (o) thumbnailUrl = o;
+    }
 
     const payload = {
       comments: state.comments,
@@ -796,6 +1243,10 @@
       const o = await fetchLoomThumbFromBackground(clip.clipId);
       if (o) nextThumb = o;
     }
+    if (clip.platform === "googledrive" && !nextThumb) {
+      const o = await fetchGoogleDriveThumbnailDataUrl(clip.clipId);
+      if (o) nextThumb = o;
+    }
     if (nextTitle === prev.title && nextThumb === prev.thumbnailUrl) return;
     await chrome.storage.local.set({
       [key]: {
@@ -810,10 +1261,16 @@
     return "";
   }
 
+  function defaultGoogleDriveThumbnail(fileId) {
+    if (!fileId) return "";
+    return "https://drive.google.com/thumbnail?id=" + encodeURIComponent(fileId) + "&sz=w320";
+  }
+
   function defaultThumbForPlatform(platform, clipId) {
     if (platform === "youtube") return defaultYoutubeThumbnail(clipId);
     if (platform === "vimeo") return defaultVimeoThumbnail(clipId);
     if (platform === "loom") return defaultLoomThumbnail(clipId);
+    if (platform === "googledrive") return defaultGoogleDriveThumbnail(clipId);
     return "";
   }
 
@@ -877,7 +1334,7 @@
       }
 
       if (!clipId) continue;
-      if (platform !== "youtube" && platform !== "vimeo" && platform !== "loom") continue;
+      if (!CLIP_PLATFORMS.includes(platform)) continue;
 
       let thumb = v.thumbnailUrl || null;
       if (platform === "youtube") {
@@ -890,8 +1347,12 @@
         openUrl = "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
       } else if (platform === "vimeo") {
         openUrl = "https://vimeo.com/" + encodeURIComponent(clipId);
-      } else {
+      } else if (platform === "loom") {
         openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
+      } else if (platform === "googledrive") {
+        openUrl = "https://drive.google.com/file/d/" + encodeURIComponent(clipId) + "/view";
+      } else {
+        openUrl = "";
       }
 
       const titleDefault =
@@ -899,7 +1360,11 @@
           ? "YouTube video"
           : platform === "vimeo"
             ? "Vimeo video"
-            : "Loom video";
+            : platform === "loom"
+              ? "Loom video"
+              : platform === "googledrive"
+                ? "Google Drive file"
+                : "Video";
 
       out.push({
         storageKey: k,
@@ -934,6 +1399,19 @@
         const rec = got[sk];
         if (rec && !rec.thumbnailUrl) {
           await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+        }
+      } else if (row.platform === "googledrive") {
+        const cur = resolveClipContext();
+        if (cur && cur.platform === "googledrive" && cur.clipId === row.clipId) {
+          const o = await fetchGoogleDriveThumbnailDataUrl(row.clipId);
+          if (!o) continue;
+          row.thumbnailUrl = o;
+          const sk = row.storageKey;
+          const got = await chrome.storage.local.get(sk);
+          const rec = got[sk];
+          if (rec && !rec.thumbnailUrl) {
+            await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+          }
         }
       }
     }
@@ -1432,7 +1910,7 @@
     root.dataset.mfOffYoutube = off ? "1" : "";
     if (off) {
       ban.textContent =
-        "No supported video on this page. Open YouTube, Vimeo, or Loom—or pick a saved review below.";
+        "No supported video on this page. Open YouTube, Vimeo, Loom, or a Google Drive file—or pick a saved review below.";
     }
   }
 
@@ -1447,7 +1925,7 @@
       const empty = document.createElement("div");
       empty.className = "mf-dashboard-empty";
       empty.textContent =
-        "No reviews yet. Open a YouTube, Vimeo, or Loom video and add a note.";
+        "No reviews yet. Open a YouTube, Vimeo, Loom, or Google Drive video and add a note.";
       listEl.appendChild(empty);
       return;
     }
@@ -1738,9 +2216,13 @@
   function tick() {
     const clip = resolveClipContext();
     if (!clip) {
+      teardownDriveYoutubeEmbedBridge();
       state.dashboardForced = false;
       initDashboard();
       return;
+    }
+    if (clip.platform !== "googledrive") {
+      teardownDriveYoutubeEmbedBridge();
     }
     initReview(clip);
   }
