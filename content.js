@@ -12,7 +12,7 @@
     clipPrefix: "markframe_clip_",
   };
 
-  const CLIP_PLATFORMS = ["youtube", "vimeo", "generic"];
+  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "generic"];
 
   function clipStorageKey(platform, clipId) {
     return STORAGE_KEYS.clipPrefix + platform + "_" + encodeURIComponent(clipId);
@@ -161,6 +161,104 @@
 
   function isVimeoClipHost() {
     return isVimeoSite() || isVimeoPlayerHost();
+  }
+
+  function isLoomSite() {
+    const h = location.hostname;
+    return h === "loom.com" || h === "www.loom.com" || /\.loom\.com$/i.test(h);
+  }
+
+  /** Loom share/embed pages only; other loom.com paths skip so generic or dashboard-off behavior applies. */
+  function isLoomClipHost() {
+    if (!isLoomSite()) return false;
+    try {
+      const path = new URL(location.href).pathname;
+      return /\/(?:share|embed)\//i.test(path);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function parseLoomClipIdFromPathname(pathname) {
+    if (!pathname || typeof pathname !== "string") return null;
+    const m = pathname.match(/\/(?:share|embed)\/([a-f0-9]{32})(?:\/|$|\?|#|\.)/i);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function parseLoomClipIdFromUrl() {
+    try {
+      return parseLoomClipIdFromPathname(new URL(location.href).pathname);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseLoomClipIdFromDom() {
+    const tryFromHref = (raw) => {
+      if (!raw || typeof raw !== "string") return null;
+      try {
+        return parseLoomClipIdFromPathname(new URL(raw, location.href).pathname);
+      } catch (_) {
+        return parseLoomClipIdFromPathname(raw);
+      }
+    };
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    let id = tryFromHref(ogUrl);
+    if (id) return id;
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    id = tryFromHref(canonical);
+    if (id) return id;
+    return null;
+  }
+
+  function parseLoomClipId() {
+    return parseLoomClipIdFromUrl() || parseLoomClipIdFromDom();
+  }
+
+  function loomIdInUrl(urlStr, expectedId) {
+    if (!urlStr || !expectedId) return false;
+    const id = String(expectedId).toLowerCase();
+    const s = String(urlStr).toLowerCase();
+    return s.includes("/share/" + id) || s.includes("/embed/" + id);
+  }
+
+  function scrapeLoomPageMetadata(expectedId) {
+    if (!expectedId) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    let trusted = false;
+    for (const raw of [ogUrl, canonical]) {
+      if (raw && loomIdInUrl(raw, expectedId)) {
+        trusted = true;
+        break;
+      }
+    }
+    if (!trusted) {
+      try {
+        if (loomIdInUrl(location.href, expectedId)) trusted = true;
+      } catch (_) {}
+    }
+    if (!trusted && parseLoomClipIdFromUrl() === expectedId) trusted = true;
+    if (!trusted && parseLoomClipIdFromDom() === expectedId) trusted = true;
+    if (!trusted) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
+    const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
+    let title = (ogTitle || document.title || "").trim();
+    title = title.replace(/\s*[-–—]\s*on\s+Loom\s*$/i, "").trim();
+    let thumbnailUrl = null;
+    if (ogImage && /^https?:/i.test(ogImage)) {
+      thumbnailUrl = ogImage;
+    }
+    return {
+      title: title || null,
+      thumbnailUrl,
+      trusted: true,
+      staleThumb: false,
+    };
   }
 
   function parseVimeoClipIdFromUrl() {
@@ -543,9 +641,95 @@
     };
   }
 
+  function loomVideoIsUsable(v) {
+    if (!v || v.tagName !== "VIDEO" || v.closest("#markframe-root")) return false;
+    const r = v.getBoundingClientRect();
+    return r.width >= 8 && r.height >= 8;
+  }
+
+  function queryFirstLoomVideo(selectors, root) {
+    const base = root || document;
+    for (const sel of selectors) {
+      const v = base.querySelector(sel);
+      if (loomVideoIsUsable(v)) return v;
+    }
+    return null;
+  }
+
+  function getLoomVideoElementForClip() {
+    const scopedSelectors = [
+      '[data-testid="video-player"] video',
+      ".video-player video",
+      ".loom-player video",
+      "main video",
+      "article video",
+      "video",
+    ];
+    const mainEl = document.querySelector("main") || document.querySelector('[role="main"]');
+    if (mainEl) {
+      const v = queryFirstLoomVideo(scopedSelectors, mainEl);
+      if (v) return v;
+    }
+    const global = queryFirstLoomVideo([
+      '[data-testid="video-player"] video',
+      ".video-player video",
+      ".loom-player video",
+      "main video",
+      "article video",
+      "video",
+    ]);
+    if (global) return global;
+    const videos = [...document.querySelectorAll("video")].filter(loomVideoIsUsable);
+    let best = null;
+    let bestArea = 0;
+    const vpH = window.innerHeight;
+    const vpW = window.innerWidth;
+    for (const v of videos) {
+      const r = v.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
+      const area = w * h;
+      if (area >= 400 && area > bestArea) {
+        bestArea = area;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  function getLoomOverlayParentForClip() {
+    const vid = getLoomVideoElementForClip();
+    if (!vid) return null;
+    return (
+      vid.closest('[data-testid="video-player"]') ||
+      vid.closest(".video-player") ||
+      vid.closest(".loom-player") ||
+      vid.closest("main") ||
+      vid.closest('[role="main"]') ||
+      vid.closest("article") ||
+      vid.parentElement
+    );
+  }
+
+  function resolveLoomClip() {
+    if (!isLoomClipHost()) return null;
+    const id = parseLoomClipId();
+    if (!id) return null;
+    const storageKey = clipStorageKey("loom", id);
+    return {
+      platform: "loom",
+      clipId: id,
+      storageKey,
+      openUrl: () => "https://www.loom.com/share/" + encodeURIComponent(id),
+      getVideoElement: getLoomVideoElementForClip,
+      getOverlayParent: getLoomOverlayParentForClip,
+      scrapeMetadata: (clipId) => scrapeLoomPageMetadata(clipId),
+    };
+  }
+
   function resolveGenericClip() {
     if (location.protocol !== "http:" && location.protocol !== "https:") return null;
-    if (isYoutubeSite() || isVimeoClipHost()) return null;
+    if (isYoutubeSite() || isVimeoClipHost() || isLoomClipHost()) return null;
 
     let video = null;
     if (state.genericPickedFingerprint) {
@@ -576,7 +760,7 @@
   }
 
   function resolveClipContext() {
-    return resolveYoutubeClip() || resolveVimeoClip() || resolveGenericClip();
+    return resolveYoutubeClip() || resolveVimeoClip() || resolveLoomClip() || resolveGenericClip();
   }
 
   function clipsMatch(a, b) {
@@ -673,6 +857,10 @@
       const o = await fetchVimeoThumbFromBackground(clip.clipId);
       if (o) thumbnailUrl = o;
     }
+    if (clip.platform === "loom" && !thumbnailUrl) {
+      const o = await fetchLoomThumbFromBackground(clip.clipId);
+      if (o) thumbnailUrl = o;
+    }
 
     const payload = {
       comments: state.comments,
@@ -702,6 +890,10 @@
       const o = await fetchVimeoThumbFromBackground(clip.clipId);
       if (o) nextThumb = o;
     }
+    if (clip.platform === "loom" && !nextThumb) {
+      const o = await fetchLoomThumbFromBackground(clip.clipId);
+      if (o) nextThumb = o;
+    }
     if (nextTitle === prev.title && nextThumb === prev.thumbnailUrl) return;
     await chrome.storage.local.set({
       [key]: {
@@ -712,9 +904,14 @@
     });
   }
 
+  function defaultLoomThumbnail(_loomId) {
+    return "";
+  }
+
   function defaultThumbForPlatform(platform, clipId) {
     if (platform === "youtube") return defaultYoutubeThumbnail(clipId);
     if (platform === "vimeo") return defaultVimeoThumbnail(clipId);
+    if (platform === "loom") return defaultLoomThumbnail(clipId);
     return "";
   }
 
@@ -724,6 +921,26 @@
       try {
         chrome.runtime.sendMessage(
           { type: "FETCH_VIMEO_OEMBED_THUMB", clipId: String(clipId) },
+          (r) => {
+            if (chrome.runtime.lastError) {
+              resolve(null);
+              return;
+            }
+            resolve(r && r.ok && r.thumbnailUrl ? r.thumbnailUrl : null);
+          }
+        );
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  function fetchLoomThumbFromBackground(clipId) {
+    if (!clipId) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(
+          { type: "FETCH_LOOM_OEMBED_THUMB", clipId: String(clipId) },
           (r) => {
             if (chrome.runtime.lastError) {
               resolve(null);
@@ -770,6 +987,8 @@
         openUrl = "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
       } else if (platform === "vimeo") {
         openUrl = "https://vimeo.com/" + encodeURIComponent(clipId);
+      } else if (platform === "loom") {
+        openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
       } else {
         openUrl = v.pageUrl || "";
       }
@@ -779,7 +998,9 @@
           ? "YouTube video"
           : platform === "vimeo"
             ? "Vimeo video"
-            : "Video";
+            : platform === "loom"
+              ? "Loom video"
+              : "Video";
 
       out.push({
         storageKey: k,
@@ -794,15 +1015,27 @@
     }
     out.sort((a, b) => b.updatedAt - a.updatedAt);
     for (const row of out) {
-      if (row.platform !== "vimeo" || row.thumbnailUrl) continue;
-      const o = await fetchVimeoThumbFromBackground(row.clipId);
-      if (!o) continue;
-      row.thumbnailUrl = o;
-      const sk = row.storageKey;
-      const got = await chrome.storage.local.get(sk);
-      const rec = got[sk];
-      if (rec && !rec.thumbnailUrl) {
-        await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+      if (row.thumbnailUrl) continue;
+      if (row.platform === "vimeo") {
+        const o = await fetchVimeoThumbFromBackground(row.clipId);
+        if (!o) continue;
+        row.thumbnailUrl = o;
+        const sk = row.storageKey;
+        const got = await chrome.storage.local.get(sk);
+        const rec = got[sk];
+        if (rec && !rec.thumbnailUrl) {
+          await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+        }
+      } else if (row.platform === "loom") {
+        const o = await fetchLoomThumbFromBackground(row.clipId);
+        if (!o) continue;
+        row.thumbnailUrl = o;
+        const sk = row.storageKey;
+        const got = await chrome.storage.local.get(sk);
+        const rec = got[sk];
+        if (rec && !rec.thumbnailUrl) {
+          await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+        }
       }
     }
     return out;
@@ -1303,7 +1536,7 @@
     root.dataset.mfOffYoutube = off ? "1" : "";
     if (off) {
       ban.textContent =
-        "No video detected on this page. Use YouTube, Vimeo, or a page with an HTML5 video—or open a saved item below.";
+        "No video detected on this page. Use YouTube, Vimeo, Loom, or a page with an HTML5 video—or open a saved item below.";
     }
   }
 
@@ -1318,7 +1551,7 @@
       const empty = document.createElement("div");
       empty.className = "mf-dashboard-empty";
       empty.textContent =
-        "No reviews yet. Open a supported video (YouTube, Vimeo, or a page with HTML5 video) and add a note.";
+        "No reviews yet. Open a supported video (YouTube, Vimeo, Loom, or a page with HTML5 video) and add a note.";
       listEl.appendChild(empty);
       return;
     }
@@ -1530,7 +1763,7 @@
     if (!root) return;
     const btn = root.querySelector('[data-action="pick-video"]');
     if (!btn) return;
-    const show = !isYoutubeSite() && !isVimeoClipHost();
+    const show = !isYoutubeSite() && !isVimeoClipHost() && !isLoomClipHost();
     btn.classList.toggle("mf-hidden", !show);
     btn.classList.toggle("mf-active", state.pickVideoMode);
   }
