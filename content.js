@@ -4,9 +4,14 @@
   if (window !== window.top) return;
 
   const ACCENT = "#00E5FF";
+  /** Must match service worker Supabase auth storageKey. */
+  const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
+
   const STORAGE_KEYS = {
     author: "markframe_author",
     sidebarVisible: "markframe_sidebar_visible",
+    /** Written by the service worker when Supabase auth changes. */
+    authState: "markframe_auth_state",
     /** @deprecated legacy YouTube-only */
     dataPrefix: "markframe_video_",
     clipPrefix: "markframe_clip_",
@@ -72,7 +77,176 @@
     hasInk: false,
     /** True while a clip is active but user chose "All reviews" (no navigation). */
     dashboardForced: false,
+    /** When non-null, clip library reads/writes go to Supabase ({ email }). */
+    cloudUser: null,
   };
+
+  let cloudAuthCacheValidUntil = 0;
+  let cloudAuthCachedUser = null;
+
+  function sendExtensionMessage(payload) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(payload, (r) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(r);
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  async function refreshCloudUser(force) {
+    const now = Date.now();
+    if (!force && now < cloudAuthCacheValidUntil) {
+      state.cloudUser = cloudAuthCachedUser;
+      return;
+    }
+    cloudAuthCacheValidUntil = now + 45_000;
+    try {
+      const r = await sendExtensionMessage({ type: "MF_SUPABASE_SESSION" });
+      if (!r?.configured) {
+        cloudAuthCachedUser = null;
+        state.cloudUser = null;
+        return;
+      }
+      cloudAuthCachedUser = r.user && r.user.email ? { email: r.user.email } : null;
+      state.cloudUser = cloudAuthCachedUser;
+    } catch {
+      cloudAuthCachedUser = null;
+      state.cloudUser = null;
+    }
+  }
+
+  function isCloudActive() {
+    return !!state.cloudUser;
+  }
+
+  async function updateSyncBar() {
+    if (!root) return;
+    const bar = root.querySelector(".mf-sync-bar");
+    if (!bar) return;
+    const msg = bar.querySelector(".mf-sync-msg");
+    const outBtn = bar.querySelector('[data-action="sign-out"]');
+    if (!msg || !outBtn) return;
+    if (state.cloudUser?.email) {
+      msg.textContent = "Signed in as " + state.cloudUser.email + ".";
+      outBtn.classList.remove("mf-hidden");
+    } else {
+      msg.textContent = "";
+      outBtn.classList.add("mf-hidden");
+    }
+  }
+
+  function setGateStatus(text, kind) {
+    if (!root) return;
+    const el = root.querySelector(".mf-gate-status");
+    if (!el) return;
+    el.textContent = text || "";
+    el.classList.toggle("mf-gate-status-err", kind === "err");
+    el.classList.toggle("mf-gate-status-ok", kind === "ok");
+  }
+
+  function setGateFormBusy(busy) {
+    if (!root) return;
+    const form = root.querySelector(".mf-gate-form");
+    if (!form) return;
+    form.querySelectorAll("button").forEach((b) => {
+      b.disabled = !!busy;
+    });
+    form.querySelectorAll("input").forEach((inp) => {
+      inp.disabled = !!busy;
+    });
+  }
+
+  async function submitGateSignIn() {
+    if (!root) return;
+    const email = (root.querySelector(".mf-gate-email") || {}).value?.trim() || "";
+    const password = (root.querySelector(".mf-gate-password") || {}).value || "";
+    setGateStatus("");
+    setGateFormBusy(true);
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_AUTH_SIGN_IN",
+        email,
+        password,
+      });
+      if (!r?.ok) {
+        setGateStatus(r?.error || "Sign in failed.", "err");
+        return;
+      }
+      cloudAuthCacheValidUntil = 0;
+      lastTickSignature = "";
+      await refreshCloudUser(true);
+      void tick();
+    } catch (e) {
+      setGateStatus(String(e.message || e), "err");
+    } finally {
+      setGateFormBusy(false);
+    }
+  }
+
+  async function submitGateSignUp() {
+    if (!root) return;
+    const email = (root.querySelector(".mf-gate-email") || {}).value?.trim() || "";
+    const password = (root.querySelector(".mf-gate-password") || {}).value || "";
+    setGateStatus("");
+    setGateFormBusy(true);
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_AUTH_SIGN_UP",
+        email,
+        password,
+      });
+      if (!r?.ok) {
+        setGateStatus(r?.error || "Sign up failed.", "err");
+        return;
+      }
+      if (r.needsEmailConfirm) {
+        setGateStatus(r.message || "Check your email, then sign in.", "ok");
+        return;
+      }
+      cloudAuthCacheValidUntil = 0;
+      lastTickSignature = "";
+      await refreshCloudUser(true);
+      void tick();
+    } catch (e) {
+      setGateStatus(String(e.message || e), "err");
+    } finally {
+      setGateFormBusy(false);
+    }
+  }
+
+  function updateGateCopy(supabaseConfigured) {
+    if (!root) return;
+    const titleEl = root.querySelector(".mf-gate-title");
+    const msgEl = root.querySelector(".mf-gate-msg");
+    const form = root.querySelector(".mf-gate-form");
+    if (!titleEl || !msgEl || !form) return;
+    if (!supabaseConfigured) {
+      titleEl.textContent = "Setup required";
+      msgEl.textContent =
+        "Add your Supabase URL and publishable (anon) API key to src/supabase-config.js, run npm run build, then reload this extension in chrome://extensions.";
+      form.classList.add("mf-hidden");
+    } else {
+      titleEl.textContent = "Sign in to use Notch";
+      msgEl.textContent = "Enter your email and password, or create an account.";
+      form.classList.remove("mf-hidden");
+    }
+  }
+
+  function applyAppShellLocked(locked) {
+    if (!root) return;
+    root.dataset.mfLocked = locked ? "1" : "";
+    const gate = root.querySelector(".mf-gate-pane");
+    const shell = root.querySelector(".mf-app-shell");
+    if (gate) gate.classList.toggle("mf-hidden", !locked);
+    if (shell) shell.classList.toggle("mf-hidden", !!locked);
+  }
 
   function isYoutubeSite() {
     const h = location.hostname;
@@ -1390,12 +1564,26 @@
     return title;
   }
 
+  async function getClipRecordForDisplay(clip) {
+    await refreshCloudUser(false);
+    if (isCloudActive()) {
+      const r = await sendExtensionMessage({
+        type: "MF_CLOUD_LOAD_CLIP",
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      return r?.ok ? r.record : null;
+    }
+    const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+    return raw ?? null;
+  }
+
   async function refreshWatchVideoTitle(clip) {
     if (!root || !clip) return;
     const el = root.querySelector(".mf-watch-video-title");
     if (!el) return;
 
-    const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+    const raw = await getClipRecordForDisplay(clip);
     const title = clipDisplayTitleFromRecord(raw, clip);
 
     if (el.textContent !== title) {
@@ -1467,7 +1655,23 @@
   }
 
   async function loadClipData(clip) {
+    await refreshCloudUser(false);
     const key = clip.storageKey;
+    if (isCloudActive()) {
+      const r = await sendExtensionMessage({
+        type: "MF_CLOUD_LOAD_CLIP",
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      const raw = r?.ok ? r.record : null;
+      if (raw && Array.isArray(raw.comments)) {
+        state.comments = raw.comments;
+        normalizeCommentsShape();
+      } else {
+        state.comments = [];
+      }
+      return;
+    }
     let { [key]: raw } = await chrome.storage.local.get(key);
     if (!raw && clip.platform === "youtube") {
       const leg = legacyYoutubeKey(clip.clipId);
@@ -1518,12 +1722,41 @@
       platform: clip.platform,
       clipId: clip.clipId,
     };
+    if (isCloudActive()) {
+      try {
+        const r = await sendExtensionMessage({
+          type: "MF_CLOUD_SAVE_CLIP",
+          platform: clip.platform,
+          clipId: clip.clipId,
+          comments: state.comments,
+          title,
+          thumbnailUrl,
+        });
+        if (!r?.ok) showToast("Could not save to cloud — check your connection.");
+      } catch (e) {
+        console.error("Notch cloud save", e);
+        showToast("Could not save to cloud — check your connection.");
+      }
+      return;
+    }
     await chrome.storage.local.set({ [key]: payload });
   }
 
   async function mergeClipMetadata(clip) {
+    await refreshCloudUser(false);
     const key = clip.storageKey;
-    const { [key]: prev } = await chrome.storage.local.get(key);
+    let prev = null;
+    if (isCloudActive()) {
+      const r = await sendExtensionMessage({
+        type: "MF_CLOUD_LOAD_CLIP",
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      prev = r?.ok ? r.record : null;
+    } else {
+      const got = await chrome.storage.local.get(key);
+      prev = got[key];
+    }
     if (!prev || !Array.isArray(prev.comments) || prev.comments.length === 0) return;
     const cur = resolveClipContext();
     if (!clipsMatch(cur, clip)) return;
@@ -1546,6 +1779,21 @@
       if (o) nextThumb = o;
     }
     if (nextTitle === prev.title && nextThumb === prev.thumbnailUrl) return;
+    if (isCloudActive()) {
+      try {
+        await sendExtensionMessage({
+          type: "MF_CLOUD_SAVE_CLIP",
+          platform: clip.platform,
+          clipId: clip.clipId,
+          comments: prev.comments,
+          title: nextTitle,
+          thumbnailUrl: nextThumb,
+        });
+      } catch (e) {
+        console.error("Notch cloud merge", e);
+      }
+      return;
+    }
     const next = { ...prev, title: nextTitle, thumbnailUrl: nextThumb };
     delete next.customTitle;
     await chrome.storage.local.set({ [key]: next });
@@ -1610,6 +1858,62 @@
   }
 
   async function listVideosWithFeedback() {
+    await refreshCloudUser(false);
+    if (isCloudActive()) {
+      const r = await sendExtensionMessage({ type: "MF_CLOUD_LIST_CLIPS" });
+      const out = r?.ok && Array.isArray(r.items) ? r.items : [];
+      for (const row of out) {
+        if (row.thumbnailUrl) continue;
+        if (row.platform === "vimeo") {
+          const o = await fetchVimeoThumbFromBackground(row.clipId);
+          if (!o) continue;
+          row.thumbnailUrl = o;
+          try {
+            await sendExtensionMessage({
+              type: "MF_CLOUD_UPDATE_THUMB",
+              platform: row.platform,
+              clipId: row.clipId,
+              thumbnailUrl: o,
+            });
+          } catch {
+            /* ignore */
+          }
+        } else if (row.platform === "loom") {
+          const o = await fetchLoomThumbFromBackground(row.clipId);
+          if (!o) continue;
+          row.thumbnailUrl = o;
+          try {
+            await sendExtensionMessage({
+              type: "MF_CLOUD_UPDATE_THUMB",
+              platform: row.platform,
+              clipId: row.clipId,
+              thumbnailUrl: o,
+            });
+          } catch {
+            /* ignore */
+          }
+        } else if (row.platform === "googledrive") {
+          const cur = resolveClipContext();
+          if (cur && cur.platform === "googledrive" && cur.clipId === row.clipId) {
+            const o = await fetchGoogleDriveThumbnailDataUrl(row.clipId);
+            if (!o) continue;
+            row.thumbnailUrl = o;
+            try {
+              await sendExtensionMessage({
+                type: "MF_CLOUD_UPDATE_THUMB",
+                platform: row.platform,
+                clipId: row.clipId,
+                thumbnailUrl: o,
+              });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      }
+      return out;
+    }
+
     const all = await chrome.storage.local.get(null);
     const out = [];
     for (const [k, v] of Object.entries(all)) {
@@ -1720,8 +2024,23 @@
 
   async function removeClipFromLibrary(item) {
     if (!item || !item.storageKey) return;
-    const keys = storageKeysForDashboardItem(item);
-    await chrome.storage.local.remove(keys);
+    await refreshCloudUser(false);
+    if (isCloudActive()) {
+      try {
+        const r = await sendExtensionMessage({
+          type: "MF_CLOUD_DELETE_CLIP",
+          platform: item.platform,
+          clipId: item.clipId,
+        });
+        if (!r?.ok) throw new Error("cloud delete failed");
+      } catch (e) {
+        console.error("Notch cloud delete", e);
+        throw e;
+      }
+    } else {
+      const keys = storageKeysForDashboardItem(item);
+      await chrome.storage.local.remove(keys);
+    }
 
     const cur = resolveClipContext();
     const isCurrentPageClip =
@@ -2132,45 +2451,83 @@
     wrap.id = "markframe-root";
     wrap.dataset.mfView = "watch";
     wrap.innerHTML = `
-      <div class="mf-header">
-        <div class="mf-header-text">
-          <div class="mf-brand">Notch</div>
-          <div class="mf-header-sub"></div>
-        </div>
-        <div class="mf-header-actions">
-          <button type="button" class="mf-back-dashboard" data-action="go-dashboard" title="All reviewed videos">
-            ← All reviews
-          </button>
-          <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
-            This video
-          </button>
-          <button type="button" class="mf-collapse" data-action="collapse" title="Collapse">▾</button>
-        </div>
-      </div>
-      <div class="mf-watch-pane">
-        <div class="mf-watch-video-title-wrap">
-          <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
-        </div>
-        <div class="mf-author-row">
-          <label for="mf-author">Name</label>
-          <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
-        </div>
-        <div class="mf-toolbar">
-          <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
-          <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
-          <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
-          <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
-        </div>
-        <div class="mf-thread"></div>
-        <div class="mf-footer">
-          <div class="mf-input-row">
-            <input type="text" class="mf-comment-input" placeholder="Comment at current time…" maxlength="2000" />
+      <div class="mf-gate-pane">
+        <div class="mf-gate-brand">Notch</div>
+        <p class="mf-gate-title"></p>
+        <p class="mf-gate-msg"></p>
+        <div class="mf-gate-form mf-hidden">
+          <label class="mf-gate-label"
+            >Email
+            <input
+              type="email"
+              class="mf-gate-input mf-gate-email"
+              autocomplete="username"
+              maxlength="320"
+            />
+          </label>
+          <label class="mf-gate-label"
+            >Password
+            <input
+              type="password"
+              class="mf-gate-input mf-gate-password"
+              autocomplete="current-password"
+              maxlength="200"
+            />
+          </label>
+          <p class="mf-gate-status" aria-live="polite"></p>
+          <div class="mf-gate-actions">
+            <button type="button" class="mf-btn mf-btn-primary" data-action="gate-sign-in">Sign in</button>
+            <button type="button" class="mf-btn" data-action="gate-sign-up">Create account</button>
           </div>
         </div>
       </div>
-      <div class="mf-dashboard-pane mf-hidden">
-        <div class="mf-offyoutube-banner mf-hidden" role="status"></div>
-        <div class="mf-dashboard-list"></div>
+      <div class="mf-app-shell mf-hidden">
+        <div class="mf-header">
+          <div class="mf-header-text">
+            <div class="mf-brand">Notch</div>
+            <div class="mf-header-sub"></div>
+          </div>
+          <div class="mf-header-actions">
+            <button type="button" class="mf-back-dashboard" data-action="go-dashboard" title="All reviewed videos">
+              ← All reviews
+            </button>
+            <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
+              This video
+            </button>
+            <button type="button" class="mf-collapse" data-action="collapse" title="Collapse">▾</button>
+          </div>
+        </div>
+        <div class="mf-watch-pane">
+          <div class="mf-watch-video-title-wrap">
+            <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
+          </div>
+          <div class="mf-author-row">
+            <label for="mf-author">Name</label>
+            <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
+          </div>
+          <div class="mf-toolbar">
+            <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
+            <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
+            <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
+            <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
+          </div>
+          <div class="mf-thread"></div>
+          <div class="mf-footer">
+            <div class="mf-input-row">
+              <input type="text" class="mf-comment-input" placeholder="Comment at current time…" maxlength="2000" />
+            </div>
+          </div>
+        </div>
+        <div class="mf-dashboard-pane mf-hidden">
+          <div class="mf-offyoutube-banner mf-hidden" role="status"></div>
+          <div class="mf-sync-bar">
+            <p class="mf-sync-msg"></p>
+            <div class="mf-sync-actions">
+              <button type="button" class="mf-btn mf-sync-out" data-action="sign-out">Sign out</button>
+            </div>
+          </div>
+          <div class="mf-dashboard-list"></div>
+        </div>
       </div>
       <div class="mf-toast" aria-live="polite"></div>
     `;
@@ -2213,6 +2570,8 @@
 
   async function renderDashboard() {
     if (!root) return;
+    await refreshCloudUser(false);
+    await updateSyncBar();
     updateOffClipBanner();
     const listEl = root.querySelector(".mf-dashboard-list");
     if (!listEl) return;
@@ -2271,7 +2630,7 @@
         }
         if (sameClip) {
           setDrawModeUi(false);
-          tick();
+          void tick();
           return;
         }
         if (item.openUrl) {
@@ -2315,13 +2674,13 @@
     root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
       state.dashboardForced = true;
       setDrawModeUi(false);
-      tick();
+      void tick();
     });
 
     root.querySelector('[data-action="go-watch-panel"]').addEventListener("click", () => {
       state.dashboardForced = false;
       setDrawModeUi(false);
-      tick();
+      void tick();
     });
 
     root.querySelector('[data-action="collapse"]').addEventListener("click", () => {
@@ -2336,6 +2695,41 @@
       authorInp.value = n;
     });
     authorInp.addEventListener("change", () => saveAuthor(authorInp.value));
+
+    const gateSignIn = root.querySelector('[data-action="gate-sign-in"]');
+    if (gateSignIn) {
+      gateSignIn.addEventListener("click", () => void submitGateSignIn());
+    }
+    const gateSignUp = root.querySelector('[data-action="gate-sign-up"]');
+    if (gateSignUp) {
+      gateSignUp.addEventListener("click", () => void submitGateSignUp());
+    }
+    const gatePass = root.querySelector(".mf-gate-password");
+    if (gatePass) {
+      gatePass.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void submitGateSignIn();
+        }
+      });
+    }
+
+    const signOutBtn = root.querySelector('[data-action="sign-out"]');
+    if (signOutBtn) {
+      signOutBtn.addEventListener("click", async () => {
+        try {
+          await sendExtensionMessage({ type: "MF_SUPABASE_SIGN_OUT" });
+          cloudAuthCacheValidUntil = 0;
+          lastTickSignature = "";
+          await refreshCloudUser(true);
+          showToast("Signed out.");
+          void tick();
+        } catch (e) {
+          console.error("Notch: sign out", e);
+          showToast("Sign out failed — try again.");
+        }
+      });
+    }
 
     root.querySelector('[data-action="toggle-draw"]').addEventListener("click", () => {
       setDrawModeUi(!state.drawMode);
@@ -2434,11 +2828,7 @@
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
-    if (!root) {
-      root = buildSidebarHtml();
-      mount.appendChild(root);
-      wireSidebar();
-    } else if (root.parentNode !== mount) {
+    if (root && root.parentNode !== mount) {
       mount.appendChild(root);
     }
 
@@ -2487,11 +2877,7 @@
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
-    if (!root) {
-      root = buildSidebarHtml();
-      mount.appendChild(root);
-      wireSidebar();
-    } else if (root.parentNode !== mount) {
+    if (root && root.parentNode !== mount) {
       mount.appendChild(root);
     }
 
@@ -2515,25 +2901,79 @@
     if (changes[STORAGE_KEYS.sidebarVisible]) {
       applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
     }
+    if (
+      changes[STORAGE_KEYS.authState] ||
+      changes[SUPABASE_AUTH_STORAGE_KEY] ||
+      changes[SUPABASE_AUTH_STORAGE_KEY + "-user"]
+    ) {
+      cloudAuthCacheValidUntil = 0;
+      lastTickSignature = "";
+      void refreshCloudUser(true).then(() => void tick());
+    }
     const touched = Object.keys(changes).some(
       (k) => k.startsWith(STORAGE_KEYS.clipPrefix) || k.startsWith(STORAGE_KEYS.dataPrefix)
     );
-    if (touched && root && root.dataset.mfView === "dashboard") {
+    if (touched && root && root.dataset.mfView === "dashboard" && root.dataset.mfLocked !== "1") {
       renderDashboard();
     }
   }
 
-  function tick() {
+  async function tick() {
     const href = location.href;
     const clip = resolveClipContext();
+
+    await refreshCloudUser(false);
+    let supabaseConfigured = false;
+    try {
+      const cfg = await sendExtensionMessage({ type: "MF_SUPABASE_CONFIG" });
+      supabaseConfigured = !!cfg?.configured;
+    } catch {
+      supabaseConfigured = false;
+    }
+    const unlocked = supabaseConfigured && !!state.cloudUser;
+
+    const mount = document.body || document.documentElement;
+    if (!mount) return;
+
+    const sig = unlocked
+      ? !clip
+        ? href + "\0no_clip"
+        : href + "\0" + clip.storageKey + "\0" + (state.dashboardForced ? "dashboard" : "watch")
+      : href + "\0gate\0" + String(supabaseConfigured);
+
+    if (sig === lastTickSignature) return;
+    lastTickSignature = sig;
+
+    if (!root) {
+      root = buildSidebarHtml();
+      mount.appendChild(root);
+      wireSidebar();
+    } else if (root.parentNode !== mount) {
+      mount.appendChild(root);
+    }
+
+    applyCompactRootLayout();
+    updateGateCopy(supabaseConfigured);
+    applyAppShellLocked(!unlocked);
+
+    const visible = await loadSidebarVisible();
+    applySidebarVisibility(visible);
+    root.classList.toggle("mf-collapsed", state.collapsed);
+
+    if (!unlocked) {
+      teardownDriveYoutubeEmbedBridge();
+      teardownCanvas();
+      activeClipStorageKey = null;
+      state.comments = [];
+      state.selectedId = null;
+      state.drawMode = false;
+      return;
+    }
 
     if (!clip) {
       teardownDriveYoutubeEmbedBridge();
       state.dashboardForced = false;
-      const sig = href + "\0no_clip";
-      if (sig === lastTickSignature) return;
-      lastTickSignature = sig;
-      initDashboard();
+      await initDashboard();
       return;
     }
 
@@ -2541,12 +2981,7 @@
       teardownDriveYoutubeEmbedBridge();
     }
 
-    const mode = state.dashboardForced ? "dashboard" : "watch";
-    const sig = href + "\0" + clip.storageKey + "\0" + mode;
-    if (sig === lastTickSignature) return;
-    lastTickSignature = sig;
-
-    initReview(clip);
+    await initReview(clip);
   }
 
   function startUrlWatcher() {
@@ -2554,12 +2989,12 @@
     const check = () => {
       if (location.href !== last) {
         last = location.href;
-        tick();
+        void tick();
       }
     };
     setInterval(check, 800);
     document.addEventListener("yt-navigate-finish", () => {
-      setTimeout(tick, 100);
+      setTimeout(() => void tick(), 100);
     });
   }
 
@@ -2574,7 +3009,7 @@
 
   const mo = new MutationObserver(() => {
     clearTimeout(urlCheckTimer);
-    urlCheckTimer = setTimeout(tick, 300);
+    urlCheckTimer = setTimeout(() => void tick(), 300);
   });
   mo.observe(document.documentElement, { childList: true, subtree: true });
 
@@ -2587,5 +3022,5 @@
   });
 
   startUrlWatcher();
-  tick();
+  void tick();
 })();

@@ -1,0 +1,116 @@
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: system-ui, sans-serif;
+  background: #0f1419;
+  color: #e7ecf1;
+}
+
+.nf-auth {
+  max-width: 22rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem;
+}
+
+h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.nf-lead {
+  margin: 0 0 1.5rem;
+  color: #8b9aab;
+  font-size: 0.9rem;
+}
+
+.nf-banner {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  border-radius: 8px;
+  background: #2d2218;
+  border: 1px solid #5c4028;
+  color: #e8c4a0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.nf-banner code {
+  font-size: 0.8em;
+  color: #ffd4a8;
+}
+
+.nf-label {
+  display: block;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8b9aab;
+  margin-bottom: 0.35rem;
+}
+
+.nf-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 1rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid #2a3441;
+  background: #1a222c;
+  color: #e7ecf1;
+  font-size: 1rem;
+}
+
+.nf-input:focus {
+  outline: none;
+  border-color: #00e5ff;
+  box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.2);
+}
+
+.nf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.nf-btn {
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #2a3441;
+  background: #1a222c;
+  color: #e7ecf1;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.nf-btn:hover {
+  background: #243040;
+}
+
+.nf-btn-primary {
+  background: #00a8bc;
+  border-color: #00c4dc;
+  color: #021014;
+  font-weight: 600;
+}
+
+.nf-btn-primary:hover {
+  background: #00c4dc;
+}
+
+.nf-auth-status {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #8b9aab;
+  min-height: 1.25em;
+}
+
+.nf-auth-status.nf-ok {
+  color: #7dffb3;
+}
+
+.nf-auth-status.nf-err {
+  color: #ff8a8a;
+}

@@ -17,9 +17,10 @@
     }
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
-  "permissions": ["storage", "clipboardWrite"],
+  "permissions": ["storage", "clipboardWrite", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {

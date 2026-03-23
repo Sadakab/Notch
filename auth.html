@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notch — Sign in</title>
+    <link rel="stylesheet" href="auth.css" />
+  </head>
+  <body>
+    <main class="nf-auth">
+      <h1>Notch</h1>
+      <p class="nf-lead">Account for synced reviews</p>
+      <div id="nf-config-warn" class="nf-banner" hidden>
+        Supabase is not configured yet. Add your <strong>anon</strong> key to
+        <code>src/supabase-config.js</code>, run <code>npm run build</code>, and reload this extension in
+        <code>chrome://extensions</code>.
+      </div>
+      <label class="nf-label" for="nf-email">Email</label>
+      <input id="nf-email" class="nf-input" type="email" autocomplete="username" />
+      <label class="nf-label" for="nf-password">Password</label>
+      <input id="nf-password" class="nf-input" type="password" autocomplete="current-password" />
+      <div class="nf-actions">
+        <button type="button" id="nf-sign-in" class="nf-btn nf-btn-primary">Sign in</button>
+        <button type="button" id="nf-sign-up" class="nf-btn">Sign up</button>
+        <button type="button" id="nf-sign-out" class="nf-btn" hidden>Sign out</button>
+      </div>
+      <p id="nf-status" class="nf-auth-status" aria-live="polite"></p>
+    </main>
+    <script src="auth-page.js"></script>
+  </body>
+</html>
