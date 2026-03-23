@@ -445,6 +445,13 @@
   border-bottom: 1px solid var(--mf-border);
 }
 
+#markframe-root .mf-toolbar-draw {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
 #markframe-root .mf-btn {
   background: var(--mf-bg-elevated);
   border: 1px solid var(--mf-border);

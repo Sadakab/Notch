@@ -4,6 +4,8 @@
   if (window !== window.top) return;
 
   const ACCENT = "#00E5FF";
+  /** Set true to show Draw / color / save, overlay canvas, and drawing thumbnails. */
+  const FEATURE_DRAWING = false;
   /** Must match service worker Supabase auth storageKey. */
   const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
@@ -1635,7 +1637,11 @@
 
   function applySidebarVisibility(visible) {
     if (root) root.classList.toggle("mf-hidden", !visible);
-    if (canvasHost && !state.drawMode) canvasHost.style.visibility = visible ? "visible" : "hidden";
+    if (!FEATURE_DRAWING) {
+      if (canvasHost) canvasHost.style.visibility = "hidden";
+    } else if (canvasHost && !state.drawMode) {
+      canvasHost.style.visibility = visible ? "visible" : "hidden";
+    }
   }
 
   /** Tighter panel on small viewports. */
@@ -2102,6 +2108,10 @@
   }
 
   function ensureCanvasOverlay(clip) {
+    if (!FEATURE_DRAWING) {
+      teardownCanvas();
+      return;
+    }
     const parent = clip.getOverlayParent();
     if (!parent) return;
 
@@ -2231,6 +2241,7 @@
   }
 
   function setDrawModeUi(on) {
+    if (on && !FEATURE_DRAWING) return;
     state.drawMode = on;
     if (!canvasHost) return;
     canvasHost.classList.toggle("mf-draw-on", on);
@@ -2255,6 +2266,7 @@
   }
 
   async function saveDrawingToComment() {
+    if (!FEATURE_DRAWING) return;
     const clip = resolveClipContext();
     if (!clip || !canvas || !ctx) return;
     if (!state.hasInk) {
@@ -2378,7 +2390,7 @@
       tsBtn.addEventListener("click", () => {
         state.selectedId = c.id;
         seekTo(c.ts);
-        if (c.drawing) overlayDrawingPreview(c.drawing);
+        if (FEATURE_DRAWING && c.drawing) overlayDrawingPreview(c.drawing);
         renderThread();
       });
 
@@ -2411,7 +2423,7 @@
       el.appendChild(top);
       el.appendChild(text);
 
-      if (c.drawing) {
+      if (FEATURE_DRAWING && c.drawing) {
         const row = document.createElement("div");
         row.className = "mf-drawing-row";
         const img = document.createElement("img");
@@ -2506,9 +2518,11 @@
             <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
           </div>
           <div class="mf-toolbar">
-            <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
-            <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
-            <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
+            <div class="mf-toolbar-draw${FEATURE_DRAWING ? "" : " mf-hidden"}">
+              <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
+              <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
+              <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
+            </div>
             <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
           </div>
           <div class="mf-thread"></div>
