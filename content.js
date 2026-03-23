@@ -54,6 +54,8 @@
   };
   let resizeObs = null;
   let urlCheckTimer = null;
+  /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
+  let lastTickSignature = "";
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
   let canvasMountParent = null;
@@ -2633,16 +2635,28 @@
   }
 
   function tick() {
+    const href = location.href;
     const clip = resolveClipContext();
+
     if (!clip) {
       teardownDriveYoutubeEmbedBridge();
       state.dashboardForced = false;
+      const sig = href + "\0no_clip";
+      if (sig === lastTickSignature) return;
+      lastTickSignature = sig;
       initDashboard();
       return;
     }
+
     if (clip.platform !== "googledrive") {
       teardownDriveYoutubeEmbedBridge();
     }
+
+    const mode = state.dashboardForced ? "dashboard" : "watch";
+    const sig = href + "\0" + clip.storageKey + "\0" + mode;
+    if (sig === lastTickSignature) return;
+    lastTickSignature = sig;
+
     initReview(clip);
   }
 
