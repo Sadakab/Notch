@@ -57,6 +57,8 @@
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
   let canvasMountParent = null;
+  /** Resolves when an in-flight custom video title write finishes (dashboard waits on this). */
+  let mfTitleSaveInFlight = null;
 
   let state = {
     comments: [],
@@ -1335,6 +1337,186 @@
     return a && b && a.platform === b.platform && a.clipId === b.clipId;
   }
 
+  function defaultClipDisplayTitle(clip) {
+    if (!clip?.platform) return "Video";
+    if (clip.platform === "youtube") return "YouTube video";
+    if (clip.platform === "vimeo") return "Vimeo video";
+    if (clip.platform === "loom") return "Loom video";
+    if (clip.platform === "googledrive") return "Google Drive file";
+    if (clip.platform === "dropbox") return "Dropbox file";
+    return "Video";
+  }
+
+  /** Display name from a stored clip record (dashboard, library rows — no live page scrape). */
+  function clipDisplayTitleFromStorage(v, platform) {
+    if (v?.customTitle != null && String(v.customTitle).trim()) {
+      return String(v.customTitle).trim();
+    }
+    if (v?.title != null && String(v.title).trim()) {
+      return String(v.title).trim();
+    }
+    return defaultClipDisplayTitle({ platform });
+  }
+
+  function clipDisplayTitleFromRecord(raw, clip) {
+    if (!clip) return "Video";
+    if (raw?.customTitle != null && String(raw.customTitle).trim()) {
+      return String(raw.customTitle).trim();
+    }
+    let title = "";
+    if (clipsMatch(resolveClipContext(), clip)) {
+      const meta = clip.scrapeMetadata(clip.clipId);
+      if (meta.title && String(meta.title).trim()) title = String(meta.title).trim();
+    }
+    if (!title && raw?.title && String(raw.title).trim()) title = String(raw.title).trim();
+    if (!title) title = defaultClipDisplayTitle(clip);
+    return title;
+  }
+
+  async function refreshWatchVideoTitle(clip) {
+    if (!root || !clip) return;
+    const wrap = root.querySelector(".mf-watch-video-title-wrap");
+    if (wrap?.dataset.mfTitleEditing === "1") return;
+    const el = root.querySelector(".mf-watch-video-title");
+    if (!el) return;
+
+    const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+    const title = clipDisplayTitleFromRecord(raw, clip);
+
+    if (el.textContent === title) {
+      el.setAttribute("title", title + " · Click to rename");
+    } else {
+      el.textContent = title;
+      el.setAttribute("title", title + " · Click to rename");
+    }
+    if (root.dataset.mfView === "watch") {
+      const sub = root.querySelector(".mf-header-sub");
+      if (sub) {
+        sub.textContent = title;
+        sub.classList.add("mf-header-sub-dynamic");
+      }
+    }
+  }
+
+  async function saveWatchVideoCustomTitle(clip, trimmedDisplayName) {
+    const key = clip.storageKey;
+    const { [key]: prev } = await chrome.storage.local.get(key);
+    const customTitle = trimmedDisplayName === "" ? null : trimmedDisplayName.slice(0, 200);
+    const payload = {
+      comments: Array.isArray(prev?.comments)
+        ? prev.comments
+        : Array.isArray(state.comments)
+          ? state.comments
+          : [],
+      updatedAt: Date.now(),
+      title: prev?.title ?? null,
+      thumbnailUrl: prev?.thumbnailUrl ?? null,
+      customTitle,
+      platform: clip.platform,
+      clipId: clip.clipId,
+    };
+    await chrome.storage.local.set({ [key]: payload });
+  }
+
+  async function awaitVideoTitleSaveIfNeeded() {
+    if (mfTitleSaveInFlight) {
+      try {
+        await mfTitleSaveInFlight;
+      } catch (_) {}
+    }
+  }
+
+  /** If the title field is still open (e.g. click reached before blur), commit synchronously. */
+  async function flushActiveVideoTitleEditIfAny() {
+    if (!root) return;
+    const wrap = root.querySelector(".mf-watch-video-title-wrap");
+    const inp = wrap?.querySelector(".mf-watch-video-title-input");
+    if (!inp || wrap.dataset.mfTitleEditing !== "1") return;
+    const clip = resolveClipContext();
+    if (!clip) return;
+    const rawVal = inp.value;
+    wrap.dataset.mfTitleEditing = "";
+    const btn = wrap.querySelector(".mf-watch-video-title");
+    inp.remove();
+    if (btn) btn.hidden = false;
+    const p = saveWatchVideoCustomTitle(clip, String(rawVal).trim()).finally(() => {
+      if (mfTitleSaveInFlight === p) mfTitleSaveInFlight = null;
+    });
+    mfTitleSaveInFlight = p;
+    try {
+      await p;
+    } catch (_) {}
+    await refreshWatchVideoTitle(clip);
+  }
+
+  function wireWatchVideoTitle() {
+    const wrap = root.querySelector(".mf-watch-video-title-wrap");
+    if (!wrap || wrap.dataset.mfWatchTitleWired === "1") return;
+    wrap.dataset.mfWatchTitleWired = "1";
+
+    wrap.addEventListener("click", (e) => {
+      const btn = e.target.closest(".mf-watch-video-title");
+      if (!btn || wrap.querySelector(".mf-watch-video-title-input")) return;
+      const clip = resolveClipContext();
+      if (!clip) return;
+      e.preventDefault();
+      wrap.dataset.mfTitleEditing = "1";
+      btn.hidden = true;
+
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.className = "mf-watch-video-title-input";
+      inp.maxLength = 200;
+      inp.value = btn.textContent;
+      inp.setAttribute("aria-label", "Edit video name");
+      wrap.appendChild(inp);
+      inp.focus();
+      inp.select();
+
+      let finished = false;
+      let ignoreBlur = false;
+
+      const finish = (save) => {
+        if (finished) return;
+        finished = true;
+        wrap.dataset.mfTitleEditing = "";
+        const rawVal = inp.value;
+        inp.remove();
+        btn.hidden = false;
+        if (save) {
+          const p = saveWatchVideoCustomTitle(clip, String(rawVal).trim()).finally(() => {
+            if (mfTitleSaveInFlight === p) mfTitleSaveInFlight = null;
+          });
+          mfTitleSaveInFlight = p;
+        }
+        void (async () => {
+          try {
+            if (save) await mfTitleSaveInFlight;
+            await refreshWatchVideoTitle(clip);
+          } catch (err) {
+            console.warn("Notch: video title update failed", err);
+          }
+        })();
+      };
+
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          finish(true);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          ignoreBlur = true;
+          finish(false);
+        }
+      });
+
+      inp.addEventListener("blur", () => {
+        if (ignoreBlur) return;
+        finish(true);
+      });
+    });
+  }
+
   function formatTime(sec) {
     if (!Number.isFinite(sec) || sec < 0) sec = 0;
     const s = Math.floor(sec % 60);
@@ -1434,11 +1616,17 @@
       if (o) thumbnailUrl = o;
     }
 
+    let customTitle = null;
+    if (prev?.customTitle != null && String(prev.customTitle).trim()) {
+      customTitle = String(prev.customTitle).trim();
+    }
+
     const payload = {
       comments: state.comments,
       updatedAt: Date.now(),
       title,
       thumbnailUrl,
+      customTitle,
       platform: clip.platform,
       clipId: clip.clipId,
     };
@@ -1580,24 +1768,11 @@
         openUrl = "";
       }
 
-      const titleDefault =
-        platform === "youtube"
-          ? "YouTube video"
-          : platform === "vimeo"
-            ? "Vimeo video"
-            : platform === "loom"
-              ? "Loom video"
-              : platform === "googledrive"
-                ? "Google Drive file"
-                : platform === "dropbox"
-                  ? "Dropbox file"
-                  : "Video";
-
       out.push({
         storageKey: k,
         platform,
         clipId,
-        title: v.title || titleDefault,
+        title: clipDisplayTitleFromStorage(v, platform),
         thumbnailUrl: thumb || defaultThumbForPlatform(platform, clipId) || "",
         commentCount: v.comments.length,
         updatedAt: v.updatedAt || 0,
@@ -1616,6 +1791,7 @@
         const rec = got[sk];
         if (rec && !rec.thumbnailUrl) {
           await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+          row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
         }
       } else if (row.platform === "loom") {
         const o = await fetchLoomThumbFromBackground(row.clipId);
@@ -1626,6 +1802,7 @@
         const rec = got[sk];
         if (rec && !rec.thumbnailUrl) {
           await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+          row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
         }
       } else if (row.platform === "googledrive") {
         const cur = resolveClipContext();
@@ -1638,6 +1815,7 @@
           const rec = got[sk];
           if (rec && !rec.thumbnailUrl) {
             await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
+            row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
           }
         }
       }
@@ -2086,6 +2264,9 @@
         </div>
       </div>
       <div class="mf-watch-pane">
+        <div class="mf-watch-video-title-wrap">
+          <button type="button" class="mf-watch-video-title" aria-label="Video title, click to rename"></button>
+        </div>
         <div class="mf-author-row">
           <label for="mf-author">Name</label>
           <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
@@ -2123,7 +2304,12 @@
     if (watchPane) watchPane.classList.toggle("mf-hidden", mode !== "watch");
     if (dashPane) dashPane.classList.toggle("mf-hidden", mode !== "dashboard");
     if (sub) {
-      sub.textContent = mode === "dashboard" ? "Your reviews" : "This video";
+      sub.classList.remove("mf-header-sub-dynamic");
+      if (mode === "dashboard") {
+        sub.textContent = "Your reviews";
+      } else {
+        sub.textContent = "";
+      }
     }
   }
 
@@ -2163,6 +2349,7 @@
       const card = document.createElement("button");
       card.type = "button";
       card.className = "mf-dash-card";
+      card.title = item.title;
       const thumb = document.createElement("img");
       thumb.className = "mf-dash-thumb";
       thumb.src = item.thumbnailUrl;
@@ -2230,7 +2417,9 @@
   }
 
   function wireSidebar() {
-    root.querySelector('[data-action="go-dashboard"]').addEventListener("click", () => {
+    root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
+      await awaitVideoTitleSaveIfNeeded();
+      await flushActiveVideoTitleEditIfAny();
       state.dashboardForced = true;
       setDrawModeUi(false);
       tick();
@@ -2281,6 +2470,8 @@
         addComment(v);
       }
     });
+
+    wireWatchVideoTitle();
   }
 
   async function copyReviewLink() {
@@ -2389,6 +2580,7 @@
       await tryImportFromUrl(clip);
     }
     await mergeClipMetadata(clip);
+    await refreshWatchVideoTitle(clip);
 
     const visible = await loadSidebarVisible();
     applySidebarVisibility(visible);
