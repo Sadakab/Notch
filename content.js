@@ -12,7 +12,7 @@
     clipPrefix: "markframe_clip_",
   };
 
-  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive"];
+  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
 
   function clipStorageKey(platform, clipId) {
     return STORAGE_KEYS.clipPrefix + platform + "_" + encodeURIComponent(clipId);
@@ -1100,12 +1100,234 @@
     };
   }
 
+  function isDropboxSiteHostname(hostname) {
+    const h = hostname || "";
+    return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
+  }
+
+  function isDropboxSite() {
+    return isDropboxSiteHostname(location.hostname);
+  }
+
+  /** Shared file preview paths (video or other); we only attach when a usable <video> exists. */
+  function isDropboxShareViewerPath(pathname) {
+    if (!pathname || typeof pathname !== "string") return false;
+    if (/^\/s\/[^/]+\/.+/i.test(pathname)) return true;
+    if (/^\/scl\/fi\/[^/]+\/.+/i.test(pathname)) return true;
+    // Shared-folder file links, e.g. /scl/fo/<folderToken>/<fileToken>/name.mov
+    if (/^\/scl\/fo\/[^/]+\/[^/]+\/.+/i.test(pathname)) return true;
+    return false;
+  }
+
+  function normalizeDropboxClipPath(pathname, searchParams) {
+    if (!pathname || !searchParams) return null;
+    const keys = [...new Set([...searchParams.keys()])].sort();
+    const pairs = [];
+    for (const k of keys) {
+      const v = searchParams.get(k);
+      if (v != null && v !== "") pairs.push(k + "=" + encodeURIComponent(v));
+    }
+    const q = pairs.length ? "?" + pairs.join("&") : "";
+    return pathname + q;
+  }
+
+  function parseDropboxClipIdFromUrlString(href) {
+    if (!href || typeof href !== "string") return null;
+    try {
+      const u = new URL(href, location.href);
+      if (!isDropboxSiteHostname(u.hostname)) return null;
+      if (!isDropboxShareViewerPath(u.pathname)) return null;
+      return normalizeDropboxClipPath(u.pathname, u.searchParams);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseDropboxClipIdFromUrl() {
+    try {
+      const u = new URL(location.href);
+      if (!isDropboxSiteHostname(u.hostname)) return null;
+      if (!isDropboxShareViewerPath(u.pathname)) return null;
+      return normalizeDropboxClipPath(u.pathname, u.searchParams);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function parseDropboxClipIdFromDom() {
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    let id = parseDropboxClipIdFromUrlString(ogUrl);
+    if (id) return id;
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    return parseDropboxClipIdFromUrlString(canonical);
+  }
+
+  function parseDropboxClipId() {
+    return parseDropboxClipIdFromUrl() || parseDropboxClipIdFromDom();
+  }
+
+  function isDropboxClipHost() {
+    if (!isDropboxSite()) return false;
+    return !!parseDropboxClipId();
+  }
+
+  function dropboxClipPathInUrl(urlStr, expectedPath) {
+    if (!urlStr || !expectedPath) return false;
+    const parsed = parseDropboxClipIdFromUrlString(urlStr);
+    return parsed === expectedPath;
+  }
+
+  function scrapeDropboxPageMetadata(expectedPath) {
+    if (!expectedPath) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.getAttribute("content");
+    const canonical = document.querySelector('link[rel="canonical"]')?.getAttribute("href");
+    let trusted = false;
+    for (const raw of [ogUrl, canonical]) {
+      if (raw && dropboxClipPathInUrl(raw, expectedPath)) {
+        trusted = true;
+        break;
+      }
+    }
+    if (!trusted) {
+      try {
+        const u = new URL(location.href);
+        if (isDropboxSiteHostname(u.hostname) && normalizeDropboxClipPath(u.pathname, u.searchParams) === expectedPath) {
+          trusted = true;
+        }
+      } catch (_) {}
+    }
+    if (!trusted && parseDropboxClipIdFromUrl() === expectedPath) trusted = true;
+    if (!trusted && parseDropboxClipIdFromDom() === expectedPath) trusted = true;
+    if (!trusted) {
+      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
+    }
+    const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
+    const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
+    let title = (ogTitle || document.title || "").trim();
+    title = title.replace(/\s*[-–—]\s*Dropbox\s*$/i, "").trim();
+    let thumbnailUrl = null;
+    if (ogImage && /^https?:/i.test(ogImage)) {
+      thumbnailUrl = ogImage;
+    }
+    if (!thumbnailUrl) {
+      const v = findDropboxNativeVideo();
+      const poster = v?.getAttribute?.("poster");
+      if (poster && /^https?:/i.test(poster)) thumbnailUrl = poster;
+    }
+    return {
+      title: title || null,
+      thumbnailUrl,
+      trusted: true,
+      staleThumb: false,
+    };
+  }
+
+  function dropboxVideoIsUsable(v) {
+    if (!v || v.tagName !== "VIDEO" || v.closest("#markframe-root")) return false;
+    const r = v.getBoundingClientRect();
+    const inFvsdk =
+      !!v.closest("#fvsdk-container") ||
+      !!v.closest('[data-testid="fvsdk_preview_audio_video"]') ||
+      !!v.closest("[data-vjs-player]");
+    const min = inFvsdk ? 2 : 8;
+    return r.width >= min && r.height >= min;
+  }
+
+  function findDropboxNativeVideo() {
+    const selectors = [
+      "#fvsdk-container video",
+      '[data-testid="fvsdk_preview_audio_video"] video',
+      "[data-vjs-player] video",
+      "[data-testid='preview-video'] video",
+      ".mc-video-player video",
+      "main video",
+      "video",
+    ];
+    for (const sel of selectors) {
+      const v = document.querySelector(sel);
+      if (dropboxVideoIsUsable(v)) return v;
+    }
+    const videos = [...document.querySelectorAll("video")].filter(dropboxVideoIsUsable);
+    let best = null;
+    let bestArea = 0;
+    const vpH = window.innerHeight;
+    const vpW = window.innerWidth;
+    for (const v of videos) {
+      const r = v.getBoundingClientRect();
+      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
+      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
+      const area = w * h;
+      if (area >= 400 && area > bestArea) {
+        bestArea = area;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  function buildDropboxOpenUrl(clipPath) {
+    if (!clipPath || typeof clipPath !== "string" || !clipPath.startsWith("/")) {
+      return "https://www.dropbox.com/";
+    }
+    try {
+      const qIdx = clipPath.indexOf("?");
+      const pathOnly = qIdx === -1 ? clipPath : clipPath.slice(0, qIdx);
+      const search = qIdx === -1 ? "" : clipPath.slice(qIdx);
+      const segments = pathOnly
+        .split("/")
+        .filter(Boolean)
+        .map((seg) => encodeURIComponent(decodeURIComponent(seg)));
+      return "https://www.dropbox.com/" + segments.join("/") + search;
+    } catch (_) {
+      return "https://www.dropbox.com/";
+    }
+  }
+
+  function getDropboxVideoElementForClip() {
+    return findDropboxNativeVideo();
+  }
+
+  function getDropboxOverlayParentForClip() {
+    const v = findDropboxNativeVideo();
+    if (!v) return null;
+    return (
+      v.closest("#fvsdk-container") ||
+      v.closest('[data-testid="fvsdk_preview_audio_video"]') ||
+      v.closest("[data-vjs-player]") ||
+      v.closest("[data-testid='preview-video']") ||
+      v.closest(".mc-video-player") ||
+      v.closest("main") ||
+      v.closest("[role='main']") ||
+      v.parentElement
+    );
+  }
+
+  function resolveDropboxClip() {
+    if (!isDropboxClipHost()) return null;
+    const clipPath = parseDropboxClipId();
+    if (!clipPath) return null;
+    if (!findDropboxNativeVideo()) return null;
+    const storageKey = clipStorageKey("dropbox", clipPath);
+    return {
+      platform: "dropbox",
+      clipId: clipPath,
+      storageKey,
+      openUrl: () => buildDropboxOpenUrl(clipPath),
+      getVideoElement: getDropboxVideoElementForClip,
+      getOverlayParent: getDropboxOverlayParentForClip,
+      scrapeMetadata: (clipId) => scrapeDropboxPageMetadata(clipId),
+    };
+  }
+
   function resolveClipContext() {
     return (
       resolveYoutubeClip() ||
       resolveVimeoClip() ||
       resolveLoomClip() ||
-      resolveGoogleDriveClip()
+      resolveGoogleDriveClip() ||
+      resolveDropboxClip()
     );
   }
 
@@ -1271,6 +1493,7 @@
     if (platform === "vimeo") return defaultVimeoThumbnail(clipId);
     if (platform === "loom") return defaultLoomThumbnail(clipId);
     if (platform === "googledrive") return defaultGoogleDriveThumbnail(clipId);
+    if (platform === "dropbox") return "";
     return "";
   }
 
@@ -1351,6 +1574,8 @@
         openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
       } else if (platform === "googledrive") {
         openUrl = "https://drive.google.com/file/d/" + encodeURIComponent(clipId) + "/view";
+      } else if (platform === "dropbox") {
+        openUrl = buildDropboxOpenUrl(clipId);
       } else {
         openUrl = "";
       }
@@ -1364,7 +1589,9 @@
               ? "Loom video"
               : platform === "googledrive"
                 ? "Google Drive file"
-                : "Video";
+                : platform === "dropbox"
+                  ? "Dropbox file"
+                  : "Video";
 
       out.push({
         storageKey: k,
@@ -1910,7 +2137,7 @@
     root.dataset.mfOffYoutube = off ? "1" : "";
     if (off) {
       ban.textContent =
-        "No supported video on this page. Open YouTube, Vimeo, Loom, or a Google Drive file—or pick a saved review below.";
+        "No supported video on this page. Open YouTube, Vimeo, Loom, a Google Drive file, or a Dropbox preview—or pick a saved review below.";
     }
   }
 
@@ -1925,7 +2152,7 @@
       const empty = document.createElement("div");
       empty.className = "mf-dashboard-empty";
       empty.textContent =
-        "No reviews yet. Open a YouTube, Vimeo, Loom, or Google Drive video and add a note.";
+        "No reviews yet. Open a YouTube, Vimeo, Loom, Google Drive, or Dropbox video and add a note.";
       listEl.appendChild(empty);
       return;
     }

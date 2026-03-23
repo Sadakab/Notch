@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Notch",
   "version": "0.3.0",
-  "description": "Frame.io-style video review for YouTube, Vimeo, Loom, and Google Drive — browse saved reviews anywhere; comment and draw on supported players.",
+  "description": "Frame.io-style video review for YouTube, Vimeo, Loom, Google Drive, and Dropbox — browse saved reviews anywhere; comment and draw on supported players.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
