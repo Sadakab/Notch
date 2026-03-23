@@ -1592,13 +1592,6 @@
       el.textContent = title;
     }
     el.setAttribute("title", title);
-    if (root.dataset.mfView === "watch") {
-      const sub = root.querySelector(".mf-header-sub");
-      if (sub) {
-        sub.textContent = title;
-        sub.classList.add("mf-header-sub-dynamic");
-      }
-    }
   }
 
   function formatTime(sec) {
@@ -2368,7 +2361,7 @@
     if (!state.comments.length) {
       const empty = document.createElement("div");
       empty.className = "mf-empty";
-      empty.textContent = "No comments yet. Pause, type, and press Enter to capture this frame.";
+      empty.textContent = "No comments yet.";
       thread.appendChild(empty);
       return;
     }
@@ -2559,7 +2552,6 @@
     if (watchPane) watchPane.classList.toggle("mf-hidden", mode !== "watch");
     if (dashPane) dashPane.classList.toggle("mf-hidden", mode !== "dashboard");
     if (sub) {
-      sub.classList.remove("mf-header-sub-dynamic");
       if (mode === "dashboard") {
         sub.textContent = "Your reviews";
       } else {
