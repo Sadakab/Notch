@@ -63,8 +63,7 @@
   padding: 6px 8px 4px;
 }
 
-#markframe-root[data-mf-compact="1"] .mf-watch-video-title,
-#markframe-root[data-mf-compact="1"] .mf-watch-video-title-input {
+#markframe-root[data-mf-compact="1"] .mf-watch-video-title {
   font-size: 11px;
 }
 
@@ -254,50 +253,12 @@
   max-height: 3.2em;
   margin: 0;
   padding: 0;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
   font: inherit;
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--mf-text);
   text-align: left;
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-#markframe-root .mf-watch-video-title:hover {
-  color: var(--mf-accent);
-  background: var(--mf-accent-dim);
-}
-
-#markframe-root .mf-watch-video-title:focus {
-  outline: none;
-  box-shadow: 0 0 0 2px var(--mf-accent-dim);
-  color: var(--mf-accent);
-}
-
-#markframe-root .mf-watch-video-title-input {
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0;
-  padding: 6px 8px;
-  border: 1px solid var(--mf-border);
-  border-radius: 6px;
-  background: var(--mf-bg);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.35;
-  color: var(--mf-text);
-}
-
-#markframe-root .mf-watch-video-title-input:focus {
-  outline: none;
-  border-color: var(--mf-accent);
-  box-shadow: 0 0 0 2px var(--mf-accent-dim);
 }
 
 #markframe-root .mf-dashboard-pane {

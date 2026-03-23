@@ -59,8 +59,6 @@
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
   let canvasMountParent = null;
-  /** Resolves when an in-flight custom video title write finishes (dashboard waits on this). */
-  let mfTitleSaveInFlight = null;
 
   let state = {
     comments: [],
@@ -1170,6 +1168,29 @@
     return parseDropboxClipIdFromUrl() || parseDropboxClipIdFromDom();
   }
 
+  /** Normalize a stored or parsed Dropbox path+query for comparison (handles encoding variants). */
+  function normalizeDropboxClipKey(clipIdStr) {
+    if (!clipIdStr || typeof clipIdStr !== "string") return null;
+    try {
+      const pathAndQuery = clipIdStr.startsWith("/")
+        ? clipIdStr
+        : "/" + clipIdStr.replace(/^\/+/, "");
+      const u = new URL("https://www.dropbox.com" + pathAndQuery);
+      if (!isDropboxShareViewerPath(u.pathname)) return null;
+      return normalizeDropboxClipPath(u.pathname, u.searchParams);
+    } catch {
+      return null;
+    }
+  }
+
+  function dropboxClipIdsEquivalent(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const na = normalizeDropboxClipKey(a);
+    const nb = normalizeDropboxClipKey(b);
+    return Boolean(na && nb && na === nb);
+  }
+
   function isDropboxClipHost() {
     if (!isDropboxSite()) return false;
     return !!parseDropboxClipId();
@@ -1351,9 +1372,6 @@
 
   /** Display name from a stored clip record (dashboard, library rows — no live page scrape). */
   function clipDisplayTitleFromStorage(v, platform) {
-    if (v?.customTitle != null && String(v.customTitle).trim()) {
-      return String(v.customTitle).trim();
-    }
     if (v?.title != null && String(v.title).trim()) {
       return String(v.title).trim();
     }
@@ -1362,9 +1380,6 @@
 
   function clipDisplayTitleFromRecord(raw, clip) {
     if (!clip) return "Video";
-    if (raw?.customTitle != null && String(raw.customTitle).trim()) {
-      return String(raw.customTitle).trim();
-    }
     let title = "";
     if (clipsMatch(resolveClipContext(), clip)) {
       const meta = clip.scrapeMetadata(clip.clipId);
@@ -1377,20 +1392,16 @@
 
   async function refreshWatchVideoTitle(clip) {
     if (!root || !clip) return;
-    const wrap = root.querySelector(".mf-watch-video-title-wrap");
-    if (wrap?.dataset.mfTitleEditing === "1") return;
     const el = root.querySelector(".mf-watch-video-title");
     if (!el) return;
 
     const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
     const title = clipDisplayTitleFromRecord(raw, clip);
 
-    if (el.textContent === title) {
-      el.setAttribute("title", title + " · Click to rename");
-    } else {
+    if (el.textContent !== title) {
       el.textContent = title;
-      el.setAttribute("title", title + " · Click to rename");
     }
+    el.setAttribute("title", title);
     if (root.dataset.mfView === "watch") {
       const sub = root.querySelector(".mf-header-sub");
       if (sub) {
@@ -1398,125 +1409,6 @@
         sub.classList.add("mf-header-sub-dynamic");
       }
     }
-  }
-
-  async function saveWatchVideoCustomTitle(clip, trimmedDisplayName) {
-    const key = clip.storageKey;
-    const { [key]: prev } = await chrome.storage.local.get(key);
-    const customTitle = trimmedDisplayName === "" ? null : trimmedDisplayName.slice(0, 200);
-    const payload = {
-      comments: Array.isArray(prev?.comments)
-        ? prev.comments
-        : Array.isArray(state.comments)
-          ? state.comments
-          : [],
-      updatedAt: Date.now(),
-      title: prev?.title ?? null,
-      thumbnailUrl: prev?.thumbnailUrl ?? null,
-      customTitle,
-      platform: clip.platform,
-      clipId: clip.clipId,
-    };
-    await chrome.storage.local.set({ [key]: payload });
-  }
-
-  async function awaitVideoTitleSaveIfNeeded() {
-    if (mfTitleSaveInFlight) {
-      try {
-        await mfTitleSaveInFlight;
-      } catch (_) {}
-    }
-  }
-
-  /** If the title field is still open (e.g. click reached before blur), commit synchronously. */
-  async function flushActiveVideoTitleEditIfAny() {
-    if (!root) return;
-    const wrap = root.querySelector(".mf-watch-video-title-wrap");
-    const inp = wrap?.querySelector(".mf-watch-video-title-input");
-    if (!inp || wrap.dataset.mfTitleEditing !== "1") return;
-    const clip = resolveClipContext();
-    if (!clip) return;
-    const rawVal = inp.value;
-    wrap.dataset.mfTitleEditing = "";
-    const btn = wrap.querySelector(".mf-watch-video-title");
-    inp.remove();
-    if (btn) btn.hidden = false;
-    const p = saveWatchVideoCustomTitle(clip, String(rawVal).trim()).finally(() => {
-      if (mfTitleSaveInFlight === p) mfTitleSaveInFlight = null;
-    });
-    mfTitleSaveInFlight = p;
-    try {
-      await p;
-    } catch (_) {}
-    await refreshWatchVideoTitle(clip);
-  }
-
-  function wireWatchVideoTitle() {
-    const wrap = root.querySelector(".mf-watch-video-title-wrap");
-    if (!wrap || wrap.dataset.mfWatchTitleWired === "1") return;
-    wrap.dataset.mfWatchTitleWired = "1";
-
-    wrap.addEventListener("click", (e) => {
-      const btn = e.target.closest(".mf-watch-video-title");
-      if (!btn || wrap.querySelector(".mf-watch-video-title-input")) return;
-      const clip = resolveClipContext();
-      if (!clip) return;
-      e.preventDefault();
-      wrap.dataset.mfTitleEditing = "1";
-      btn.hidden = true;
-
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.className = "mf-watch-video-title-input";
-      inp.maxLength = 200;
-      inp.value = btn.textContent;
-      inp.setAttribute("aria-label", "Edit video name");
-      wrap.appendChild(inp);
-      inp.focus();
-      inp.select();
-
-      let finished = false;
-      let ignoreBlur = false;
-
-      const finish = (save) => {
-        if (finished) return;
-        finished = true;
-        wrap.dataset.mfTitleEditing = "";
-        const rawVal = inp.value;
-        inp.remove();
-        btn.hidden = false;
-        if (save) {
-          const p = saveWatchVideoCustomTitle(clip, String(rawVal).trim()).finally(() => {
-            if (mfTitleSaveInFlight === p) mfTitleSaveInFlight = null;
-          });
-          mfTitleSaveInFlight = p;
-        }
-        void (async () => {
-          try {
-            if (save) await mfTitleSaveInFlight;
-            await refreshWatchVideoTitle(clip);
-          } catch (err) {
-            console.warn("Notch: video title update failed", err);
-          }
-        })();
-      };
-
-      inp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          finish(true);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          ignoreBlur = true;
-          finish(false);
-        }
-      });
-
-      inp.addEventListener("blur", () => {
-        if (ignoreBlur) return;
-        finish(true);
-      });
-    });
   }
 
   function formatTime(sec) {
@@ -1618,17 +1510,11 @@
       if (o) thumbnailUrl = o;
     }
 
-    let customTitle = null;
-    if (prev?.customTitle != null && String(prev.customTitle).trim()) {
-      customTitle = String(prev.customTitle).trim();
-    }
-
     const payload = {
       comments: state.comments,
       updatedAt: Date.now(),
       title,
       thumbnailUrl,
-      customTitle,
       platform: clip.platform,
       clipId: clip.clipId,
     };
@@ -1660,13 +1546,9 @@
       if (o) nextThumb = o;
     }
     if (nextTitle === prev.title && nextThumb === prev.thumbnailUrl) return;
-    await chrome.storage.local.set({
-      [key]: {
-        ...prev,
-        title: nextTitle,
-        thumbnailUrl: nextThumb,
-      },
-    });
+    const next = { ...prev, title: nextTitle, thumbnailUrl: nextThumb };
+    delete next.customTitle;
+    await chrome.storage.local.set({ [key]: next });
   }
 
   function defaultLoomThumbnail(_loomId) {
@@ -2267,7 +2149,7 @@
       </div>
       <div class="mf-watch-pane">
         <div class="mf-watch-video-title-wrap">
-          <button type="button" class="mf-watch-video-title" aria-label="Video title, click to rename"></button>
+          <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
         </div>
         <div class="mf-author-row">
           <label for="mf-author">Name</label>
@@ -2376,7 +2258,18 @@
       card.addEventListener("click", () => {
         state.dashboardForced = false;
         const cur = resolveClipContext();
-        if (cur && cur.platform === item.platform && cur.clipId === item.clipId) {
+        let sameClip = cur && cur.platform === item.platform && cur.clipId === item.clipId;
+        if (
+          !sameClip &&
+          item.platform === "dropbox" &&
+          isDropboxSite()
+        ) {
+          const dropId = parseDropboxClipId();
+          if (dropId && dropboxClipIdsEquivalent(item.clipId, dropId)) {
+            sameClip = true;
+          }
+        }
+        if (sameClip) {
           setDrawModeUi(false);
           tick();
           return;
@@ -2420,8 +2313,6 @@
 
   function wireSidebar() {
     root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
-      await awaitVideoTitleSaveIfNeeded();
-      await flushActiveVideoTitleEditIfAny();
       state.dashboardForced = true;
       setDrawModeUi(false);
       tick();
@@ -2472,8 +2363,6 @@
         addComment(v);
       }
     });
-
-    wireWatchVideoTitle();
   }
 
   async function copyReviewLink() {
