@@ -12,7 +12,7 @@
     clipPrefix: "markframe_clip_",
   };
 
-  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "generic"];
+  const CLIP_PLATFORMS = ["youtube", "vimeo", "loom"];
 
   function clipStorageKey(platform, clipId) {
     return STORAGE_KEYS.clipPrefix + platform + "_" + encodeURIComponent(clipId);
@@ -60,10 +60,6 @@
     hasInk: false,
     /** True while a clip is active but user chose "All reviews" (no navigation). */
     dashboardForced: false,
-    /** Next click on a <video> binds generic review (capture phase). */
-    pickVideoMode: false,
-    /** Fingerprint from genericClipFingerprint for bound generic video. */
-    genericPickedFingerprint: null,
   };
 
   function isYoutubeSite() {
@@ -144,12 +140,6 @@
     return "";
   }
 
-  function simpleHash(str) {
-    let h = 0;
-    for (let i = 0; i < str.length; i++) h = Math.imul(31, h) + str.charCodeAt(i) | 0;
-    return Math.abs(h).toString(36);
-  }
-
   function isVimeoSite() {
     const h = location.hostname;
     return h === "vimeo.com" || h === "www.vimeo.com";
@@ -168,7 +158,7 @@
     return h === "loom.com" || h === "www.loom.com" || /\.loom\.com$/i.test(h);
   }
 
-  /** Loom share/embed pages only; other loom.com paths skip so generic or dashboard-off behavior applies. */
+  /** Loom share/embed pages only; other loom.com paths skip so no clip is resolved on those URLs. */
   function isLoomClipHost() {
     if (!isLoomSite()) return false;
     try {
@@ -484,61 +474,6 @@
     return el.parentElement;
   }
 
-  function findLargestVisibleVideo() {
-    const videos = [...document.querySelectorAll("video")];
-    let best = null;
-    let bestArea = 0;
-    const vpH = window.innerHeight;
-    const vpW = window.innerWidth;
-    const minArea = 4000;
-    for (const v of videos) {
-      const r = v.getBoundingClientRect();
-      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
-      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
-      const area = w * h;
-      if (area >= minArea && area > bestArea) {
-        bestArea = area;
-        best = v;
-      }
-    }
-    return best;
-  }
-
-  function genericClipFingerprint(video) {
-    const page = location.origin + location.pathname;
-    const src = video.currentSrc || video.src || "";
-    if (/^https?:\/\//i.test(src)) {
-      return simpleHash(page + "|" + src);
-    }
-    const all = [...document.querySelectorAll("video")];
-    const idx = all.indexOf(video);
-    return simpleHash(page + "|idx" + Math.max(0, idx));
-  }
-
-  function getGenericOverlayParent(video) {
-    const parent = video.parentElement;
-    if (parent) {
-      const cs = getComputedStyle(parent);
-      if (cs.position === "static") {
-        parent.style.position = "relative";
-      }
-      return parent;
-    }
-    return video;
-  }
-
-  function scrapeGenericMetadata(video) {
-    const poster = video.getAttribute("poster");
-    const thumb = poster && /^https?:/i.test(poster) ? poster : null;
-    let title = (document.title || "").trim() || null;
-    return {
-      title,
-      thumbnailUrl: thumb,
-      trusted: true,
-      staleThumb: false,
-    };
-  }
-
   function resolveYoutubeClip() {
     if (!isYoutubeSite()) return null;
     const v = parseYoutubeVideoId();
@@ -727,40 +662,8 @@
     };
   }
 
-  function resolveGenericClip() {
-    if (location.protocol !== "http:" && location.protocol !== "https:") return null;
-    if (isYoutubeSite() || isVimeoClipHost() || isLoomClipHost()) return null;
-
-    let video = null;
-    if (state.genericPickedFingerprint) {
-      for (const v of document.querySelectorAll("video")) {
-        if (genericClipFingerprint(v) === state.genericPickedFingerprint) {
-          video = v;
-          break;
-        }
-      }
-      if (!video) state.genericPickedFingerprint = null;
-    }
-    if (!video) {
-      video = findLargestVisibleVideo();
-    }
-    if (!video) return null;
-
-    const clipId = genericClipFingerprint(video);
-    const storageKey = clipStorageKey("generic", clipId);
-    return {
-      platform: "generic",
-      clipId,
-      storageKey,
-      openUrl: () => location.href.split("#")[0],
-      getVideoElement: () => video,
-      getOverlayParent: () => getGenericOverlayParent(video),
-      scrapeMetadata: () => scrapeGenericMetadata(video),
-    };
-  }
-
   function resolveClipContext() {
-    return resolveYoutubeClip() || resolveVimeoClip() || resolveLoomClip() || resolveGenericClip();
+    return resolveYoutubeClip() || resolveVimeoClip() || resolveLoomClip();
   }
 
   function clipsMatch(a, b) {
@@ -869,7 +772,6 @@
       thumbnailUrl,
       platform: clip.platform,
       clipId: clip.clipId,
-      ...(clip.platform === "generic" ? { pageUrl: clip.openUrl() } : {}),
     };
     await chrome.storage.local.set({ [key]: payload });
   }
@@ -975,6 +877,7 @@
       }
 
       if (!clipId) continue;
+      if (platform !== "youtube" && platform !== "vimeo" && platform !== "loom") continue;
 
       let thumb = v.thumbnailUrl || null;
       if (platform === "youtube") {
@@ -987,10 +890,8 @@
         openUrl = "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
       } else if (platform === "vimeo") {
         openUrl = "https://vimeo.com/" + encodeURIComponent(clipId);
-      } else if (platform === "loom") {
-        openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
       } else {
-        openUrl = v.pageUrl || "";
+        openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
       }
 
       const titleDefault =
@@ -998,9 +899,7 @@
           ? "YouTube video"
           : platform === "vimeo"
             ? "Vimeo video"
-            : platform === "loom"
-              ? "Loom video"
-              : "Video";
+            : "Loom video";
 
       out.push({
         storageKey: k,
@@ -1487,9 +1386,6 @@
           <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
         </div>
         <div class="mf-toolbar">
-          <button type="button" class="mf-btn mf-pick-video mf-hidden" data-action="pick-video" title="Click, then click a video on the page">
-            Pick video
-          </button>
           <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
           <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
           <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
@@ -1536,7 +1432,7 @@
     root.dataset.mfOffYoutube = off ? "1" : "";
     if (off) {
       ban.textContent =
-        "No video detected on this page. Use YouTube, Vimeo, Loom, or a page with an HTML5 video—or open a saved item below.";
+        "No supported video on this page. Open YouTube, Vimeo, or Loom—or pick a saved review below.";
     }
   }
 
@@ -1551,7 +1447,7 @@
       const empty = document.createElement("div");
       empty.className = "mf-dashboard-empty";
       empty.textContent =
-        "No reviews yet. Open a supported video (YouTube, Vimeo, Loom, or a page with HTML5 video) and add a note.";
+        "No reviews yet. Open a YouTube, Vimeo, or Loom video and add a note.";
       listEl.appendChild(empty);
       return;
     }
@@ -1670,18 +1566,6 @@
       copyReviewLink();
     });
 
-    const pickBtn = root.querySelector('[data-action="pick-video"]');
-    if (pickBtn) {
-      pickBtn.addEventListener("click", () => {
-        if (state.pickVideoMode) {
-          setPickVideoMode(false);
-        } else {
-          setPickVideoMode(true);
-          showToast("Click a video on the page.");
-        }
-      });
-    }
-
     const commentInp = root.querySelector(".mf-comment-input");
     commentInp.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -1759,41 +1643,6 @@
     }
   }
 
-  function refreshPickVideoUi() {
-    if (!root) return;
-    const btn = root.querySelector('[data-action="pick-video"]');
-    if (!btn) return;
-    const show = !isYoutubeSite() && !isVimeoClipHost() && !isLoomClipHost();
-    btn.classList.toggle("mf-hidden", !show);
-    btn.classList.toggle("mf-active", state.pickVideoMode);
-  }
-
-  let pickVideoPointerHandler = null;
-
-  function setPickVideoMode(on) {
-    state.pickVideoMode = !!on;
-    if (on) {
-      pickVideoPointerHandler = (e) => {
-        if (!state.pickVideoMode) return;
-        const t = e.target;
-        if (t.closest && t.closest("#markframe-root")) return;
-        const v = t.closest && t.closest("video");
-        if (!v) return;
-        e.preventDefault();
-        e.stopPropagation();
-        state.genericPickedFingerprint = genericClipFingerprint(v);
-        setPickVideoMode(false);
-        showToast("Video selected.");
-        tick();
-      };
-      document.addEventListener("pointerdown", pickVideoPointerHandler, true);
-    } else if (pickVideoPointerHandler) {
-      document.removeEventListener("pointerdown", pickVideoPointerHandler, true);
-      pickVideoPointerHandler = null;
-    }
-    refreshPickVideoUi();
-  }
-
   async function initReview(clip) {
     const mount = document.body || document.documentElement;
     if (!mount) return;
@@ -1806,7 +1655,6 @@
       mount.appendChild(root);
     }
 
-    refreshPickVideoUi();
     applyCompactRootLayout();
 
     if (state.dashboardForced) {
@@ -1865,7 +1713,6 @@
       teardownCanvas();
       activeClipStorageKey = null;
     }
-    refreshPickVideoUi();
     applyCompactRootLayout();
 
     const visible = await loadSidebarVisible();
