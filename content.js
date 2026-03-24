@@ -28,6 +28,10 @@
     /** Data URL (small JPEG) or https:// image URL for comment avatars. */
     avatar: "markframe_avatar",
     sidebarVisible: "markframe_sidebar_visible",
+    /** Panel corner: "tl" | "tr" | "bl" | "br" (physical viewport corners). */
+    panelCorner: "markframe_panel_corner",
+    /** Pause video once when the comment field is focused (default on; no auto-play on blur). */
+    autoPauseCommentTyping: "markframe_auto_pause_comment_typing",
     /** Written by the service worker when Supabase auth changes. */
     authState: "markframe_auth_state",
     /** @deprecated legacy YouTube-only */
@@ -66,6 +70,8 @@
   let canvas = null;
   let ctx = null;
   let videoEl = null;
+  /** When true, focusing the comment field pauses playback once (no auto-resume). */
+  let autoPauseWhenTypingComments = true;
   /** Drive often plays video inside a cross-origin YouTube embed iframe — bridge via postMessage. */
   const driveYtState = {
     iframe: null,
@@ -1788,6 +1794,15 @@
     inp.value = raw || email;
     inp.placeholder = email || "Display name";
     resetSettingsAvatarFormState();
+    const cornerSel = root.querySelector(".mf-settings-panel-corner");
+    if (cornerSel) cornerSel.value = await loadPanelCorner();
+    const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
+    if (autoPauseCb) {
+      const { [STORAGE_KEYS.autoPauseCommentTyping]: ap } = await chrome.storage.local.get(
+        STORAGE_KEYS.autoPauseCommentTyping
+      );
+      autoPauseCb.checked = normalizeAutoPauseCommentTyping(ap);
+    }
     const urlInp = root.querySelector(".mf-settings-avatar-url");
     if (urlInp) urlInp.value = "";
     const storedAvatar = await loadStoredAvatar();
@@ -1845,6 +1860,21 @@
       }
     }
 
+    const cornerSel = root.querySelector(".mf-settings-panel-corner");
+    if (cornerSel) {
+      const c = normalizePanelCorner(cornerSel.value);
+      await chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: c });
+      applyPanelCorner(c);
+    }
+
+    const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
+    if (autoPauseCb) {
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseCb.checked,
+      });
+      applyAutoPauseCommentTypingPref(autoPauseCb.checked);
+    }
+
     await refreshAuthorPresentationCache();
     if (root.dataset.mfView === "watch") renderThread();
     showToast("Settings saved.");
@@ -1856,6 +1886,53 @@
       STORAGE_KEYS.sidebarVisible
     );
     return v !== false;
+  }
+
+  /** @param {unknown} c */
+  function normalizePanelCorner(c) {
+    return c === "tl" || c === "tr" || c === "bl" || c === "br" ? c : "tr";
+  }
+
+  async function loadPanelCorner() {
+    const { [STORAGE_KEYS.panelCorner]: c } = await chrome.storage.local.get(
+      STORAGE_KEYS.panelCorner
+    );
+    return normalizePanelCorner(c);
+  }
+
+  function applyPanelCorner(corner) {
+    if (!root) return;
+    root.dataset.mfCorner = normalizePanelCorner(corner);
+  }
+
+  /** @param {unknown} v */
+  function normalizeAutoPauseCommentTyping(v) {
+    return v !== false;
+  }
+
+  /** @param {unknown} v */
+  function applyAutoPauseCommentTypingPref(v) {
+    autoPauseWhenTypingComments = normalizeAutoPauseCommentTyping(v);
+  }
+
+  function getVideoElementForCommentPause() {
+    const clip = resolveClipContext();
+    if (clip) {
+      const el = clip.getVideoElement();
+      if (el && el.isConnected) return el;
+    }
+    return videoEl && videoEl.isConnected ? videoEl : null;
+  }
+
+  async function applySidebarLayoutFromStorage() {
+    const got = await chrome.storage.local.get([
+      STORAGE_KEYS.sidebarVisible,
+      STORAGE_KEYS.panelCorner,
+      STORAGE_KEYS.autoPauseCommentTyping,
+    ]);
+    applySidebarVisibility(got[STORAGE_KEYS.sidebarVisible] !== false);
+    applyPanelCorner(got[STORAGE_KEYS.panelCorner]);
+    applyAutoPauseCommentTypingPref(got[STORAGE_KEYS.autoPauseCommentTyping]);
   }
 
   async function setSidebarVisible(visible) {
@@ -2862,9 +2939,9 @@
               This video
             </button>
             <button type="button" class="mf-settings-btn" data-action="open-settings" title="Settings" aria-label="Settings">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
                 <circle cx="12" cy="12" r="3" />
-                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
               </svg>
             </button>
             <button type="button" class="mf-collapse" data-action="collapse" title="Collapse">▾</button>
@@ -2925,9 +3002,19 @@
                 spellcheck="false"
               />
             </label>
-            <p class="mf-settings-hint">
-              Used on new comments. Blank or your account email keeps the default (your email).
-            </p>
+            <label class="mf-settings-label mf-settings-label-tight"
+              >Panel corner
+              <select class="mf-settings-panel-corner" aria-label="Panel corner">
+                <option value="tr">Top right</option>
+                <option value="tl">Top left</option>
+                <option value="br">Bottom right</option>
+                <option value="bl">Bottom left</option>
+              </select>
+            </label>
+            <label class="mf-settings-toggle-row">
+              <input type="checkbox" class="mf-settings-auto-pause-comments" />
+              <span class="mf-settings-toggle-text">Auto pause when typing comments</span>
+            </label>
             <div class="mf-settings-avatar-section">
               <span class="mf-settings-section-title">Avatar</span>
               <div class="mf-settings-avatar-row">
@@ -2951,9 +3038,6 @@
                   spellcheck="false"
                 />
               </label>
-              <p class="mf-settings-hint mf-settings-hint-tight">
-                Shown next to your name on comments. Uploads are resized to fit storage limits.
-              </p>
             </div>
             <div class="mf-settings-actions">
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-settings">Save</button>
@@ -3256,6 +3340,11 @@
     });
 
     const commentInp = root.querySelector(".mf-comment-input");
+    commentInp.addEventListener("focus", () => {
+      if (!autoPauseWhenTypingComments) return;
+      const v = getVideoElementForCommentPause();
+      if (v && !v.paused) v.pause();
+    });
     commentInp.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -3358,8 +3447,6 @@
         await tryImportFromUrl(clip);
       }
       await mergeClipMetadata(clip);
-      const visible = await loadSidebarVisible();
-      applySidebarVisibility(visible);
       root.classList.toggle("mf-collapsed", state.collapsed);
       await renderDashboard();
       return;
@@ -3379,8 +3466,6 @@
     await mergeClipMetadata(clip);
     await refreshWatchVideoTitle(clip);
 
-    const visible = await loadSidebarVisible();
-    applySidebarVisibility(visible);
     root.classList.toggle("mf-collapsed", state.collapsed);
 
     await refreshAuthorPresentationCache();
@@ -3406,8 +3491,6 @@
     }
     applyCompactRootLayout();
 
-    const visible = await loadSidebarVisible();
-    applySidebarVisibility(visible);
     root.classList.toggle("mf-collapsed", state.collapsed);
 
     await renderDashboard();
@@ -3417,6 +3500,12 @@
     if (area !== "local") return;
     if (changes[STORAGE_KEYS.sidebarVisible]) {
       applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
+    }
+    if (changes[STORAGE_KEYS.panelCorner]) {
+      applyPanelCorner(changes[STORAGE_KEYS.panelCorner].newValue);
+    }
+    if (changes[STORAGE_KEYS.autoPauseCommentTyping]) {
+      applyAutoPauseCommentTypingPref(changes[STORAGE_KEYS.autoPauseCommentTyping].newValue);
     }
     if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
       void refreshAuthorPresentationCache().then(() => {
@@ -3478,8 +3567,7 @@
     updateGateCopy(supabaseConfigured);
     applyAppShellLocked(!unlocked);
 
-    const visible = await loadSidebarVisible();
-    applySidebarVisibility(visible);
+    await applySidebarLayoutFromStorage();
     root.classList.toggle("mf-collapsed", state.collapsed);
 
     if (!unlocked) {

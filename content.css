@@ -27,21 +27,61 @@
   display: flex;
   flex-direction: column;
   position: fixed;
-  inset-inline-end: 16px;
   top: 16px;
+  right: 16px;
+  bottom: auto;
+  left: auto;
   width: min(320px, calc(100vw - 24px));
   z-index: 2147483646;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
 }
 
+#markframe-root[data-mf-corner="tl"] {
+  top: 16px;
+  left: 16px;
+  right: auto;
+  bottom: auto;
+}
+
+#markframe-root[data-mf-corner="tr"] {
+  top: 16px;
+  right: 16px;
+  left: auto;
+  bottom: auto;
+}
+
+#markframe-root[data-mf-corner="bl"] {
+  bottom: 16px;
+  left: 16px;
+  top: auto;
+  right: auto;
+}
+
+#markframe-root[data-mf-corner="br"] {
+  bottom: 16px;
+  right: 16px;
+  top: auto;
+  left: auto;
+}
+
+/* Tall enough to fit the settings sheet (default cap is 70vh). Overlay is
+   position:absolute so it does not stretch the root — min-height does. */
+#markframe-root.mf-settings-open {
+  max-height: calc(100vh - 32px);
+  min-height: min(520px, calc(100vh - 32px));
+}
+
 /* Narrow viewport */
 #markframe-root[data-mf-compact="1"] {
   width: min(260px, calc(100vw - 12px));
-  top: 8px;
-  inset-inline-end: 8px;
   font-size: 11px;
   max-height: min(88vh, calc(100vh - 16px));
   border-radius: 8px;
+}
+
+#markframe-root[data-mf-compact="1"].mf-settings-open {
+  max-height: calc(100vh - 16px);
+  min-height: min(520px, calc(100vh - 16px));
 }
 
 #markframe-root[data-mf-compact="1"] .mf-header {
@@ -67,7 +107,6 @@
   font-size: 11px;
 }
 
-#markframe-root[data-mf-compact="1"] .mf-author-row,
 #markframe-root[data-mf-compact="1"] .mf-toolbar {
   padding: 6px 8px;
 }
@@ -78,6 +117,34 @@
 
 #markframe-root[data-mf-compact="1"] .mf-thread {
   font-size: 11px;
+}
+
+#markframe-root[data-mf-compact="1"][data-mf-corner="tl"] {
+  top: 8px;
+  left: 8px;
+  right: auto;
+  bottom: auto;
+}
+
+#markframe-root[data-mf-compact="1"][data-mf-corner="tr"] {
+  top: 8px;
+  right: 8px;
+  left: auto;
+  bottom: auto;
+}
+
+#markframe-root[data-mf-compact="1"][data-mf-corner="bl"] {
+  bottom: 8px;
+  left: 8px;
+  top: auto;
+  right: auto;
+}
+
+#markframe-root[data-mf-compact="1"][data-mf-corner="br"] {
+  bottom: 8px;
+  right: 8px;
+  top: auto;
+  left: auto;
 }
 
 #markframe-root *,
@@ -204,6 +271,322 @@
   border-color: rgba(255, 255, 255, 0.15);
 }
 
+#markframe-root .mf-settings-btn {
+  background: transparent;
+  border: 1px solid var(--mf-border);
+  color: var(--mf-text-muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+#markframe-root .mf-settings-btn:hover {
+  color: var(--mf-text);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+#markframe-root .mf-settings-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(3px);
+}
+
+#markframe-root.mf-settings-open .mf-settings-overlay {
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+#markframe-root .mf-settings-dialog {
+  width: 100%;
+  max-width: 280px;
+  flex-shrink: 0;
+  margin-block: auto;
+  background: var(--mf-bg-elevated);
+  border: 1px solid var(--mf-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+#markframe-root.mf-settings-open .mf-settings-dialog {
+  margin-block: 12px auto;
+}
+
+#markframe-root .mf-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--mf-border);
+}
+
+#markframe-root .mf-settings-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mf-text);
+}
+
+#markframe-root .mf-settings-close {
+  background: transparent;
+  border: none;
+  color: var(--mf-text-muted);
+  font-size: 20px;
+  line-height: 1;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-family: var(--mf-font);
+}
+
+#markframe-root .mf-settings-close:hover {
+  color: var(--mf-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#markframe-root .mf-settings-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+#markframe-root .mf-settings-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-settings-toggle-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--mf-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+#markframe-root .mf-settings-toggle-row .mf-settings-auto-pause-comments {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--mf-accent);
+  cursor: pointer;
+}
+
+#markframe-root .mf-settings-toggle-text {
+  line-height: 1.35;
+}
+
+#markframe-root .mf-settings-display-name {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--mf-bg);
+  border: 1px solid var(--mf-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--mf-text);
+  font-size: 12px;
+  font-family: var(--mf-font);
+}
+
+#markframe-root .mf-settings-display-name:focus {
+  outline: none;
+  border-color: var(--mf-accent);
+  box-shadow: 0 0 0 2px var(--mf-accent-dim);
+}
+
+#markframe-root .mf-settings-avatar-url {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--mf-bg);
+  border: 1px solid var(--mf-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--mf-text);
+  font-size: 12px;
+  font-family: var(--mf-font);
+}
+
+#markframe-root .mf-settings-avatar-url::placeholder {
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-settings-avatar-url:focus {
+  outline: none;
+  border-color: var(--mf-accent);
+  box-shadow: 0 0 0 2px var(--mf-accent-dim);
+}
+
+#markframe-root .mf-settings-avatar-url:-webkit-autofill,
+#markframe-root .mf-settings-avatar-url:-webkit-autofill:hover {
+  -webkit-text-fill-color: var(--mf-text);
+  box-shadow: 0 0 0 1000px var(--mf-bg) inset;
+  transition: background-color 9999s ease-out;
+}
+
+#markframe-root .mf-settings-avatar-url:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--mf-text);
+  box-shadow: 0 0 0 1000px var(--mf-bg) inset, 0 0 0 2px var(--mf-accent-dim);
+  transition: background-color 9999s ease-out;
+}
+
+#markframe-root .mf-settings-panel-corner {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 28px 7px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--mf-border, #2a3441);
+  background-color: var(--mf-bg-elevated);
+  color: var(--mf-text);
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--mf-text-muted) 50%),
+    linear-gradient(135deg, var(--mf-text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) calc(50% + 2px), calc(100% - 9px) calc(50% + 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+#markframe-root .mf-settings-panel-corner:focus {
+  outline: none;
+  border-color: var(--mf-accent);
+  box-shadow: 0 0 0 2px var(--mf-accent-dim);
+}
+
+#markframe-root .mf-settings-hint {
+  margin: 10px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-settings-actions {
+  margin: 0;
+}
+
+#markframe-root .mf-settings-avatar-section {
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--mf-border);
+}
+
+#markframe-root .mf-settings-section-title {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mf-text-muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+#markframe-root .mf-settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+#markframe-root .mf-settings-avatar-preview-wrap {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+#markframe-root .mf-settings-avatar-preview {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--mf-border);
+  display: block;
+}
+
+#markframe-root .mf-settings-avatar-preview-fallback {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--mf-accent-dim);
+  border: 1px solid var(--mf-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--mf-accent);
+}
+
+#markframe-root .mf-settings-avatar-buttons {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: stretch;
+  flex: 1;
+  min-width: 0;
+}
+
+#markframe-root .mf-settings-avatar-buttons .mf-btn {
+  font-size: 10px;
+  padding: 5px 8px;
+}
+
+#markframe-root .mf-settings-avatar-file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+#markframe-root .mf-settings-label-tight {
+  margin: 0;
+}
+
+#markframe-root .mf-settings-hint-tight {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
 #markframe-root.mf-collapsed .mf-watch-pane,
 #markframe-root.mf-collapsed .mf-dashboard-pane {
   display: none !important;
@@ -211,6 +594,15 @@
 
 #markframe-root.mf-collapsed {
   max-height: none;
+}
+
+/* Collapsed panel uses max-height: none; cap it again while settings are open. */
+#markframe-root.mf-collapsed.mf-settings-open {
+  max-height: calc(100vh - 32px);
+}
+
+#markframe-root[data-mf-compact="1"].mf-collapsed.mf-settings-open {
+  max-height: calc(100vh - 16px);
 }
 
 #markframe-root .mf-watch-pane {
@@ -252,11 +644,14 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  padding: 8px;
+  gap: 8px;
+  box-sizing: border-box;
 }
 
 #markframe-root .mf-offyoutube-banner {
   flex-shrink: 0;
-  margin: 8px 8px 0;
+  margin: 0;
   padding: 8px 10px;
   font-size: 11px;
   line-height: 1.4;
@@ -269,10 +664,12 @@
 #markframe-root .mf-dashboard-list {
   flex: 1;
   min-height: 80px;
+  min-width: 0;
   overflow-y: auto;
-  padding: 8px;
+  padding: 0;
   display: flex;
   flex-direction: column;
+  gap: 8px;
 }
 
 #markframe-root .mf-dashboard-list::-webkit-scrollbar {
@@ -287,7 +684,7 @@
 #markframe-root .mf-dashboard-empty {
   color: var(--mf-text-muted);
   text-align: center;
-  padding: 0 12px;
+  padding: 8px 4px;
   font-size: 11px;
   line-height: 1.45;
   flex: 1;
@@ -303,11 +700,7 @@
   align-items: stretch;
   gap: 6px;
   width: 100%;
-  margin-bottom: 8px;
-}
-
-#markframe-root .mf-dash-row:last-child {
-  margin-bottom: 0;
+  margin: 0;
 }
 
 #markframe-root .mf-dash-card {
@@ -396,36 +789,6 @@
   font-size: 10px;
   color: var(--mf-text-muted);
   font-variant-numeric: tabular-nums;
-}
-
-#markframe-root .mf-author-row {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--mf-border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-#markframe-root .mf-author-row label {
-  color: var(--mf-text-muted);
-  flex-shrink: 0;
-}
-
-#markframe-root .mf-author-row input {
-  flex: 1;
-  min-width: 0;
-  background: var(--mf-bg);
-  border: 1px solid var(--mf-border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  color: var(--mf-text);
-  font-size: 12px;
-}
-
-#markframe-root .mf-author-row input:focus {
-  outline: none;
-  border-color: var(--mf-accent);
-  box-shadow: 0 0 0 2px var(--mf-accent-dim);
 }
 
 #markframe-root .mf-toolbar {
@@ -542,6 +905,44 @@
   margin-bottom: 6px;
 }
 
+#markframe-root .mf-comment-author-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+#markframe-root .mf-comment-avatar {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+#markframe-root .mf-comment-avatar-img {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid var(--mf-border);
+  display: block;
+}
+
+#markframe-root .mf-comment-avatar-fallback {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--mf-accent-dim);
+  border: 1px solid var(--mf-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--mf-accent);
+  line-height: 1;
+}
+
 #markframe-root .mf-ts {
   font-family: var(--mf-mono);
   font-size: 11px;
@@ -561,6 +962,10 @@
 #markframe-root .mf-author {
   color: var(--mf-text-muted);
   font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 #markframe-root .mf-comment.mf-incomplete {
@@ -698,8 +1103,9 @@
 }
 
 #markframe-root .mf-sync-bar {
+  flex-shrink: 0;
   padding: 10px 12px;
-  margin-bottom: 10px;
+  margin: 0;
   border-radius: 8px;
   background: var(--mf-bg-elevated);
   border: 1px solid var(--mf-border);
