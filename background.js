@@ -17402,6 +17402,47 @@ var init_dist4 = __esm({
 });
 
 // src/sw-cloud.js
+function notchSwLog(msg, detail) {
+  if (!NOTCH_DIAG) return;
+  if (detail !== void 0) {
+    const extra = detail && typeof detail === "object" ? JSON.stringify(detail) : String(detail);
+    console.log("[Notch SW]", msg, extra);
+  } else {
+    console.log("[Notch SW]", msg);
+  }
+}
+function normalizeDropboxClipIdForDb(platform, clipId) {
+  if (platform !== "dropbox" || typeof clipId !== "string" || !clipId) return clipId;
+  const q = clipId.indexOf("?");
+  return q === -1 ? clipId : clipId.slice(0, q);
+}
+function sqlLikePrefixFromPath(pathPrefix) {
+  if (pathPrefix == null || typeof pathPrefix !== "string" || pathPrefix.length === 0) return null;
+  return pathPrefix.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_") + "%";
+}
+async function loadClipReviewRow(client, platform, clipId) {
+  if (platform === "dropbox") {
+    const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+    const r1 = await client.from("clip_reviews").select("*").eq("platform", "dropbox").eq("clip_id", canonical).maybeSingle();
+    if (r1.error) return { data: null, error: r1.error };
+    if (r1.data) return { data: r1.data, error: null };
+    const pat = sqlLikePrefixFromPath(canonical);
+    if (!pat) return { data: null, error: null };
+    const r2 = await client.from("clip_reviews").select("*").eq("platform", "dropbox").like("clip_id", pat).order("updated_at", { ascending: false }).limit(1);
+    if (r2.error) return { data: null, error: r2.error };
+    const row = r2.data?.[0] ?? null;
+    if (row) {
+      notchSwLog("MF_CLOUD_LOAD_CLIP dropbox legacy prefix match", {
+        requested: clipId.slice(0, 80),
+        canonical: canonical.slice(0, 80),
+        dbClipIdPrefix: String(row.clip_id).slice(0, 80)
+      });
+    }
+    return { data: row, error: null };
+  }
+  const r = await client.from("clip_reviews").select("*").eq("platform", platform).eq("clip_id", clipId).maybeSingle();
+  return { data: r.data ?? null, error: r.error };
+}
 function clipStorageKey(platform, clipId) {
   return "markframe_clip_" + platform + "_" + encodeURIComponent(clipId);
 }
@@ -17492,9 +17533,22 @@ async function syncAuthStateMarker(session) {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
   }
 }
+function commentsFromDb(value) {
+  if (Array.isArray(value)) return value;
+  if (value == null) return [];
+  if (typeof value === "string") {
+    try {
+      const p = JSON.parse(value);
+      return Array.isArray(p) ? p : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
 function rowToPayload(row) {
   return {
-    comments: Array.isArray(row.comments) ? row.comments : [],
+    comments: commentsFromDb(row.comments),
     updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
     title: row.title ?? null,
     thumbnailUrl: row.thumbnail_url ?? null,
@@ -17707,23 +17761,53 @@ function handleRuntimeMessage(msg, sendResponse) {
     const client = getSupabase();
     const platform = msg.platform;
     const clipId = msg.clipId;
+    notchSwLog("MF_CLOUD_LOAD_CLIP request", { platform, clipId, hasClient: !!client });
     if (!client || !platform || !clipId) {
+      notchSwLog("MF_CLOUD_LOAD_CLIP abort: missing client, platform, or clipId");
       sendResponse({ ok: false, record: null });
       return false;
     }
-    client.auth.getUser().then(({ data: { user }, error: userErr }) => {
-      if (userErr || !user) {
+    client.auth.getSession().then(async ({ data: { session }, error: sessErr }) => {
+      const user = session?.user;
+      notchSwLog("MF_CLOUD_LOAD_CLIP session", {
+        sessErr: sessErr?.message ?? null,
+        hasUser: !!user,
+        userId: user?.id ? String(user.id).slice(0, 8) + "\u2026" : null
+      });
+      if (sessErr || !user) {
         sendResponse({ ok: false, record: null });
         return;
       }
-      client.from("clip_reviews").select("*").eq("platform", platform).eq("clip_id", clipId).maybeSingle().then(({ data, error }) => {
+      try {
+        const { data, error } = await loadClipReviewRow(client, platform, clipId);
         if (error) {
           console.error("Notch cloud load", error);
+          notchSwLog("MF_CLOUD_LOAD_CLIP query error", {
+            code: error.code,
+            message: error.message,
+            details: error.details
+          });
           sendResponse({ ok: false, record: null });
           return;
         }
-        sendResponse({ ok: true, record: data ? rowToPayload(data) : null });
-      });
+        const rawComments = data?.comments;
+        const cc = Array.isArray(rawComments) ? rawComments.length : rawComments == null ? "null" : typeof rawComments;
+        notchSwLog("MF_CLOUD_LOAD_CLIP result", {
+          rowFound: !!data,
+          dbClipId: data?.clip_id ?? null,
+          dbPlatform: data?.platform ?? null,
+          commentsType: cc
+        });
+        const record = data ? rowToPayload(data) : null;
+        notchSwLog("MF_CLOUD_LOAD_CLIP payload", {
+          recordNull: record == null,
+          payloadCommentCount: record?.comments?.length ?? "n/a"
+        });
+        sendResponse({ ok: true, record });
+      } catch (e) {
+        console.error("Notch cloud load", e);
+        sendResponse({ ok: false, record: null });
+      }
     });
     return true;
   }
@@ -17732,32 +17816,61 @@ function handleRuntimeMessage(msg, sendResponse) {
     const platform = msg.platform;
     const clipId = msg.clipId;
     const comments = msg.comments;
+    notchSwLog("MF_CLOUD_SAVE_CLIP request", {
+      platform,
+      clipId,
+      hasClient: !!client,
+      commentsIsArray: Array.isArray(comments),
+      commentCount: Array.isArray(comments) ? comments.length : "n/a"
+    });
     if (!client || !platform || !clipId || !Array.isArray(comments)) {
+      notchSwLog("MF_CLOUD_SAVE_CLIP abort: bad args");
       sendResponse({ ok: false });
       return false;
     }
-    client.auth.getUser().then(({ data: { user }, error: userErr }) => {
-      if (userErr || !user) {
+    client.auth.getSession().then(async ({ data: { session }, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
         sendResponse({ ok: false });
         return;
       }
+      const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
       const row = {
         user_id: user.id,
         platform,
-        clip_id: clipId,
+        clip_id: clipIdDb,
         comments,
         title: msg.title ?? null,
         thumbnail_url: msg.thumbnailUrl ?? null,
         updated_at: (/* @__PURE__ */ new Date()).toISOString()
       };
-      client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" }).then(({ error }) => {
-        if (error) {
-          console.error("Notch cloud save", error);
-          sendResponse({ ok: false });
-          return;
+      const { error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" });
+      if (error) {
+        console.error("Notch cloud save", error);
+        notchSwLog("MF_CLOUD_SAVE_CLIP error", {
+          code: error.code,
+          message: error.message,
+          platform,
+          clipId
+        });
+        sendResponse({ ok: false });
+        return;
+      }
+      if (platform === "dropbox") {
+        const pat = sqlLikePrefixFromPath(clipIdDb);
+        if (pat) {
+          const { error: dedupeErr } = await client.from("clip_reviews").delete().eq("platform", "dropbox").eq("user_id", user.id).like("clip_id", pat).neq("clip_id", clipIdDb);
+          if (dedupeErr) {
+            notchSwLog("MF_CLOUD_SAVE_CLIP dropbox dedupe skipped", { message: dedupeErr.message });
+          }
         }
-        sendResponse({ ok: true });
+      }
+      notchSwLog("MF_CLOUD_SAVE_CLIP ok", {
+        platform,
+        clipId: clipIdDb,
+        commentCount: comments.length
       });
+      sendResponse({ ok: true });
     });
     return true;
   }
@@ -17767,8 +17880,9 @@ function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false, items: [] });
       return false;
     }
-    client.auth.getUser().then(({ data: { user }, error: userErr }) => {
-      if (userErr || !user) {
+    client.auth.getSession().then(({ data: { session }, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
         sendResponse({ ok: true, items: [] });
         return;
       }
@@ -17779,7 +17893,7 @@ function handleRuntimeMessage(msg, sendResponse) {
           return;
         }
         const rows = (data || []).filter(
-          (r) => r && CLIP_PLATFORMS.includes(r.platform) && Array.isArray(r.comments) && r.comments.length > 0
+          (r) => r && CLIP_PLATFORMS.includes(r.platform) && commentsFromDb(r.comments).length > 0
         );
         sendResponse({ ok: true, items: rows.map(rowToDashboardItem) });
       });
@@ -17795,10 +17909,19 @@ function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false });
       return false;
     }
-    client.from("clip_reviews").update({
+    let q = client.from("clip_reviews").update({
       thumbnail_url: thumbnailUrl,
       updated_at: (/* @__PURE__ */ new Date()).toISOString()
-    }).eq("platform", platform).eq("clip_id", clipId).then(({ error }) => {
+    }).eq("platform", platform);
+    if (platform === "dropbox") {
+      const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+      const pat = sqlLikePrefixFromPath(canonical);
+      if (pat) q = q.like("clip_id", pat);
+      else q = q.eq("clip_id", clipId);
+    } else {
+      q = q.eq("clip_id", clipId);
+    }
+    q.then(({ error }) => {
       if (error) {
         console.error("Notch cloud thumb", error);
         sendResponse({ ok: false });
@@ -17816,7 +17939,16 @@ function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false });
       return false;
     }
-    client.from("clip_reviews").delete().eq("platform", platform).eq("clip_id", clipId).then(({ error }) => {
+    let q = client.from("clip_reviews").delete().eq("platform", platform);
+    if (platform === "dropbox") {
+      const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+      const pat = sqlLikePrefixFromPath(canonical);
+      if (pat) q = q.like("clip_id", pat);
+      else q = q.eq("clip_id", clipId);
+    } else {
+      q = q.eq("clip_id", clipId);
+    }
+    q.then(({ error }) => {
       if (error) {
         console.error("Notch cloud delete", error);
         sendResponse({ ok: false });
@@ -17837,7 +17969,7 @@ async function restoreAuthMarker() {
   } = await client.auth.getSession();
   await syncAuthStateMarker(session);
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, CLIP_PLATFORMS, supabase;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, CLIP_PLATFORMS, NOTCH_DIAG, supabase;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -17846,6 +17978,7 @@ var init_sw_cloud = __esm({
     AUTH_STORAGE_KEY = "sb-notch-auth";
     AUTH_STATE_KEY = "markframe_auth_state";
     CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
+    NOTCH_DIAG = true;
     supabase = null;
   }
 });

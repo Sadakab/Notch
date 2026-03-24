@@ -6,11 +6,27 @@
   const ACCENT = "#00E5FF";
   /** Set true to show Draw / color / save, overlay canvas, and drawing thumbnails. */
   const FEATURE_DRAWING = false;
+  /** Page console: filter `[Notch]` — cloud load/save diagnostics. Set false to silence. */
+  const NOTCH_DIAG = true;
+  function notchLog(msg, detail) {
+    if (!NOTCH_DIAG) return;
+    if (detail !== undefined) {
+      const extra =
+        detail && typeof detail === "object"
+          ? JSON.stringify(detail)
+          : String(detail);
+      console.log("[Notch]", msg, extra);
+    } else {
+      console.log("[Notch]", msg);
+    }
+  }
   /** Must match service worker Supabase auth storageKey. */
   const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
   const STORAGE_KEYS = {
     author: "markframe_author",
+    /** Data URL (small JPEG) or https:// image URL for comment avatars. */
+    avatar: "markframe_avatar",
     sidebarVisible: "markframe_sidebar_visible",
     /** Written by the service worker when Supabase auth changes. */
     authState: "markframe_auth_state",
@@ -61,6 +77,12 @@
   };
   let resizeObs = null;
   let urlCheckTimer = null;
+  let settingsEscapeHandler = null;
+  let settingsAvatarPendingDataUrl = null;
+  let settingsAvatarExplicitClear = false;
+  /** Sync cache for renderThread (display name + avatar URL). */
+  let cachedEffectiveDisplayName = "";
+  let cachedAuthorAvatarUrl = "";
   /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
   let lastTickSignature = "";
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
@@ -108,19 +130,30 @@
       state.cloudUser = cloudAuthCachedUser;
       return;
     }
-    cloudAuthCacheValidUntil = now + 45_000;
     try {
       const r = await sendExtensionMessage({ type: "MF_SUPABASE_SESSION" });
       if (!r?.configured) {
         cloudAuthCachedUser = null;
         state.cloudUser = null;
+        cloudAuthCacheValidUntil = 0;
         return;
       }
       cloudAuthCachedUser = r.user && r.user.email ? { email: r.user.email } : null;
       state.cloudUser = cloudAuthCachedUser;
+      cloudAuthCacheValidUntil = now + 45_000;
     } catch {
       cloudAuthCachedUser = null;
       state.cloudUser = null;
+      cloudAuthCacheValidUntil = 0;
+    }
+  }
+
+  async function getSupabaseConfigured() {
+    try {
+      const cfg = await sendExtensionMessage({ type: "MF_SUPABASE_CONFIG" });
+      return !!cfg?.configured;
+    } catch {
+      return false;
     }
   }
 
@@ -256,8 +289,10 @@
       h === "www.youtube.com" ||
       h === "youtube.com" ||
       h === "m.youtube.com" ||
+      h === "music.youtube.com" ||
       h === "www.youtube-nocookie.com" ||
-      h === "youtube-nocookie.com"
+      h === "youtube-nocookie.com" ||
+      h === "youtu.be"
     );
   }
 
@@ -558,13 +593,25 @@
     };
   }
 
-  /** Watch `?v=` or embed `/embed/VIDEO_ID` (and youtube-nocookie). */
+  /** Watch `?v=`, path `/watch/ID`, `/live/`, `/shorts/`, youtu.be, or embed (incl. nocookie). */
   function parseYoutubeVideoId() {
     if (!isYoutubeSite()) return null;
     try {
       const u = new URL(location.href);
+      const h = location.hostname;
+      if (h === "youtu.be") {
+        const seg = u.pathname.split("/").filter(Boolean)[0];
+        if (seg && /^[A-Za-z0-9_-]{6,}$/.test(seg)) return seg;
+        return null;
+      }
       const fromQuery = u.searchParams.get("v");
       if (fromQuery) return fromQuery;
+      const watchPath = u.pathname.match(/^\/watch\/([^/?#]+)/);
+      if (watchPath && watchPath[1]) return watchPath[1];
+      const livePath = u.pathname.match(/^\/live\/([^/?#]+)/);
+      if (livePath && livePath[1]) return livePath[1];
+      const shortsPath = u.pathname.match(/^\/shorts\/([^/?#]+)/);
+      if (shortsPath && shortsPath[1].length >= 6) return shortsPath[1];
       const m = u.pathname.match(/\/embed\/([A-Za-z0-9_-]{11})(?:\/|$)/);
       if (m) return m[1];
       const m2 = u.pathname.match(/\/embed\/([A-Za-z0-9_-]+)(?:\/|$)/);
@@ -1297,16 +1344,14 @@
     return false;
   }
 
-  function normalizeDropboxClipPath(pathname, searchParams) {
-    if (!pathname || !searchParams) return null;
-    const keys = [...new Set([...searchParams.keys()])].sort();
-    const pairs = [];
-    for (const k of keys) {
-      const v = searchParams.get(k);
-      if (v != null && v !== "") pairs.push(k + "=" + encodeURIComponent(v));
-    }
-    const q = pairs.length ? "?" + pairs.join("&") : "";
-    return pathname + q;
+  /**
+   * Stable clip key for Dropbox: pathname only. Query params (dl, e, st, rlkey, …) change on refresh
+   * and broke Supabase upsert/load (clip_id mismatch).
+   */
+  function normalizeDropboxClipPath(pathname, _searchParams) {
+    if (!pathname) return null;
+    if (!isDropboxShareViewerPath(pathname)) return null;
+    return pathname;
   }
 
   function parseDropboxClipIdFromUrlString(href) {
@@ -1568,13 +1613,13 @@
 
   async function getClipRecordForDisplay(clip) {
     await refreshCloudUser(false);
-    if (isCloudActive()) {
+    if (await getSupabaseConfigured()) {
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
         platform: clip.platform,
         clipId: clip.clipId,
       });
-      return r?.ok ? r.record : null;
+      if (r?.ok && r.record) return r.record;
     }
     const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
     return raw ?? null;
@@ -1607,13 +1652,203 @@
     return STORAGE_KEYS.dataPrefix + youtubeId;
   }
 
-  async function loadAuthor() {
+  /** Stored display-name override; empty string means use account email or "You". */
+  async function loadAuthorOverride() {
     const { [STORAGE_KEYS.author]: name } = await chrome.storage.local.get(STORAGE_KEYS.author);
-    return typeof name === "string" && name.trim() ? name.trim() : "You";
+    return typeof name === "string" ? name : "";
   }
 
-  async function saveAuthor(name) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.author]: name });
+  async function saveAuthorOverride(override) {
+    await chrome.storage.local.set({ [STORAGE_KEYS.author]: override });
+  }
+
+  async function effectiveDisplayName() {
+    await refreshCloudUser(false);
+    const raw = (await loadAuthorOverride()).trim();
+    if (raw) return raw;
+    const em = state.cloudUser?.email?.trim();
+    if (em) return em;
+    return "You";
+  }
+
+  async function refreshAuthorPresentationCache() {
+    await refreshCloudUser(false);
+    cachedEffectiveDisplayName = await effectiveDisplayName();
+    const { [STORAGE_KEYS.avatar]: av } = await chrome.storage.local.get(STORAGE_KEYS.avatar);
+    cachedAuthorAvatarUrl = typeof av === "string" && av.trim() ? av.trim() : "";
+  }
+
+  async function loadStoredAvatar() {
+    const { [STORAGE_KEYS.avatar]: v } = await chrome.storage.local.get(STORAGE_KEYS.avatar);
+    return typeof v === "string" && v.trim() ? v.trim() : "";
+  }
+
+  /** Keep under Chrome storage per-item limits (~8KB JSON). */
+  const AVATAR_DATA_URL_MAX_LEN = 7000;
+
+  function compressAvatarFile(file) {
+    return new Promise((resolve, reject) => {
+      if (!file || !file.type.startsWith("image/")) {
+        reject(new Error("Choose an image file."));
+        return;
+      }
+      const r = new FileReader();
+      r.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const maxPx = 72;
+          const w = img.naturalWidth;
+          const h = img.naturalHeight;
+          const scale = Math.min(1, maxPx / Math.max(w, h, 1));
+          const cw = Math.max(1, Math.round(w * scale));
+          const ch = Math.max(1, Math.round(h * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = cw;
+          canvas.height = ch;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("Could not process image."));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, cw, ch);
+          let q = 0.82;
+          let data = canvas.toDataURL("image/jpeg", q);
+          while (data.length > AVATAR_DATA_URL_MAX_LEN && q > 0.28) {
+            q -= 0.08;
+            data = canvas.toDataURL("image/jpeg", q);
+          }
+          if (data.length > AVATAR_DATA_URL_MAX_LEN) {
+            reject(new Error("Image is still too large after resizing. Try a smaller photo or use a URL."));
+            return;
+          }
+          resolve(data);
+        };
+        img.onerror = () => reject(new Error("Could not read that image."));
+        img.src = /** @type {string} */ (r.result);
+      };
+      r.onerror = () => reject(new Error("Could not read file."));
+      r.readAsDataURL(file);
+    });
+  }
+
+  function avatarFallbackLetter(name) {
+    const s = (name || "You").trim();
+    if (!s) return "?";
+    const cp = s.codePointAt(0);
+    return String.fromCodePoint(cp).toUpperCase();
+  }
+
+  function applySettingsAvatarPreview(src, fallbackLabel) {
+    if (!root) return;
+    const img = root.querySelector(".mf-settings-avatar-preview");
+    const fb = root.querySelector(".mf-settings-avatar-preview-fallback");
+    if (!img || !fb) return;
+    const letter = avatarFallbackLetter(fallbackLabel);
+    fb.textContent = letter;
+    if (src) {
+      img.classList.add("mf-hidden");
+      fb.classList.remove("mf-hidden");
+      img.onload = () => {
+        img.classList.remove("mf-hidden");
+        fb.classList.add("mf-hidden");
+      };
+      img.onerror = () => {
+        img.classList.add("mf-hidden");
+        fb.classList.remove("mf-hidden");
+      };
+      img.src = src;
+      if (img.complete && img.naturalWidth > 0) {
+        img.classList.remove("mf-hidden");
+        fb.classList.add("mf-hidden");
+      }
+    } else {
+      img.removeAttribute("src");
+      img.classList.add("mf-hidden");
+      fb.classList.remove("mf-hidden");
+    }
+  }
+
+  function resetSettingsAvatarFormState() {
+    settingsAvatarPendingDataUrl = null;
+    settingsAvatarExplicitClear = false;
+    if (!root) return;
+    const fileInp = root.querySelector(".mf-settings-avatar-file");
+    if (fileInp) fileInp.value = "";
+  }
+
+  async function openSettingsPanel() {
+    if (!root) return;
+    const overlay = root.querySelector(".mf-settings-overlay");
+    const inp = root.querySelector(".mf-settings-display-name");
+    if (!overlay || !inp) return;
+    if (!overlay.classList.contains("mf-hidden")) return;
+    await refreshCloudUser(true);
+    const raw = (await loadAuthorOverride()).trim();
+    const email = state.cloudUser?.email?.trim() || "";
+    inp.value = raw || email;
+    inp.placeholder = email || "Display name";
+    resetSettingsAvatarFormState();
+    const urlInp = root.querySelector(".mf-settings-avatar-url");
+    if (urlInp) urlInp.value = "";
+    const storedAvatar = await loadStoredAvatar();
+    if (urlInp && storedAvatar.startsWith("https://")) urlInp.value = storedAvatar;
+    const previewLabel = inp.value.trim() || email || "You";
+    applySettingsAvatarPreview(storedAvatar || null, previewLabel);
+    overlay.classList.remove("mf-hidden");
+    overlay.setAttribute("aria-hidden", "false");
+    root.classList.add("mf-settings-open");
+    settingsEscapeHandler = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSettingsPanel();
+      }
+    };
+    document.addEventListener("keydown", settingsEscapeHandler, true);
+    requestAnimationFrame(() => inp.focus());
+  }
+
+  function closeSettingsPanel() {
+    if (!root) return;
+    const overlay = root.querySelector(".mf-settings-overlay");
+    if (overlay) {
+      overlay.classList.add("mf-hidden");
+      overlay.setAttribute("aria-hidden", "true");
+    }
+    root.classList.remove("mf-settings-open");
+    if (settingsEscapeHandler) {
+      document.removeEventListener("keydown", settingsEscapeHandler, true);
+      settingsEscapeHandler = null;
+    }
+  }
+
+  async function saveSettingsPanel() {
+    if (!root) return;
+    const inp = root.querySelector(".mf-settings-display-name");
+    if (!inp) return;
+    await refreshCloudUser(false);
+    const v = inp.value.trim();
+    const email = state.cloudUser?.email?.trim() || "";
+    let override = v;
+    if (!v || (email && v === email)) override = "";
+    await saveAuthorOverride(override);
+
+    if (settingsAvatarExplicitClear) {
+      await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: "" });
+    } else if (settingsAvatarPendingDataUrl) {
+      await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: settingsAvatarPendingDataUrl });
+    } else {
+      const urlInp = root.querySelector(".mf-settings-avatar-url");
+      const u = (urlInp && urlInp.value.trim()) || "";
+      if (u.startsWith("https://")) {
+        await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: u });
+      }
+    }
+
+    await refreshAuthorPresentationCache();
+    if (root.dataset.mfView === "watch") renderThread();
+    showToast("Settings saved.");
+    closeSettingsPanel();
   }
 
   async function loadSidebarVisible() {
@@ -1653,39 +1888,107 @@
     }
   }
 
+  function coerceIncomingComments(raw) {
+    if (!raw || raw.comments == null) return null;
+    const v = raw.comments;
+    if (Array.isArray(v)) return v;
+    if (typeof v === "string") {
+      try {
+        const p = JSON.parse(v);
+        return Array.isArray(p) ? p : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   async function loadClipData(clip) {
     await refreshCloudUser(false);
     const key = clip.storageKey;
-    if (isCloudActive()) {
-      const r = await sendExtensionMessage({
-        type: "MF_CLOUD_LOAD_CLIP",
-        platform: clip.platform,
-        clipId: clip.clipId,
-      });
-      const raw = r?.ok ? r.record : null;
-      if (raw && Array.isArray(raw.comments)) {
-        state.comments = raw.comments;
-        normalizeCommentsShape();
-      } else {
-        state.comments = [];
+    const configured = await getSupabaseConfigured();
+    notchLog("loadClipData start", {
+      platform: clip.platform,
+      clipId: clip.clipId,
+      storageKey: key,
+      supabaseConfigured: configured,
+      cloudUser: !!state.cloudUser,
+    });
+    if (configured) {
+      let r;
+      try {
+        r = await sendExtensionMessage({
+          type: "MF_CLOUD_LOAD_CLIP",
+          platform: clip.platform,
+          clipId: clip.clipId,
+        });
+      } catch (e) {
+        notchLog("loadClipData MF_CLOUD_LOAD_CLIP threw", { message: String(e?.message || e) });
+        r = null;
       }
-      return;
+      const cloudSummary = {
+        typeofR: r === undefined ? "undefined" : r === null ? "null" : typeof r,
+        ok: r?.ok,
+        recordIsNull: r?.record == null,
+        recordType: r?.record == null ? "none" : typeof r.record,
+        recordKeys:
+          r?.record && typeof r.record === "object" && !Array.isArray(r.record)
+            ? Object.keys(r.record)
+            : [],
+        commentsType: r?.record ? typeof r.record.comments : "n/a",
+        commentsIsArray: Array.isArray(r?.record?.comments),
+        commentsLen: Array.isArray(r?.record?.comments) ? r.record.comments.length : "n/a",
+      };
+      notchLog("loadClipData cloud response", cloudSummary);
+      let cloudSkipReason = "";
+      if (r == null) cloudSkipReason = "no response (message failed or threw — check SW console)";
+      else if (r.ok !== true) cloudSkipReason = "r.ok is not true — SW returned failure (see [Notch SW] logs)";
+      else if (r.record == null)
+        cloudSkipReason =
+          "r.record is null — no row for this platform+clip_id for your user (compare to Supabase clip_reviews), or RLS hiding row";
+      if (cloudSkipReason) notchLog("loadClipData cloud skipped because", cloudSkipReason);
+
+      if (r?.ok === true && r.record != null) {
+        const list = coerceIncomingComments(r.record);
+        notchLog("loadClipData coerceIncomingComments", {
+          listIsNull: list === null,
+          listLength: Array.isArray(list) ? list.length : "n/a",
+        });
+        if (list !== null) {
+          state.comments = list;
+          normalizeCommentsShape();
+          notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
+          return;
+        }
+        notchLog(
+          "loadClipData cloud skipped because",
+          "coerceIncomingComments returned null — record.comments missing or wrong type (expect JSON array)"
+        );
+      }
+      notchLog("loadClipData falling back to local storage");
     }
     let { [key]: raw } = await chrome.storage.local.get(key);
     if (!raw && clip.platform === "youtube") {
       const leg = legacyYoutubeKey(clip.clipId);
       const got = await chrome.storage.local.get(leg);
       raw = got[leg];
-      if (raw && Array.isArray(raw.comments)) {
+      if (raw && coerceIncomingComments(raw)) {
         await chrome.storage.local.set({ [key]: raw });
       }
     }
-    if (raw && Array.isArray(raw.comments)) {
-      state.comments = raw.comments;
+    const list = coerceIncomingComments(raw);
+    notchLog("loadClipData local path", {
+      hadLocalRow: !!raw,
+      listIsNull: list === null,
+      listLength: Array.isArray(list) ? list.length : list ? "non-array-truthy" : 0,
+    });
+    if (list) {
+      state.comments = list;
       normalizeCommentsShape();
     } else {
       state.comments = [];
     }
+    notchLog("loadClipData end (local)", { commentCount: state.comments.length });
   }
 
   async function saveClipData(clip) {
@@ -1721,8 +2024,13 @@
       platform: clip.platform,
       clipId: clip.clipId,
     };
-    if (isCloudActive()) {
+    if (await getSupabaseConfigured()) {
       try {
+        notchLog("saveClipData cloud upsert", {
+          platform: clip.platform,
+          clipId: clip.clipId,
+          commentCount: state.comments.length,
+        });
         const r = await sendExtensionMessage({
           type: "MF_CLOUD_SAVE_CLIP",
           platform: clip.platform,
@@ -1731,32 +2039,41 @@
           title,
           thumbnailUrl,
         });
-        if (!r?.ok) showToast("Could not save to cloud — check your connection.");
+        notchLog("saveClipData cloud result", { ok: r?.ok === true, typeofR: r == null ? "null" : typeof r });
+        if (!r?.ok && isCloudActive()) {
+          showToast("Could not save to cloud — check your connection.");
+        }
       } catch (e) {
         console.error("Notch cloud save", e);
-        showToast("Could not save to cloud — check your connection.");
+        notchLog("saveClipData cloud exception", String(e?.message || e));
+        if (isCloudActive()) showToast("Could not save to cloud — check your connection.");
       }
-      return;
     }
     await chrome.storage.local.set({ [key]: payload });
+    notchLog("saveClipData mirrored to chrome.storage.local", {
+      key,
+      commentCount: payload.comments.length,
+    });
   }
 
   async function mergeClipMetadata(clip) {
     await refreshCloudUser(false);
     const key = clip.storageKey;
     let prev = null;
-    if (isCloudActive()) {
+    if (await getSupabaseConfigured()) {
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
         platform: clip.platform,
         clipId: clip.clipId,
       });
-      prev = r?.ok ? r.record : null;
-    } else {
+      if (r?.ok && r.record) prev = r.record;
+    }
+    if (!prev) {
       const got = await chrome.storage.local.get(key);
       prev = got[key];
     }
-    if (!prev || !Array.isArray(prev.comments) || prev.comments.length === 0) return;
+    const prevComments = coerceIncomingComments(prev);
+    if (!prev || !prevComments || prevComments.length === 0) return;
     const cur = resolveClipContext();
     if (!clipsMatch(cur, clip)) return;
     const meta = clip.scrapeMetadata(clip.clipId);
@@ -1778,23 +2095,30 @@
       if (o) nextThumb = o;
     }
     if (nextTitle === prev.title && nextThumb === prev.thumbnailUrl) return;
-    if (isCloudActive()) {
+    const next = {
+      ...prev,
+      comments: prevComments,
+      title: nextTitle,
+      thumbnailUrl: nextThumb,
+      updatedAt: Date.now(),
+      platform: clip.platform,
+      clipId: clip.clipId,
+    };
+    delete next.customTitle;
+    if (await getSupabaseConfigured()) {
       try {
         await sendExtensionMessage({
           type: "MF_CLOUD_SAVE_CLIP",
           platform: clip.platform,
           clipId: clip.clipId,
-          comments: prev.comments,
+          comments: prevComments,
           title: nextTitle,
           thumbnailUrl: nextThumb,
         });
       } catch (e) {
         console.error("Notch cloud merge", e);
       }
-      return;
     }
-    const next = { ...prev, title: nextTitle, thumbnailUrl: nextThumb };
-    delete next.customTitle;
     await chrome.storage.local.set({ [key]: next });
   }
 
@@ -1858,10 +2182,11 @@
 
   async function listVideosWithFeedback() {
     await refreshCloudUser(false);
-    if (isCloudActive()) {
+    if (await getSupabaseConfigured()) {
       const r = await sendExtensionMessage({ type: "MF_CLOUD_LIST_CLIPS" });
-      const out = r?.ok && Array.isArray(r.items) ? r.items : [];
-      for (const row of out) {
+      if (r?.ok && Array.isArray(r.items)) {
+        const out = r.items;
+        for (const row of out) {
         if (row.thumbnailUrl) continue;
         if (row.platform === "vimeo") {
           const o = await fetchVimeoThumbFromBackground(row.clipId);
@@ -1909,8 +2234,9 @@
             }
           }
         }
+        }
+        return out;
       }
-      return out;
     }
 
     const all = await chrome.storage.local.get(null);
@@ -2024,7 +2350,8 @@
   async function removeClipFromLibrary(item) {
     if (!item || !item.storageKey) return;
     await refreshCloudUser(false);
-    if (isCloudActive()) {
+    const keys = storageKeysForDashboardItem(item);
+    if (await getSupabaseConfigured()) {
       try {
         const r = await sendExtensionMessage({
           type: "MF_CLOUD_DELETE_CLIP",
@@ -2036,10 +2363,8 @@
         console.error("Notch cloud delete", e);
         throw e;
       }
-    } else {
-      const keys = storageKeysForDashboardItem(item);
-      await chrome.storage.local.remove(keys);
     }
+    await chrome.storage.local.remove(keys);
 
     const cur = resolveClipContext();
     const isCurrentPageClip =
@@ -2325,12 +2650,45 @@
     return "mf_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   }
 
+  function createCommentAvatarEl(authorName) {
+    const holder = document.createElement("div");
+    holder.className = "mf-comment-avatar";
+    const label = authorName || "You";
+    const showImg =
+      cachedAuthorAvatarUrl && label === cachedEffectiveDisplayName;
+    if (showImg) {
+      const img = document.createElement("img");
+      img.className = "mf-comment-avatar-img";
+      img.src = cachedAuthorAvatarUrl;
+      img.alt = "";
+      img.width = 22;
+      img.height = 22;
+      img.loading = "lazy";
+      img.decoding = "async";
+      const letter = avatarFallbackLetter(label);
+      img.addEventListener("error", () => {
+        img.remove();
+        const fb = document.createElement("span");
+        fb.className = "mf-comment-avatar-fallback";
+        fb.textContent = letter;
+        holder.appendChild(fb);
+      });
+      holder.appendChild(img);
+    } else {
+      const fb = document.createElement("span");
+      fb.className = "mf-comment-avatar-fallback";
+      fb.textContent = avatarFallbackLetter(label);
+      holder.appendChild(fb);
+    }
+    return holder;
+  }
+
   async function addComment(text) {
     const clip = resolveClipContext();
     if (!clip) return;
     videoEl = clip.getVideoElement();
     const ts = videoEl && Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
-    const author = (root.querySelector(".mf-author-input") || {}).value || (await loadAuthor());
+    const author = await effectiveDisplayName();
     const c = {
       id: uid(),
       ts,
@@ -2387,9 +2745,13 @@
         renderThread();
       });
 
+      const authorRow = document.createElement("div");
+      authorRow.className = "mf-comment-author-row";
+      authorRow.appendChild(createCommentAvatarEl(c.author));
       const auth = document.createElement("span");
       auth.className = "mf-author";
       auth.textContent = c.author || "You";
+      authorRow.appendChild(auth);
 
       const doneWrap = document.createElement("div");
       doneWrap.className = "mf-complete-wrap";
@@ -2406,7 +2768,7 @@
       doneWrap.appendChild(statusBtn);
 
       top.appendChild(tsBtn);
-      top.appendChild(auth);
+      top.appendChild(authorRow);
       top.appendChild(doneWrap);
 
       const text = document.createElement("div");
@@ -2499,16 +2861,18 @@
             <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
               This video
             </button>
+            <button type="button" class="mf-settings-btn" data-action="open-settings" title="Settings" aria-label="Settings">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              </svg>
+            </button>
             <button type="button" class="mf-collapse" data-action="collapse" title="Collapse">▾</button>
           </div>
         </div>
         <div class="mf-watch-pane">
           <div class="mf-watch-video-title-wrap">
             <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
-          </div>
-          <div class="mf-author-row">
-            <label for="mf-author">Name</label>
-            <input type="text" id="mf-author" class="mf-author-input" maxlength="80" placeholder="Display name" />
           </div>
           <div class="mf-toolbar">
             <div class="mf-toolbar-draw${FEATURE_DRAWING ? "" : " mf-hidden"}">
@@ -2534,6 +2898,67 @@
             </div>
           </div>
           <div class="mf-dashboard-list"></div>
+        </div>
+      </div>
+      <div class="mf-settings-overlay mf-hidden" aria-hidden="true">
+        <div
+          class="mf-settings-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mf-settings-heading"
+          tabindex="-1"
+        >
+          <div class="mf-settings-header">
+            <h2 id="mf-settings-heading" class="mf-settings-title">Settings</h2>
+            <button type="button" class="mf-settings-close" data-action="close-settings" aria-label="Close settings">
+              ×
+            </button>
+          </div>
+          <div class="mf-settings-body">
+            <label class="mf-settings-label"
+              >Display name
+              <input
+                type="text"
+                class="mf-settings-display-name"
+                maxlength="80"
+                autocomplete="nickname"
+                spellcheck="false"
+              />
+            </label>
+            <p class="mf-settings-hint">
+              Used on new comments. Blank or your account email keeps the default (your email).
+            </p>
+            <div class="mf-settings-avatar-section">
+              <span class="mf-settings-section-title">Avatar</span>
+              <div class="mf-settings-avatar-row">
+                <div class="mf-settings-avatar-preview-wrap">
+                  <img class="mf-settings-avatar-preview mf-hidden" alt="" width="40" height="40" />
+                  <span class="mf-settings-avatar-preview-fallback" aria-hidden="true"></span>
+                </div>
+                <div class="mf-settings-avatar-buttons">
+                  <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
+                  <button type="button" class="mf-btn" data-action="pick-avatar">Choose image…</button>
+                  <button type="button" class="mf-btn" data-action="clear-avatar">Remove</button>
+                </div>
+              </div>
+              <label class="mf-settings-label mf-settings-label-tight"
+                >Or image URL (https)
+                <input
+                  type="url"
+                  class="mf-settings-avatar-url"
+                  maxlength="2000"
+                  placeholder="https://…"
+                  spellcheck="false"
+                />
+              </label>
+              <p class="mf-settings-hint mf-settings-hint-tight">
+                Shown next to your name on comments. Uploads are resized to fit storage limits.
+              </p>
+            </div>
+            <div class="mf-settings-actions">
+              <button type="button" class="mf-btn mf-btn-primary" data-action="save-settings">Save</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="mf-toast" aria-live="polite"></div>
@@ -2696,11 +3121,88 @@
       btn.textContent = state.collapsed ? "▸" : "▾";
     });
 
-    const authorInp = root.querySelector(".mf-author-input");
-    loadAuthor().then((n) => {
-      authorInp.value = n;
+    root.querySelector('[data-action="open-settings"]').addEventListener("click", () => void openSettingsPanel());
+    root.querySelectorAll('[data-action="close-settings"]').forEach((b) => {
+      b.addEventListener("click", () => closeSettingsPanel());
     });
-    authorInp.addEventListener("change", () => saveAuthor(authorInp.value));
+    const saveSettingsBtn = root.querySelector('[data-action="save-settings"]');
+    if (saveSettingsBtn) {
+      saveSettingsBtn.addEventListener("click", () => void saveSettingsPanel());
+    }
+    const settingsOverlay = root.querySelector(".mf-settings-overlay");
+    if (settingsOverlay) {
+      settingsOverlay.addEventListener("click", (e) => {
+        if (e.target === settingsOverlay) closeSettingsPanel();
+      });
+    }
+    const settingsNameInp = root.querySelector(".mf-settings-display-name");
+    if (settingsNameInp) {
+      settingsNameInp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void saveSettingsPanel();
+        }
+      });
+    }
+
+    const pickAvatarBtn = root.querySelector('[data-action="pick-avatar"]');
+    const avatarFileInp = root.querySelector(".mf-settings-avatar-file");
+    const clearAvatarBtn = root.querySelector('[data-action="clear-avatar"]');
+    if (pickAvatarBtn && avatarFileInp) {
+      pickAvatarBtn.addEventListener("click", () => avatarFileInp.click());
+      avatarFileInp.addEventListener("change", () => {
+        const f = avatarFileInp.files && avatarFileInp.files[0];
+        if (!f) return;
+        compressAvatarFile(f)
+          .then((dataUrl) => {
+            settingsAvatarPendingDataUrl = dataUrl;
+            settingsAvatarExplicitClear = false;
+            const nameInp = root.querySelector(".mf-settings-display-name");
+            const email = state.cloudUser?.email?.trim() || "";
+            const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
+            applySettingsAvatarPreview(dataUrl, previewLabel);
+            const urlInp = root.querySelector(".mf-settings-avatar-url");
+            if (urlInp) urlInp.value = "";
+          })
+          .catch((err) => showToast(err.message || "Could not use that image."));
+        avatarFileInp.value = "";
+      });
+    }
+    if (clearAvatarBtn) {
+      clearAvatarBtn.addEventListener("click", () => {
+        settingsAvatarExplicitClear = true;
+        settingsAvatarPendingDataUrl = null;
+        const urlInp = root.querySelector(".mf-settings-avatar-url");
+        if (urlInp) urlInp.value = "";
+        const nameInp = root.querySelector(".mf-settings-display-name");
+        const email = state.cloudUser?.email?.trim() || "";
+        const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
+        applySettingsAvatarPreview(null, previewLabel);
+      });
+    }
+    const avatarUrlInp = root.querySelector(".mf-settings-avatar-url");
+    if (avatarUrlInp) {
+      avatarUrlInp.addEventListener("input", () => {
+        settingsAvatarExplicitClear = false;
+        settingsAvatarPendingDataUrl = null;
+        const u = avatarUrlInp.value.trim();
+        const nameInp = root.querySelector(".mf-settings-display-name");
+        const email = state.cloudUser?.email?.trim() || "";
+        const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
+        if (u.startsWith("https://")) {
+          applySettingsAvatarPreview(u, previewLabel);
+        } else if (!u) {
+          void loadStoredAvatar().then((s) => {
+            const nm = root.querySelector(".mf-settings-display-name");
+            const em = state.cloudUser?.email?.trim() || "";
+            const pl = (nm && nm.value.trim()) || em || "You";
+            applySettingsAvatarPreview(s || null, pl);
+          });
+        } else {
+          applySettingsAvatarPreview(null, previewLabel);
+        }
+      });
+    }
 
     const gateSignIn = root.querySelector('[data-action="gate-sign-in"]');
     if (gateSignIn) {
@@ -2820,6 +3322,7 @@
       state.comments = data.comments;
       normalizeCommentsShape();
       await saveClipData(clip);
+      await refreshAuthorPresentationCache();
       renderThread();
       showToast("Imported review from link.");
       const u = new URL(location.href);
@@ -2842,13 +3345,17 @@
 
     if (state.dashboardForced) {
       setView("dashboard");
-      if (activeClipStorageKey !== clip.storageKey) {
+      const clipChanged = activeClipStorageKey !== clip.storageKey;
+      if (clipChanged) {
         teardownCanvas();
         activeClipStorageKey = clip.storageKey;
-        await loadClipData(clip);
-        await tryImportFromUrl(clip);
       } else {
         teardownCanvas();
+      }
+      // Same clip_id but URL/sig changed (e.g. query params) or cloud session just became valid — refetch.
+      if (clipChanged || isCloudActive()) {
+        await loadClipData(clip);
+        await tryImportFromUrl(clip);
       }
       await mergeClipMetadata(clip);
       const visible = await loadSidebarVisible();
@@ -2860,9 +3367,12 @@
 
     setView("watch");
 
-    if (activeClipStorageKey !== clip.storageKey) {
+    const clipChanged = activeClipStorageKey !== clip.storageKey;
+    if (clipChanged) {
       teardownCanvas();
       activeClipStorageKey = clip.storageKey;
+    }
+    if (clipChanged || isCloudActive()) {
       await loadClipData(clip);
       await tryImportFromUrl(clip);
     }
@@ -2873,6 +3383,7 @@
     applySidebarVisibility(visible);
     root.classList.toggle("mf-collapsed", state.collapsed);
 
+    await refreshAuthorPresentationCache();
     renderThread();
 
     ensureCanvasOverlay(clip);
@@ -2906,6 +3417,11 @@
     if (area !== "local") return;
     if (changes[STORAGE_KEYS.sidebarVisible]) {
       applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
+    }
+    if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
+      void refreshAuthorPresentationCache().then(() => {
+        if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+      });
     }
     if (
       changes[STORAGE_KEYS.authState] ||

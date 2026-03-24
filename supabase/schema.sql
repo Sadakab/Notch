@@ -1,5 +1,9 @@
 -- Run this in Supabase → SQL Editor (new project, blank DB).
 -- Enables per-user video reviews with Row Level Security.
+--
+-- Comments are NOT a separate table. Each row in clip_reviews is one video (per user);
+-- the `comments` column is a JSON array of comment objects. In the Dashboard, open
+-- Table Editor → clip_reviews → column `comments` (type jsonb).
 
 create extension if not exists "pgcrypto";
 
@@ -8,6 +12,7 @@ create table public.clip_reviews (
   user_id uuid not null references auth.users (id) on delete cascade,
   platform text not null,
   clip_id text not null,
+  -- Timestamped notes / drawings for this clip (JSON array); see extension upsert in background.
   comments jsonb not null default '[]'::jsonb,
   title text,
   thumbnail_url text,
