@@ -1000,21 +1000,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Inline timecode + body so wrapped lines align to the left (under the timecode),
+   not indented under the first word after the stamp. */
 #markframe-root .mf-comment-ts-row {
-  display: flow-root;
+  display: block;
+  line-height: 1.45;
 }
 
 #markframe-root .mf-comment-ts-row > .mf-ts {
-  float: left;
+  display: inline;
+  vertical-align: baseline;
   margin-right: 6px;
-  margin-top: 1px;
-  line-height: 1.35;
+  line-height: inherit;
 }
 
 #markframe-root .mf-comment-ts-row > .mf-comment-text {
-  overflow: hidden;
-  line-height: 1.45;
-  padding-top: 1px;
+  display: inline;
+  line-height: inherit;
 }
 
 #markframe-root .mf-comment-avatar {

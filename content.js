@@ -2862,7 +2862,7 @@
       tsRow.className = "mf-comment-ts-row";
       tsRow.appendChild(tsBtn);
 
-      const text = document.createElement("div");
+      const text = document.createElement("span");
       text.className = "mf-comment-text";
       text.textContent = c.text;
       tsRow.appendChild(text);
