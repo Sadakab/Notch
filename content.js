@@ -2993,6 +2993,46 @@
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
             </div>
             <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
+            <div class="mf-screengrab-wrap">
+              <button
+                type="button"
+                class="mf-btn mf-screengrab-hover-label"
+                title="Screengrab — hover for download or copy"
+                aria-label="Screengrab"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-camera" aria-hidden="true">
+                  <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
+                  <circle cx="12" cy="13" r="3" />
+                </svg>
+              </button>
+              <div class="mf-screengrab-flyout" role="group" aria-label="Screengrab options">
+                <button
+                  type="button"
+                  class="mf-btn mf-screengrab-flyout-btn"
+                  data-action="screengrab-download"
+                  title="Download PNG"
+                  aria-label="Download PNG"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-download" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  class="mf-btn mf-screengrab-flyout-btn"
+                  data-action="screengrab-copy"
+                  title="Copy image to clipboard"
+                  aria-label="Copy image to clipboard"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-clipboard" aria-hidden="true">
+                    <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+                    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+                  </svg>
+                </button>
+              </div>
+            </div>
           </div>
           <div class="mf-thread"></div>
           <div class="mf-footer">
@@ -3374,6 +3414,13 @@
       copyReviewLink();
     });
 
+    root.querySelector('[data-action="screengrab-download"]').addEventListener("click", () => {
+      void downloadCurrentVideoFrame();
+    });
+    root.querySelector('[data-action="screengrab-copy"]').addEventListener("click", () => {
+      void copyCurrentVideoFrameToClipboard();
+    });
+
     const commentInp = root.querySelector(".mf-comment-input");
     commentInp.addEventListener("focus", () => {
       if (!autoPauseWhenTypingComments) return;
@@ -3389,6 +3436,113 @@
         addComment(v);
       }
     });
+  }
+
+  function sanitizeFilenamePart(s) {
+    return String(s || "video")
+      .replace(/[^a-z0-9_-]+/gi, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 72) || "video";
+  }
+
+  function formatTimestampForFilename(sec) {
+    const s = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    return h > 0 ? `${pad(h)}h${pad(m)}m${pad(r)}s` : `${pad(m)}m${pad(r)}s`;
+  }
+
+  async function captureCurrentVideoFrameBlob() {
+    const clip = resolveClipContext();
+    if (!clip) return null;
+    const raw = clip.getVideoElement();
+    if (!raw) {
+      showToast("No video found.");
+      return null;
+    }
+    if (!(raw instanceof HTMLVideoElement)) {
+      showToast("Screengrab is not available for this embedded player.");
+      return null;
+    }
+    if (!raw.isConnected) {
+      showToast("No video found.");
+      return null;
+    }
+    if (raw.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      showToast("Video not ready yet — try again in a moment.");
+      return null;
+    }
+    const vw = raw.videoWidth;
+    const vh = raw.videoHeight;
+    if (!vw || !vh) {
+      showToast("Could not read video frame.");
+      return null;
+    }
+    const c = document.createElement("canvas");
+    c.width = vw;
+    c.height = vh;
+    const g = c.getContext("2d");
+    if (!g) {
+      showToast("Could not capture frame.");
+      return null;
+    }
+    try {
+      g.drawImage(raw, 0, 0, vw, vh);
+    } catch (e) {
+      console.error("Notch screengrab drawImage", e);
+      showToast("Could not capture this video (protected content).");
+      return null;
+    }
+    let blob;
+    try {
+      blob = await new Promise((resolve, reject) => {
+        try {
+          c.toBlob((b) => (b ? resolve(b) : reject(new Error("empty blob"))), "image/png");
+        } catch (e) {
+          reject(e);
+        }
+      });
+    } catch (e) {
+      console.error("Notch screengrab toBlob", e);
+      showToast("Could not export frame (this site may block captures).");
+      return null;
+    }
+    const t = Number.isFinite(raw.currentTime) ? raw.currentTime : 0;
+    const base = `notch-frame_${sanitizeFilenamePart(clip.clipId)}_${formatTimestampForFilename(t)}`;
+    return { blob, base };
+  }
+
+  async function downloadCurrentVideoFrame() {
+    const got = await captureCurrentVideoFrameBlob();
+    if (!got) return;
+    const url = URL.createObjectURL(got.blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${got.base}.png`;
+    a.rel = "noopener";
+    document.documentElement.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast("Frame downloaded.");
+  }
+
+  async function copyCurrentVideoFrameToClipboard() {
+    const got = await captureCurrentVideoFrameBlob();
+    if (!got) return;
+    if (typeof ClipboardItem === "undefined") {
+      showToast("Copy image is not supported in this browser.");
+      return;
+    }
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": got.blob })]);
+      showToast("Frame copied to clipboard.");
+    } catch (e) {
+      console.error("Notch screengrab clipboard", e);
+      showToast("Could not copy image to clipboard.");
+    }
   }
 
   async function copyReviewLink() {
