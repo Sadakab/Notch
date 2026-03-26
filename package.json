@@ -4,7 +4,7 @@
   "description": "",
   "main": "background.js",
   "scripts": {
-    "build": "npx esbuild src/sw-main.js --bundle --format=esm --outfile=background.js --platform=browser && npx esbuild src/auth-page.js --bundle --outfile=auth-page.js --format=iife --platform=browser",
+    "build": "npx esbuild src/sw-main.js --bundle --format=esm --outfile=background.js --platform=browser && npx esbuild src/auth-page.js --bundle --outfile=auth-page.js --format=iife --platform=browser && npx esbuild src/jspdf-bridge.js --bundle --format=iife --outfile=jspdf-bridge.js --platform=browser",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
@@ -20,7 +20,8 @@
   },
   "homepage": "https://github.com/Sadakab/Notch#readme",
   "dependencies": {
-    "@supabase/supabase-js": "^2.100.0"
+    "@supabase/supabase-js": "^2.100.0",
+    "jspdf": "^3.0.4"
   },
   "devDependencies": {
     "esbuild": "^0.27.4"

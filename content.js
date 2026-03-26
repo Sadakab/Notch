@@ -2993,6 +2993,7 @@
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
             </div>
             <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
+            <button type="button" class="mf-btn" data-action="export-pdf">Export PDF</button>
             <div class="mf-screengrab-wrap">
               <button
                 type="button"
@@ -3414,6 +3415,10 @@
       copyReviewLink();
     });
 
+    root.querySelector('[data-action="export-pdf"]').addEventListener("click", () => {
+      void generateCommentsPdf();
+    });
+
     root.querySelector('[data-action="screengrab-download"]').addEventListener("click", () => {
       void downloadCurrentVideoFrame();
     });
@@ -3454,6 +3459,650 @@
     return h > 0 ? `${pad(h)}h${pad(m)}m${pad(r)}s` : `${pad(m)}m${pad(r)}s`;
   }
 
+  function formatExportStampForFilename() {
+    return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  }
+
+  function clampVideoSeekTime(video, timeSec) {
+    let t = Number.isFinite(timeSec) ? timeSec : 0;
+    if (t < 0) t = 0;
+    const d = video.duration;
+    if (Number.isFinite(d) && d > 0) {
+      const eps = 0.06;
+      t = Math.min(t, Math.max(eps, d - eps));
+    }
+    return t;
+  }
+
+  function seekVideoAwaitSeeked(video, timeSec, timeoutMs) {
+    const target = clampVideoSeekTime(video, timeSec);
+    return new Promise((resolve, reject) => {
+      let done = false;
+      let tid = null;
+      let poll = null;
+      function cleanup() {
+        if (tid !== null) {
+          clearTimeout(tid);
+          tid = null;
+        }
+        if (poll !== null) {
+          clearInterval(poll);
+          poll = null;
+        }
+        video.removeEventListener("seeked", onSeeked);
+      }
+      function finishOk() {
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve();
+      }
+      function finishErr(e) {
+        if (done) return;
+        done = true;
+        cleanup();
+        reject(e);
+      }
+      /** Keyframe-snapped streams can land a few seconds from `target`; don't reject that as "not done". */
+      const nearTarget = () => Math.abs((video.currentTime || 0) - target) <= 4.5;
+
+      function checkSettled() {
+        if (done) return;
+        if (video.seeking) return;
+        if (!nearTarget()) return;
+        finishOk();
+      }
+      const onSeeked = () => finishOk();
+
+      tid = setTimeout(() => finishErr(new Error("seek timeout")), timeoutMs);
+
+      if (Math.abs((video.currentTime || 0) - target) < 0.05 && !video.seeking) {
+        finishOk();
+        return;
+      }
+
+      video.addEventListener("seeked", onSeeked, { once: true });
+      poll = setInterval(checkSettled, 90);
+      try {
+        video.currentTime = target;
+      } catch (e) {
+        finishErr(e);
+        return;
+      }
+      requestAnimationFrame(checkSettled);
+    });
+  }
+
+  async function waitVideoHasDrawableFrame(video, timeoutMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+      if (
+        !video.seeking &&
+        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+        video.videoWidth > 0 &&
+        video.videoHeight > 0
+      ) {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 45));
+    }
+    return false;
+  }
+
+  /** Draw current frame to canvas; no toasts. */
+  function videoFrameToCaptureCanvas(raw) {
+    if (!(raw instanceof HTMLVideoElement) || !raw.isConnected) return null;
+    if (raw.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return null;
+    const vw = raw.videoWidth;
+    const vh = raw.videoHeight;
+    if (!vw || !vh) return null;
+    const c = document.createElement("canvas");
+    c.width = vw;
+    c.height = vh;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    try {
+      g.drawImage(raw, 0, 0, vw, vh);
+    } catch (e) {
+      console.error("Notch screengrab drawImage", e);
+      return null;
+    }
+    return { canvas: c, w: vw, h: vh };
+  }
+
+  /** PNG data URL from current frame, or null (no user toasts). */
+  function videoElementToPngDataUrl(raw) {
+    const cap = videoFrameToCaptureCanvas(raw);
+    if (!cap) return null;
+    try {
+      return cap.canvas.toDataURL("image/png");
+    } catch (e) {
+      console.error("Notch screengrab toDataURL", e);
+      return null;
+    }
+  }
+
+  /** For PDF: seek, wait for a decodable frame, return canvas (jsPDF addImage handles canvas reliably). */
+  async function captureVideoFrameCanvasForPdf(clip, timeSec) {
+    const raw = clip && clip.getVideoElement();
+    if (!(raw instanceof HTMLVideoElement) || !raw.isConnected) return null;
+    try {
+      await seekVideoAwaitSeeked(raw, timeSec, 6000);
+    } catch {
+      return null;
+    }
+    const ok = await waitVideoHasDrawableFrame(raw, 2500);
+    if (!ok) return null;
+    await new Promise((r) => requestAnimationFrame(r));
+    await new Promise((r) => requestAnimationFrame(r));
+    return videoFrameToCaptureCanvas(raw);
+  }
+
+  function naturalSizeFromDataUrl(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const im = new Image();
+      im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+      im.onerror = () => reject(new Error("image load"));
+      im.src = dataUrl;
+    });
+  }
+
+  /** Match content.css —mf-bg / —mf-text / —mf-accent */
+  const NOTCH_PDF_BG = [13, 13, 15];
+  const NOTCH_PDF_ELEVATED = [20, 20, 24];
+  const NOTCH_PDF_TEXT = [224, 224, 226];
+  const NOTCH_PDF_MUTED = [128, 130, 138];
+  const NOTCH_PDF_ACCENT = [0, 229, 255];
+
+  function arrayBufferToBase64ForPdf(buffer) {
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  /** Preserve aspect ratio inside maxW × maxH (fixes “squished” stills). */
+  function pdfFitImageMm(nw, nh, maxW, maxH) {
+    if (!nw || !nh || maxW <= 0 || maxH <= 0) return { w: maxW, h: maxH };
+    const scale = Math.min(maxW / nw, maxH / nh);
+    return { w: nw * scale, h: nh * scale };
+  }
+
+  function pdfFillNotchPageBackground(doc, pageW, pageH) {
+    doc.setFillColor.apply(doc, NOTCH_PDF_BG);
+    doc.rect(0, 0, pageW, pageH, "F");
+  }
+
+  /**
+   * Notch UI uses Roboto (see content.css --mf-font); load from gstatic with Helvetica fallback.
+   * Black = 900 weight for the wordmark (bolder than Bold).
+   */
+  async function registerNotchPdfRobotoFonts(doc) {
+    const regularUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxP.ttf";
+    const boldUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmEU9fChc9.ttf";
+    const blackUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmWUlfChc9.ttf";
+    const out = { ok: false, black: false };
+    try {
+      const [reg, bol] = await Promise.all([fetch(regularUrl), fetch(boldUrl)]);
+      if (!reg.ok || !bol.ok) return out;
+      const [regBuf, bolBuf] = await Promise.all([reg.arrayBuffer(), bol.arrayBuffer()]);
+      doc.addFileToVFS("Roboto-Regular.ttf", arrayBufferToBase64ForPdf(regBuf));
+      doc.addFont("Roboto-Regular.ttf", "Roboto", "normal");
+      doc.addFileToVFS("Roboto-Bold.ttf", arrayBufferToBase64ForPdf(bolBuf));
+      doc.addFont("Roboto-Bold.ttf", "Roboto", "bold");
+      out.ok = true;
+      try {
+        const bl = await fetch(blackUrl);
+        if (bl.ok) {
+          const blBuf = await bl.arrayBuffer();
+          doc.addFileToVFS("Roboto-Black.ttf", arrayBufferToBase64ForPdf(blBuf));
+          doc.addFont("Roboto-Black.ttf", "Roboto", "black");
+          out.black = true;
+        }
+      } catch (_) {}
+      return out;
+    } catch (e) {
+      console.warn("Notch PDF Roboto", e);
+      return out;
+    }
+  }
+
+  /** 720p landscape pages (matches 16:9 at 1280×720). */
+  const PDF_PAGE_PX = { w: 1280, h: 720 };
+  const PDF_COVER_GAP = {
+    afterBrand: 72,
+    subAfter: 36,
+    ruleAfter: 92,
+    titleAfter: 44,
+    platAfter: 44,
+    genAfter: 36,
+  };
+  /** Tuned for 720px-tall pages under the still. */
+  const PDF_COMMENT_GAP = {
+    head: 28,
+    afterStill: 20,
+    author: 16,
+    line: 14,
+    afterBody: 12,
+  };
+
+  function pdfTitleCoverBlockHeight(doc, face, brandStyle, titleLineCount, lineHTitle) {
+    let h = 0;
+    doc.setFont(face, brandStyle);
+    doc.setFontSize(88);
+    h += doc.internal.getLineHeight() / doc.internal.scaleFactor + PDF_COVER_GAP.afterBrand;
+    doc.setFont(face, "normal");
+    doc.setFontSize(22);
+    h += doc.internal.getLineHeight() / doc.internal.scaleFactor + PDF_COVER_GAP.subAfter + PDF_COVER_GAP.ruleAfter;
+    doc.setFont(face, "bold");
+    doc.setFontSize(28);
+    h += titleLineCount * lineHTitle + PDF_COVER_GAP.titleAfter;
+    doc.setFont(face, "normal");
+    doc.setFontSize(20);
+    const lhMeta = doc.internal.getLineHeight() / doc.internal.scaleFactor;
+    h += lhMeta + PDF_COVER_GAP.platAfter + lhMeta + PDF_COVER_GAP.genAfter + lhMeta;
+    return h;
+  }
+
+  function canvasRoundRectPath(ctx, x, y, w, h, r) {
+    const rr = Math.min(Math.max(0, r), w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  }
+
+  /**
+   * Draw source into destW×destH with rounded corners (radiusFrac of min side). Renders at higher
+   * internal res for smooth edges; embed as PNG so corners show in all PDF viewers (PDF clip is flaky).
+   */
+  function rasterToRoundedPngDataUrl(sourceCanvas, destW, destH, radiusFrac) {
+    if (!sourceCanvas || !destW || !destH) return null;
+    const r = Math.max(1, Math.min(destW, destH) * radiusFrac);
+    const dpr = Math.min(2, Math.max(1, Math.floor(1400 / Math.max(destW, destH, 1))));
+    const cw = Math.max(1, Math.round(destW * dpr));
+    const ch = Math.max(1, Math.round(destH * dpr));
+    const c = document.createElement("canvas");
+    c.width = cw;
+    c.height = ch;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    g.clearRect(0, 0, cw, ch);
+    g.save();
+    try {
+      g.scale(dpr, dpr);
+      if (typeof g.roundRect === "function") {
+        g.beginPath();
+        g.roundRect(0, 0, destW, destH, r, r);
+        g.clip();
+      } else {
+        canvasRoundRectPath(g, 0, 0, destW, destH, r);
+        g.clip();
+      }
+      g.drawImage(sourceCanvas, 0, 0, destW, destH);
+      return c.toDataURL("image/png");
+    } catch (e) {
+      console.error("Notch PDF rounded raster", e);
+      return null;
+    } finally {
+      g.restore();
+    }
+  }
+
+  async function dataUrlToRoundedPngDataUrl(dataUrl, destW, destH, radiusFrac) {
+    const im = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("img"));
+      i.src = dataUrl;
+    });
+    const r = Math.max(1, Math.min(destW, destH) * radiusFrac);
+    const dpr = Math.min(2, Math.max(1, Math.floor(1200 / Math.max(destW, destH, 1))));
+    const cw = Math.max(1, Math.round(destW * dpr));
+    const ch = Math.max(1, Math.round(destH * dpr));
+    const c = document.createElement("canvas");
+    c.width = cw;
+    c.height = ch;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    g.clearRect(0, 0, cw, ch);
+    g.save();
+    try {
+      g.scale(dpr, dpr);
+      if (typeof g.roundRect === "function") {
+        g.beginPath();
+        g.roundRect(0, 0, destW, destH, r, r);
+        g.clip();
+      } else {
+        canvasRoundRectPath(g, 0, 0, destW, destH, r);
+        g.clip();
+      }
+      g.drawImage(im, 0, 0, destW, destH);
+      return c.toDataURL("image/png");
+    } finally {
+      g.restore();
+    }
+  }
+
+  /** Flat rounded “frame missing” bitmap for reliable corners in viewers. */
+  function placeholderRoundedPngDataUrl(w, h, r, label) {
+    const dpr = Math.min(2, Math.max(1, Math.floor(900 / Math.max(w, h, 1))));
+    const cw = Math.max(1, Math.round(w * dpr));
+    const ch = Math.max(1, Math.round(h * dpr));
+    const c = document.createElement("canvas");
+    c.width = cw;
+    c.height = ch;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    g.clearRect(0, 0, cw, ch);
+    g.save();
+    g.scale(dpr, dpr);
+    g.fillStyle = "rgb(30,31,36)";
+    if (typeof g.roundRect === "function") {
+      g.beginPath();
+      g.roundRect(0, 0, w, h, r, r);
+      g.fill();
+      g.strokeStyle = "rgb(55,58,65)";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.roundRect(0, 0, w, h, r, r);
+      g.stroke();
+    } else {
+      canvasRoundRectPath(g, 0, 0, w, h, r);
+      g.fill();
+      g.lineWidth = 1;
+      g.strokeStyle = "rgb(55,58,65)";
+      canvasRoundRectPath(g, 0, 0, w, h, r);
+      g.stroke();
+    }
+    g.fillStyle = "rgb(128,130,138)";
+    g.font = `${Math.max(12, Math.min(22, h * 0.06))}px sans-serif`;
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(label, w / 2, h / 2);
+    g.restore();
+    return c.toDataURL("image/png");
+  }
+
+  function formatPdfPlatformLabel(platform) {
+    const map = {
+      youtube: "YouTube",
+      vimeo: "Vimeo",
+      loom: "Loom",
+      googledrive: "Google Drive",
+      dropbox: "Dropbox",
+    };
+    if (map[platform]) return map[platform];
+    if (!platform) return "Video";
+    return String(platform).replace(/^[a-z]/, (c) => c.toUpperCase());
+  }
+
+  async function generateCommentsPdf() {
+    const clip = resolveClipContext();
+    if (!clip) {
+      showToast("No video context.");
+      return;
+    }
+    if (!state.comments.length) {
+      showToast("No comments to export.");
+      return;
+    }
+    const JsPDF = globalThis.NotchJsPDF;
+    if (typeof JsPDF !== "function") {
+      showToast("PDF export unavailable — reload the page.");
+      return;
+    }
+    const raw = clip.getVideoElement();
+    if (!(raw instanceof HTMLVideoElement)) {
+      showToast("Open a video page to include frames.");
+      return;
+    }
+    if (!raw.isConnected) {
+      showToast("No video found.");
+      return;
+    }
+
+    const exportBtn = root && root.querySelector('[data-action="export-pdf"]');
+    if (exportBtn) exportBtn.disabled = true;
+
+    showToast("Generating PDF…");
+    const sorted = [...state.comments].sort((a, b) => a.ts - b.ts);
+    const prevTime = raw.currentTime;
+    const wasPaused = raw.paused;
+    raw.pause();
+
+    try {
+      const rawRecord = await getClipRecordForDisplay(clip);
+      const videoTitle = clipDisplayTitleFromRecord(rawRecord, clip);
+      const doc = new JsPDF({
+        unit: "px",
+        format: [PDF_PAGE_PX.w, PDF_PAGE_PX.h],
+        orientation: "landscape",
+      });
+      const pageW = doc.internal.pageSize.getWidth();
+      const pageH = doc.internal.pageSize.getHeight();
+      const margin = Math.round(pageW * 0.028);
+      const maxTextW = pageW - 2 * margin;
+      const cx = pageW / 2;
+
+      pdfFillNotchPageBackground(doc, pageW, pageH);
+      const pdfFonts = await registerNotchPdfRobotoFonts(doc);
+      const face = pdfFonts.ok ? "Roboto" : "helvetica";
+      const brandStyle = pdfFonts.ok && pdfFonts.black ? "black" : "bold";
+
+      let videoPageUrl = "";
+      try {
+        videoPageUrl = typeof clip.openUrl === "function" ? String(clip.openUrl() || "") : "";
+      } catch (_) {}
+      if (!videoPageUrl) videoPageUrl = location.href;
+
+      const titleStr = String(videoTitle);
+      const titleMaxW = Math.min(maxTextW, Math.round(pageW * 0.78));
+      doc.setFont(face, "bold");
+      doc.setFontSize(28);
+      const titleLineCount = doc.splitTextToSize(titleStr, titleMaxW).length;
+      const lineHTitle = doc.internal.getLineHeight() / doc.internal.scaleFactor;
+      const coverBlockH = pdfTitleCoverBlockHeight(doc, face, brandStyle, titleLineCount, lineHTitle);
+      let y = Math.max(margin, Math.round((pageH - coverBlockH) / 2));
+
+      doc.setFont(face, brandStyle);
+      doc.setFontSize(88);
+      doc.setTextColor(255, 255, 255);
+      const wNotch = doc.getTextWidth("Notch");
+      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
+      const wDot = doc.getTextWidth(".");
+      const brandX = cx - (wNotch + wDot) / 2;
+      doc.setTextColor(255, 255, 255);
+      doc.text("Notch", brandX, y);
+      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
+      doc.text(".", brandX + wNotch, y);
+      y += PDF_COVER_GAP.afterBrand;
+
+      doc.setFont(face, "normal");
+      doc.setFontSize(22);
+      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
+      doc.text("Review report", cx, y, { align: "center" });
+      y += PDF_COVER_GAP.subAfter;
+      doc.setDrawColor.apply(doc, NOTCH_PDF_ACCENT);
+      doc.setLineWidth(4);
+      doc.line(cx - 260, y, cx + 260, y);
+      y += PDF_COVER_GAP.ruleAfter;
+
+      doc.setFont(face, "bold");
+      doc.setFontSize(28);
+      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
+      doc.textWithLink(titleStr, cx, y, {
+        url: videoPageUrl,
+        align: "center",
+        maxWidth: titleMaxW,
+      });
+      y += titleLineCount * lineHTitle + PDF_COVER_GAP.titleAfter;
+
+      doc.setFont(face, "normal");
+      doc.setFontSize(20);
+      doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
+      doc.text(formatPdfPlatformLabel(clip.platform), cx, y, { align: "center" });
+      y += PDF_COVER_GAP.platAfter;
+
+      doc.text(`Generated ${new Date().toLocaleString()}`, cx, y, { align: "center" });
+      y += PDF_COVER_GAP.genAfter;
+      doc.text(
+        `${sorted.length} comment${sorted.length === 1 ? "" : "s"}`,
+        cx,
+        y,
+        { align: "center" }
+      );
+
+      const maxImgW = maxTextW;
+      const radiusFrac = 0.05;
+
+      for (let i = 0; i < sorted.length; i++) {
+        const c = sorted[i];
+        doc.addPage();
+        pdfFillNotchPageBackground(doc, pageW, pageH);
+        y = margin;
+
+        let stillCap = null;
+        try {
+          stillCap = await captureVideoFrameCanvasForPdf(clip, c.ts);
+        } catch (e) {
+          console.error("Notch PDF frame", e);
+        }
+
+        const textBlock = (c.text || "").trim() || "(no text)";
+        const commentTextLines = doc.splitTextToSize(textBlock, maxTextW);
+        let markupDims = null;
+        if (c.drawing && typeof c.drawing === "string" && c.drawing.startsWith("data:")) {
+          try {
+            const { w: dw, h: dh } = await naturalSizeFromDataUrl(c.drawing);
+            if (dw > 0 && dh > 0) {
+              markupDims = pdfFitImageMm(dw, dh, Math.min(maxImgW, Math.round(pageW * 0.42)), 140);
+            }
+          } catch {
+            markupDims = null;
+          }
+        }
+
+        const headH = PDF_COMMENT_GAP.head;
+        const gapAfterStill = PDF_COMMENT_GAP.afterStill;
+        const authorBlock = PDF_COMMENT_GAP.author;
+        const afterH = PDF_COMMENT_GAP.afterBody;
+        const markupLabelH = markupDims ? 18 + 12 : 0;
+        const markupExtraH = markupDims ? markupDims.h + 18 : 0;
+        const textH = commentTextLines.length * PDF_COMMENT_GAP.line;
+        const reservedBelowStill =
+          gapAfterStill + authorBlock + textH + afterH + markupLabelH + markupExtraH + 12;
+        const maxImgH = Math.max(
+          88,
+          Math.min(
+            Math.round(pageH * 0.48),
+            pageH - margin - headH - margin - reservedBelowStill
+          )
+        );
+
+        const defaultFrame = pdfFitImageMm(1920, 1080, maxImgW, maxImgH);
+        let imgW = defaultFrame.w;
+        let imgH = defaultFrame.h;
+        if (stillCap && stillCap.w > 0 && stillCap.h > 0) {
+          const fit = pdfFitImageMm(stillCap.w, stillCap.h, maxImgW, maxImgH);
+          imgW = fit.w;
+          imgH = fit.h;
+        }
+
+        const stillR = Math.min(imgW, imgH) * radiusFrac;
+
+        doc.setFont(face, "bold");
+        doc.setFontSize(17);
+        doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
+        doc.text(`#${i + 1} · ${formatTime(c.ts)}`, margin, y);
+        y += headH;
+
+        doc.setFont(face, "normal");
+        if (stillCap && stillCap.canvas) {
+          const roundedPng = rasterToRoundedPngDataUrl(stillCap.canvas, imgW, imgH, radiusFrac);
+          if (roundedPng) {
+            try {
+              doc.addImage(roundedPng, "PNG", margin, y, imgW, imgH);
+            } catch (e) {
+              console.error("Notch PDF addImage still", e);
+              const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
+              if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
+            }
+          } else {
+            const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
+            if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
+          }
+        } else {
+          const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
+          if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
+        }
+        y += imgH + gapAfterStill;
+
+        doc.setFontSize(14);
+        doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
+        doc.text(String(c.author || "You"), margin, y);
+        y += authorBlock;
+        doc.setFont(face, "normal");
+        doc.setFontSize(13);
+        doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
+        for (const line of commentTextLines) {
+          doc.text(line, margin, y);
+          y += PDF_COMMENT_GAP.line;
+        }
+        y += afterH;
+
+        if (markupDims && c.drawing && typeof c.drawing === "string" && c.drawing.startsWith("data:")) {
+          doc.setFont(face, "bold");
+          doc.setFontSize(12);
+          doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
+          doc.text("Markup", margin, y);
+          y += 18;
+          doc.setFont(face, "normal");
+          try {
+            const mkRounded = await dataUrlToRoundedPngDataUrl(
+              c.drawing,
+              markupDims.w,
+              markupDims.h,
+              radiusFrac
+            );
+            if (mkRounded) doc.addImage(mkRounded, "PNG", margin, y, markupDims.w, markupDims.h);
+            y += markupDims.h + 6;
+          } catch (e) {
+            console.error("Notch PDF markup", e);
+            y += 4;
+          }
+        }
+      }
+
+      const fname = `notch-report_${sanitizeFilenamePart(clip.clipId)}_${formatExportStampForFilename()}.pdf`;
+      doc.save(fname);
+      showToast("PDF downloaded.");
+    } catch (e) {
+      console.error("Notch PDF export", e);
+      showToast("Could not generate PDF.");
+    } finally {
+      try {
+        raw.currentTime = prevTime;
+      } catch (_) {}
+      if (!wasPaused) {
+        try {
+          void raw.play();
+        } catch (_) {}
+      }
+      if (exportBtn) exportBtn.disabled = false;
+    }
+  }
+
   async function captureCurrentVideoFrameBlob() {
     const clip = resolveClipContext();
     if (!clip) return null;
@@ -3480,32 +4129,16 @@
       showToast("Could not read video frame.");
       return null;
     }
-    const c = document.createElement("canvas");
-    c.width = vw;
-    c.height = vh;
-    const g = c.getContext("2d");
-    if (!g) {
-      showToast("Could not capture frame.");
-      return null;
-    }
-    try {
-      g.drawImage(raw, 0, 0, vw, vh);
-    } catch (e) {
-      console.error("Notch screengrab drawImage", e);
+    const dataUrl = videoElementToPngDataUrl(raw);
+    if (!dataUrl) {
       showToast("Could not capture this video (protected content).");
       return null;
     }
     let blob;
     try {
-      blob = await new Promise((resolve, reject) => {
-        try {
-          c.toBlob((b) => (b ? resolve(b) : reject(new Error("empty blob"))), "image/png");
-        } catch (e) {
-          reject(e);
-        }
-      });
+      blob = await (await fetch(dataUrl)).blob();
     } catch (e) {
-      console.error("Notch screengrab toBlob", e);
+      console.error("Notch screengrab blob", e);
       showToast("Could not export frame (this site may block captures).");
       return null;
     }
