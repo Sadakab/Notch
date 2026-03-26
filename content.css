@@ -900,17 +900,62 @@
 
 #markframe-root .mf-comment-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 0;
 }
 
-#markframe-root .mf-comment-author-row {
+#markframe-root .mf-comment-head {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-start;
+  gap: 8px;
   min-width: 0;
   flex: 1;
+}
+
+#markframe-root .mf-comment-body-col {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+#markframe-root .mf-comment-name-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+#markframe-root .mf-comment-name-row .mf-author {
+  flex: 1;
+  min-width: 0;
+}
+
+#markframe-root .mf-comment-ago {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--mf-text-muted);
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+}
+
+#markframe-root .mf-comment-ts-row {
+  display: flow-root;
+}
+
+#markframe-root .mf-comment-ts-row > .mf-ts {
+  float: left;
+  margin-right: 6px;
+  margin-top: 1px;
+  line-height: 1.35;
+}
+
+#markframe-root .mf-comment-ts-row > .mf-comment-text {
+  overflow: hidden;
+  line-height: 1.45;
+  padding-top: 1px;
 }
 
 #markframe-root .mf-comment-avatar {

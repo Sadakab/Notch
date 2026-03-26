@@ -1654,6 +1654,20 @@
     return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
   }
 
+  /** Rounded relative time for comment timestamps (minutes, hours, days). */
+  function formatRelativeAgo(fromMs) {
+    if (!Number.isFinite(fromMs)) return "";
+    const diffMs = Date.now() - fromMs;
+    if (diffMs < 0) return "";
+    const m = Math.round(diffMs / 60000);
+    if (m < 1) return "just now";
+    if (m < 60) return m + "m ago";
+    const h = Math.round(diffMs / 3600000);
+    if (h < 24) return h + "h ago";
+    const d = Math.round(diffMs / 86400000);
+    return d + "d ago";
+  }
+
   function legacyYoutubeKey(youtubeId) {
     return STORAGE_KEYS.dataPrefix + youtubeId;
   }
@@ -2772,6 +2786,7 @@
       text: String(text).trim(),
       author,
       complete: false,
+      createdAt: Date.now(),
     };
     state.comments.push(c);
     await saveClipData(clip);
@@ -2811,6 +2826,28 @@
       const top = document.createElement("div");
       top.className = "mf-comment-top";
 
+      const head = document.createElement("div");
+      head.className = "mf-comment-head";
+      head.appendChild(createCommentAvatarEl(c.author));
+
+      const bodyCol = document.createElement("div");
+      bodyCol.className = "mf-comment-body-col";
+
+      const nameRow = document.createElement("div");
+      nameRow.className = "mf-comment-name-row";
+      const auth = document.createElement("span");
+      auth.className = "mf-author";
+      auth.textContent = c.author || "You";
+      nameRow.appendChild(auth);
+      const createdAt =
+        typeof c.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null;
+      if (createdAt != null) {
+        const agoEl = document.createElement("span");
+        agoEl.className = "mf-comment-ago";
+        agoEl.textContent = formatRelativeAgo(createdAt);
+        nameRow.appendChild(agoEl);
+      }
+
       const tsBtn = document.createElement("button");
       tsBtn.type = "button";
       tsBtn.className = "mf-ts";
@@ -2821,14 +2858,18 @@
         if (FEATURE_DRAWING && c.drawing) overlayDrawingPreview(c.drawing);
         renderThread();
       });
+      const tsRow = document.createElement("div");
+      tsRow.className = "mf-comment-ts-row";
+      tsRow.appendChild(tsBtn);
 
-      const authorRow = document.createElement("div");
-      authorRow.className = "mf-comment-author-row";
-      authorRow.appendChild(createCommentAvatarEl(c.author));
-      const auth = document.createElement("span");
-      auth.className = "mf-author";
-      auth.textContent = c.author || "You";
-      authorRow.appendChild(auth);
+      const text = document.createElement("div");
+      text.className = "mf-comment-text";
+      text.textContent = c.text;
+      tsRow.appendChild(text);
+
+      bodyCol.appendChild(nameRow);
+      bodyCol.appendChild(tsRow);
+      head.appendChild(bodyCol);
 
       const doneWrap = document.createElement("div");
       doneWrap.className = "mf-complete-wrap";
@@ -2844,16 +2885,10 @@
       });
       doneWrap.appendChild(statusBtn);
 
-      top.appendChild(tsBtn);
-      top.appendChild(authorRow);
+      top.appendChild(head);
       top.appendChild(doneWrap);
 
-      const text = document.createElement("div");
-      text.className = "mf-comment-text";
-      text.textContent = c.text;
-
       el.appendChild(top);
-      el.appendChild(text);
 
       if (FEATURE_DRAWING && c.drawing) {
         const row = document.createElement("div");
