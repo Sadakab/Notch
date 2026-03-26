@@ -163,7 +163,7 @@
 
 #markframe-root .mf-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   padding: 10px 12px;
   background: var(--mf-bg-elevated);
@@ -184,6 +184,10 @@
   color: var(--mf-text-muted);
   letter-spacing: 0.02em;
   text-transform: uppercase;
+}
+
+#markframe-root .mf-header-sub:empty {
+  display: none;
 }
 
 #markframe-root .mf-brand {
