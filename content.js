@@ -104,6 +104,8 @@
     lastX: 0,
     lastY: 0,
     selectedId: null,
+    /** Root comment id when inline reply composer is open; null when closed. */
+    replyTargetId: null,
     hasInk: false,
     /** True while a clip is active but user chose "All reviews" (no navigation). */
     dashboardForced: false,
@@ -1971,6 +1973,12 @@
   }
 
   function normalizeCommentsShape() {
+    const ids = new Set(state.comments.map((c) => c.id));
+    for (const c of state.comments) {
+      if (c.parentId != null && c.parentId !== "" && !ids.has(String(c.parentId))) {
+        delete c.parentId;
+      }
+    }
     for (const c of state.comments) {
       if (typeof c.complete !== "boolean") {
         c.complete = c.reaction === "approve";
@@ -1995,6 +2003,7 @@
   }
 
   async function loadClipData(clip) {
+    state.replyTargetId = null;
     await refreshCloudUser(false);
     const key = clip.storageKey;
     const configured = await getSupabaseConfigured();
@@ -2467,6 +2476,7 @@
       activeClipStorageKey = null;
       state.comments = [];
       state.selectedId = null;
+      state.replyTargetId = null;
       teardownCanvas();
       if (root && root.dataset.mfView === "watch") {
         renderThread();
@@ -2662,9 +2672,11 @@
 
   function nearestCommentId(currentSec) {
     if (!state.comments.length) return null;
-    let best = state.comments[0].id;
+    const roots = state.comments.filter((c) => !c.parentId);
+    if (!roots.length) return null;
+    let best = roots[0].id;
     let bestDiff = Infinity;
-    for (const c of state.comments) {
+    for (const c of roots) {
       const d = Math.abs((c.ts || 0) - currentSec);
       if (d < bestDiff) {
         bestDiff = d;
@@ -2702,12 +2714,13 @@
     }
   }
 
-  function seekTo(sec) {
+  function seekTo(sec, playAfter = true) {
     videoEl = getActiveVideoEl();
     if (videoEl && Number.isFinite(sec)) {
       videoEl.currentTime = sec;
       try {
-        videoEl.play();
+        if (playAfter) videoEl.play();
+        else videoEl.pause();
       } catch (_) {}
     }
   }
@@ -2774,28 +2787,46 @@
     return holder;
   }
 
-  async function addComment(text) {
+  async function addComment(text, replyToId) {
     const clip = resolveClipContext();
     if (!clip) return;
     videoEl = clip.getVideoElement();
-    const ts = videoEl && Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
     const author = await effectiveDisplayName();
+    const trimmed = String(text).trim();
+    if (!trimmed) return;
+
+    let ts = videoEl && Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
+    let threadParentId = null;
+    if (replyToId) {
+      const parent = state.comments.find((x) => x.id === replyToId);
+      if (parent) {
+        ts = parent.ts;
+        threadParentId = parent.parentId || parent.id;
+      }
+    }
+
     const c = {
       id: uid(),
       ts,
-      text: String(text).trim(),
+      text: trimmed,
       author,
-      complete: false,
       createdAt: Date.now(),
     };
+    if (threadParentId) {
+      c.parentId = threadParentId;
+    } else {
+      c.complete = false;
+    }
+
     state.comments.push(c);
+    state.replyTargetId = null;
     await saveClipData(clip);
     renderThread();
   }
 
   function setCommentComplete(id, complete) {
     const c = state.comments.find((x) => x.id === id);
-    if (!c) return;
+    if (!c || c.parentId) return;
     c.complete = !!complete;
     delete c.reaction;
     const clip = resolveClipContext();
@@ -2803,74 +2834,150 @@
     renderThread();
   }
 
-  function renderThread() {
-    if (!root) return;
-    const thread = root.querySelector(".mf-thread");
-    if (!thread) return;
-    thread.innerHTML = "";
-    if (!state.comments.length) {
-      const empty = document.createElement("div");
-      empty.className = "mf-empty";
-      empty.textContent = "No comments yet.";
-      thread.appendChild(empty);
-      return;
+  function repliesSortedForRoot(rootId) {
+    return state.comments
+      .filter((x) => x.parentId === rootId)
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  }
+
+  function buildReplyComposerEl(rootCommentId) {
+    const wrap = document.createElement("div");
+    wrap.className = "mf-reply-composer";
+    const row = document.createElement("div");
+    row.className = "mf-reply-composer-row";
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.className = "mf-reply-input";
+    inp.placeholder = "Reply…";
+    inp.maxLength = 2000;
+    inp.addEventListener("focus", () => {
+      if (!autoPauseWhenTypingComments) return;
+      const v = getVideoElementForCommentPause();
+      if (v && !v.paused) v.pause();
+    });
+    const post = document.createElement("button");
+    post.type = "button";
+    post.className = "mf-btn mf-btn-primary mf-reply-post";
+    post.textContent = "Post";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "mf-btn mf-reply-cancel";
+    cancel.textContent = "Cancel";
+    function closeComposer() {
+      state.replyTargetId = null;
+      renderThread();
+    }
+    cancel.addEventListener("click", (e) => {
+      e.preventDefault();
+      closeComposer();
+    });
+    async function submit() {
+      const v = inp.value;
+      if (!v.trim()) return;
+      inp.value = "";
+      await addComment(v, rootCommentId);
+    }
+    post.addEventListener("click", (e) => {
+      e.preventDefault();
+      void submit();
+    });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        void submit();
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeComposer();
+      }
+    });
+    row.appendChild(inp);
+    row.appendChild(post);
+    row.appendChild(cancel);
+    wrap.appendChild(row);
+    requestAnimationFrame(() => {
+      try {
+        inp.focus();
+      } catch (_) {}
+    });
+    return wrap;
+  }
+
+  function goToCommentInVideo(c, isReply) {
+    state.selectedId = c.id;
+    seekTo(c.ts, false);
+    if (FEATURE_DRAWING) {
+      let url = null;
+      if (isReply) {
+        const root = state.comments.find((x) => x.id === c.parentId);
+        if (root && root.drawing) url = root.drawing;
+      } else if (c.drawing) {
+        url = c.drawing;
+      }
+      if (url) overlayDrawingPreview(url);
+      else clearCanvasVisuals();
+    }
+    renderThread();
+  }
+
+  function createCommentElement(c, isReply) {
+    const el = document.createElement("div");
+    el.className = "mf-comment" + (isReply ? " mf-reply" : "");
+    if (state.selectedId === c.id) el.classList.add("mf-selected");
+    if (!isReply && !c.complete) el.classList.add("mf-incomplete");
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("button.mf-status-btn")) return;
+      if (e.target.closest(".mf-comment-actions")) return;
+      goToCommentInVideo(c, isReply);
+    });
+
+    const top = document.createElement("div");
+    top.className = "mf-comment-top";
+
+    const head = document.createElement("div");
+    head.className = "mf-comment-head";
+    head.appendChild(createCommentAvatarEl(c.author));
+
+    const bodyCol = document.createElement("div");
+    bodyCol.className = "mf-comment-body-col";
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "mf-comment-name-row";
+    const auth = document.createElement("span");
+    auth.className = "mf-author";
+    auth.textContent = c.author || "You";
+    nameRow.appendChild(auth);
+    const createdAt =
+      typeof c.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null;
+    if (createdAt != null) {
+      const agoEl = document.createElement("span");
+      agoEl.className = "mf-comment-ago";
+      agoEl.textContent = formatRelativeAgo(createdAt);
+      nameRow.appendChild(agoEl);
     }
 
-    const sorted = [...state.comments].sort((a, b) => a.ts - b.ts);
-    for (const c of sorted) {
-      const el = document.createElement("div");
-      el.className = "mf-comment";
-      if (state.selectedId === c.id) el.classList.add("mf-selected");
-      if (!c.complete) el.classList.add("mf-incomplete");
-
-      const top = document.createElement("div");
-      top.className = "mf-comment-top";
-
-      const head = document.createElement("div");
-      head.className = "mf-comment-head";
-      head.appendChild(createCommentAvatarEl(c.author));
-
-      const bodyCol = document.createElement("div");
-      bodyCol.className = "mf-comment-body-col";
-
-      const nameRow = document.createElement("div");
-      nameRow.className = "mf-comment-name-row";
-      const auth = document.createElement("span");
-      auth.className = "mf-author";
-      auth.textContent = c.author || "You";
-      nameRow.appendChild(auth);
-      const createdAt =
-        typeof c.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null;
-      if (createdAt != null) {
-        const agoEl = document.createElement("span");
-        agoEl.className = "mf-comment-ago";
-        agoEl.textContent = formatRelativeAgo(createdAt);
-        nameRow.appendChild(agoEl);
-      }
-
+    const tsRow = document.createElement("div");
+    tsRow.className = "mf-comment-ts-row";
+    if (!isReply) {
       const tsBtn = document.createElement("button");
       tsBtn.type = "button";
       tsBtn.className = "mf-ts";
       tsBtn.textContent = formatTime(c.ts);
-      tsBtn.addEventListener("click", () => {
-        state.selectedId = c.id;
-        seekTo(c.ts);
-        if (FEATURE_DRAWING && c.drawing) overlayDrawingPreview(c.drawing);
-        renderThread();
-      });
-      const tsRow = document.createElement("div");
-      tsRow.className = "mf-comment-ts-row";
       tsRow.appendChild(tsBtn);
+    }
 
-      const text = document.createElement("span");
-      text.className = "mf-comment-text";
-      text.textContent = c.text;
-      tsRow.appendChild(text);
+    const text = document.createElement("span");
+    text.className = "mf-comment-text";
+    text.textContent = c.text;
+    tsRow.appendChild(text);
 
-      bodyCol.appendChild(nameRow);
-      bodyCol.appendChild(tsRow);
-      head.appendChild(bodyCol);
+    bodyCol.appendChild(nameRow);
+    bodyCol.appendChild(tsRow);
+    head.appendChild(bodyCol);
 
+    top.appendChild(head);
+
+    if (!isReply) {
       const doneWrap = document.createElement("div");
       doneWrap.className = "mf-complete-wrap";
       const statusBtn = document.createElement("button");
@@ -2880,33 +2987,78 @@
       statusBtn.title = c.complete ? "Mark incomplete" : "Mark complete";
       statusBtn.appendChild(createLucideCircleCheckIcon());
       statusBtn.addEventListener("click", (e) => {
+        e.preventDefault();
         e.stopPropagation();
         setCommentComplete(c.id, !c.complete);
       });
       doneWrap.appendChild(statusBtn);
-
-      top.appendChild(head);
       top.appendChild(doneWrap);
+    }
 
-      el.appendChild(top);
+    el.appendChild(top);
 
-      if (FEATURE_DRAWING && c.drawing) {
-        const row = document.createElement("div");
-        row.className = "mf-drawing-row";
-        const img = document.createElement("img");
-        img.className = "mf-drawing-thumb";
-        img.src = c.drawing;
-        img.alt = "Annotation";
-        img.addEventListener("click", () => {
-          state.selectedId = c.id;
-          overlayDrawingPreview(c.drawing);
-          renderThread();
-        });
-        row.appendChild(img);
-        el.appendChild(row);
+    if (!isReply && FEATURE_DRAWING && c.drawing) {
+      const row = document.createElement("div");
+      row.className = "mf-drawing-row";
+      const img = document.createElement("img");
+      img.className = "mf-drawing-thumb";
+      img.src = c.drawing;
+      img.alt = "Annotation";
+      row.appendChild(img);
+      el.appendChild(row);
+    }
+
+    if (!isReply) {
+      const actions = document.createElement("div");
+      actions.className = "mf-comment-actions";
+      const replyBtn = document.createElement("button");
+      replyBtn.type = "button";
+      replyBtn.className = "mf-comment-reply-btn";
+      replyBtn.textContent = "Reply";
+      replyBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        state.replyTargetId = state.replyTargetId === c.id ? null : c.id;
+        renderThread();
+      });
+      actions.appendChild(replyBtn);
+      el.appendChild(actions);
+    }
+
+    return el;
+  }
+
+  function renderThread() {
+    if (!root) return;
+    const thread = root.querySelector(".mf-thread");
+    if (!thread) return;
+    thread.innerHTML = "";
+    const roots = state.comments
+      .filter((c) => !c.parentId)
+      .sort((a, b) => a.ts - b.ts);
+    if (!roots.length) {
+      const empty = document.createElement("div");
+      empty.className = "mf-empty";
+      empty.textContent = "No comments yet.";
+      thread.appendChild(empty);
+      return;
+    }
+
+    for (const rootComment of roots) {
+      const block = document.createElement("div");
+      block.className = "mf-comment-block";
+      block.appendChild(createCommentElement(rootComment, false));
+      const reps = repliesSortedForRoot(rootComment.id);
+      if (reps.length) {
+        const repliesEl = document.createElement("div");
+        repliesEl.className = "mf-replies";
+        for (const r of reps) repliesEl.appendChild(createCommentElement(r, true));
+        block.appendChild(repliesEl);
       }
-
-      thread.appendChild(el);
+      if (state.replyTargetId === rootComment.id) {
+        block.appendChild(buildReplyComposerEl(rootComment.id));
+      }
+      thread.appendChild(block);
     }
   }
 
@@ -3876,7 +4028,7 @@
     if (exportBtn) exportBtn.disabled = true;
 
     showToast("Generating PDF…");
-    const sorted = [...state.comments].sort((a, b) => a.ts - b.ts);
+    const roots = state.comments.filter((c) => !c.parentId).sort((a, b) => a.ts - b.ts);
     const prevTime = raw.currentTime;
     const wasPaused = raw.paused;
     raw.pause();
@@ -3957,7 +4109,7 @@
       doc.text(`Generated ${new Date().toLocaleString()}`, cx, y, { align: "center" });
       y += PDF_COVER_GAP.genAfter;
       doc.text(
-        `${sorted.length} comment${sorted.length === 1 ? "" : "s"}`,
+        `${state.comments.length} comment${state.comments.length === 1 ? "" : "s"}`,
         cx,
         y,
         { align: "center" }
@@ -3966,8 +4118,9 @@
       const maxImgW = maxTextW;
       const radiusFrac = 0.05;
 
-      for (let i = 0; i < sorted.length; i++) {
-        const c = sorted[i];
+      for (let i = 0; i < roots.length; i++) {
+        const c = roots[i];
+        const reps = repliesSortedForRoot(c.id);
         doc.addPage();
         pdfFillNotchPageBackground(doc, pageW, pageH);
         y = margin;
@@ -4000,8 +4153,27 @@
         const markupLabelH = markupDims ? 18 + 12 : 0;
         const markupExtraH = markupDims ? markupDims.h + 18 : 0;
         const textH = commentTextLines.length * PDF_COMMENT_GAP.line;
+        let replySectionH = 0;
+        if (reps.length) {
+          doc.setFont(face, "normal");
+          doc.setFontSize(12);
+          const replyW = maxTextW - 24;
+          let replyLines = 0;
+          for (const r of reps) {
+            const replyBlock = `${String(r.author || "You")}: ${((r.text || "").trim() || "(no text)")}`;
+            replyLines += doc.splitTextToSize(replyBlock, replyW).length;
+          }
+          replySectionH = 16 + replyLines * PDF_COMMENT_GAP.line + reps.length * 4 + 8;
+        }
         const reservedBelowStill =
-          gapAfterStill + authorBlock + textH + afterH + markupLabelH + markupExtraH + 12;
+          gapAfterStill +
+          authorBlock +
+          textH +
+          afterH +
+          markupLabelH +
+          markupExtraH +
+          replySectionH +
+          12;
         const maxImgH = Math.max(
           88,
           Math.min(
@@ -4079,6 +4251,27 @@
             y += markupDims.h + 6;
           } catch (e) {
             console.error("Notch PDF markup", e);
+            y += 4;
+          }
+        }
+
+        if (reps.length) {
+          y += 8;
+          doc.setFont(face, "bold");
+          doc.setFontSize(12);
+          doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
+          doc.text("Replies", margin, y);
+          y += 16;
+          doc.setFont(face, "normal");
+          doc.setFontSize(12);
+          doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
+          const replyW = maxTextW - 24;
+          for (const r of reps) {
+            const replyBlock = `${String(r.author || "You")}: ${((r.text || "").trim() || "(no text)")}`;
+            for (const line of doc.splitTextToSize(replyBlock, replyW)) {
+              doc.text(line, margin + 18, y);
+              y += PDF_COMMENT_GAP.line;
+            }
             y += 4;
           }
         }
@@ -4398,6 +4591,7 @@
       activeClipStorageKey = null;
       state.comments = [];
       state.selectedId = null;
+      state.replyTargetId = null;
       state.drawMode = false;
       return;
     }
