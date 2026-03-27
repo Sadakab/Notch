@@ -317,17 +317,19 @@
 
   async function updateSyncBar() {
     if (!root) return;
-    const bar = root.querySelector(".mf-sync-bar");
-    if (!bar) return;
-    const msg = bar.querySelector(".mf-sync-msg");
-    const outBtn = bar.querySelector('[data-action="sign-out"]');
-    if (!msg || !outBtn) return;
+    const syncEl = root.querySelector(".mf-header-sync-msg");
+    const signOutRow = root.querySelector(".mf-settings-sign-out-row");
+    if (syncEl) {
+      if (root.dataset.mfView === "dashboard" && state.cloudUser?.email) {
+        syncEl.textContent = state.cloudUser.email;
+      } else {
+        syncEl.textContent = "";
+      }
+    }
     if (state.cloudUser?.email) {
-      msg.textContent = "Signed in as " + state.cloudUser.email + ".";
-      outBtn.classList.remove("mf-hidden");
+      signOutRow?.classList.remove("mf-hidden");
     } else {
-      msg.textContent = "";
-      outBtn.classList.add("mf-hidden");
+      signOutRow?.classList.add("mf-hidden");
     }
   }
 
@@ -3329,6 +3331,7 @@
           <div class="mf-header-text">
             <div class="mf-brand">Notch</div>
             <div class="mf-header-sub"></div>
+            <p class="mf-header-sync-msg" aria-live="polite"></p>
           </div>
           <div class="mf-header-actions">
             <button type="button" class="mf-back-dashboard" data-action="go-dashboard" title="All reviewed videos">
@@ -3421,12 +3424,6 @@
         </div>
         <div class="mf-dashboard-pane mf-hidden">
           <div class="mf-offyoutube-banner mf-hidden" role="status"></div>
-          <div class="mf-sync-bar">
-            <p class="mf-sync-msg"></p>
-            <div class="mf-sync-actions">
-              <button type="button" class="mf-btn mf-sync-out" data-action="sign-out">Sign out</button>
-            </div>
-          </div>
           <div class="mf-dashboard-list"></div>
         </div>
       </div>
@@ -3455,6 +3452,9 @@
                 spellcheck="false"
               />
             </label>
+            <div class="mf-settings-sign-out-row mf-hidden">
+              <button type="button" class="mf-btn" data-action="sign-out">Sign out</button>
+            </div>
             <label class="mf-settings-label mf-settings-label-tight"
               >Panel corner
               <select class="mf-settings-panel-corner" aria-label="Panel corner">
@@ -3498,7 +3498,7 @@
                 >Invite code
                 <input
                   type="text"
-                  class="mf-settings-invite-code"
+                  class="mf-settings-display-name mf-settings-invite-code"
                   autocomplete="off"
                   maxlength="16"
                   placeholder="e.g. ABC12XY9"
@@ -3530,12 +3530,9 @@
     if (watchPane) watchPane.classList.toggle("mf-hidden", mode !== "watch");
     if (dashPane) dashPane.classList.toggle("mf-hidden", mode !== "dashboard");
     if (sub) {
-      if (mode === "dashboard") {
-        sub.textContent = "Your reviews";
-      } else {
-        sub.textContent = "";
-      }
+      sub.textContent = "";
     }
+    void updateSyncBar();
   }
 
   function updateOffClipBanner() {

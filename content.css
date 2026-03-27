@@ -93,9 +93,13 @@
   font-size: 11px;
 }
 
-#markframe-root[data-mf-compact="1"] .mf-back-dashboard,
-#markframe-root[data-mf-compact="1"] .mf-back-watch {
+#markframe-root[data-mf-compact="1"] .mf-back-dashboard {
   padding: 4px 6px;
+  font-size: 9px;
+}
+
+#markframe-root[data-mf-compact="1"] .mf-back-watch {
+  padding: 0 6px;
   font-size: 9px;
 }
 
@@ -190,6 +194,20 @@
   display: none;
 }
 
+#markframe-root .mf-header-sync-msg {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-header-sync-msg:empty {
+  display: none;
+}
+
 #markframe-root .mf-brand {
   font-weight: 600;
   letter-spacing: -0.02em;
@@ -228,11 +246,14 @@
 #markframe-root .mf-back-watch {
   display: none;
   align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 8px;
   background: transparent;
   border: 1px solid var(--mf-border);
   color: var(--mf-accent);
   border-radius: 6px;
-  padding: 5px 8px;
   font-size: 10px;
   font-weight: 600;
   font-family: var(--mf-font);
@@ -426,6 +447,14 @@
   outline: none;
   border-color: var(--mf-accent);
   box-shadow: 0 0 0 2px var(--mf-accent-dim);
+}
+
+#markframe-root .mf-settings-display-name::placeholder {
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-settings-sign-out-row {
+  margin-top: -4px;
 }
 
 #markframe-root .mf-settings-avatar-url {
@@ -1382,33 +1411,6 @@ body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-lucide {
 
 #markframe-root .mf-toast.mf-show {
   display: block;
-}
-
-#markframe-root .mf-sync-bar {
-  flex-shrink: 0;
-  padding: 10px 12px;
-  margin: 0;
-  border-radius: 8px;
-  background: var(--mf-bg-elevated);
-  border: 1px solid var(--mf-border);
-}
-
-#markframe-root .mf-sync-msg {
-  margin: 0 0 8px;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--mf-text-muted);
-}
-
-#markframe-root .mf-sync-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-#markframe-root .mf-sync-out {
-  font-size: 11px;
-  padding: 5px 10px;
 }
 
 #markframe-root .mf-app-shell {
