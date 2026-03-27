@@ -1783,7 +1783,8 @@
 
   async function getClipRecordForDisplay(clip) {
     await refreshCloudUser(false);
-    if (await getSupabaseConfigured()) {
+    const configured = await getSupabaseConfigured();
+    if (configured && isCloudActive()) {
       const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
@@ -1791,7 +1792,13 @@
         clipId: clip.clipId,
         ...(cloudHostForLoad ? { hostUserId: cloudHostForLoad } : {}),
       });
-      if (r?.ok && r.record) return r.record;
+      if (r?.ok === true) {
+        return r.record ?? null;
+      }
+      return null;
+    }
+    if (configured && !isCloudActive()) {
+      return null;
     }
     const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
     return raw ?? null;
@@ -1836,6 +1843,17 @@
 
   function legacyYoutubeKey(youtubeId) {
     return STORAGE_KEYS.dataPrefix + youtubeId;
+  }
+
+  /** Keys in chrome.storage.local that mirror a clip row (used to clear stale cache when cloud has no row). */
+  function localClipCacheKeys(clip) {
+    const keys = [clip.storageKey];
+    if (clip.platform === "youtube") keys.push(legacyYoutubeKey(clip.clipId));
+    return keys;
+  }
+
+  async function removeLocalClipCacheKeys(clip) {
+    await chrome.storage.local.remove(localClipCacheKeys(clip));
   }
 
   /** Stored display-name override; empty string means use account email or "You". */
@@ -2129,12 +2147,30 @@
     applySidebarVisibility(visible);
   }
 
+  /** Refetch review from Supabase and re-render watch UI (panel shown / expanded). */
+  async function refreshWatchClipFromSupabase() {
+    if (!root || root.dataset.mfView !== "watch" || root.dataset.mfLocked === "1") return;
+    await refreshCloudUser(false);
+    if (!(await getSupabaseConfigured()) || !isCloudActive()) return;
+    const clip = resolveClipContext();
+    if (!clip) return;
+    await loadClipData(clip);
+    await mergeClipMetadata(clip);
+    await refreshWatchVideoTitle(clip);
+    await updateWatchHeaderSub(clip);
+    renderThread();
+  }
+
   function applySidebarVisibility(visible) {
+    const prevHidden = root ? root.classList.contains("mf-hidden") : true;
     if (root) root.classList.toggle("mf-hidden", !visible);
     if (!FEATURE_DRAWING) {
       if (canvasHost) canvasHost.style.visibility = "hidden";
     } else if (canvasHost && !state.drawMode) {
       canvasHost.style.visibility = visible ? "visible" : "hidden";
+    }
+    if (visible && prevHidden) {
+      void refreshWatchClipFromSupabase();
     }
   }
 
@@ -2145,14 +2181,15 @@
       window.innerWidth < 480 || window.innerHeight < 360 ? "1" : "";
   }
 
-  function normalizeCommentsShape() {
-    const ids = new Set(state.comments.map((c) => c.id));
-    for (const c of state.comments) {
+  function normalizeCommentListShape(list) {
+    if (!Array.isArray(list)) return;
+    const ids = new Set(list.map((c) => c.id));
+    for (const c of list) {
       if (c.parentId != null && c.parentId !== "" && !ids.has(String(c.parentId))) {
         delete c.parentId;
       }
     }
-    for (const c of state.comments) {
+    for (const c of list) {
       if (typeof c.complete !== "boolean") {
         c.complete = c.reaction === "approve";
       }
@@ -2161,6 +2198,10 @@
       if (av) c.avatarUrl = av;
       else delete c.avatarUrl;
     }
+  }
+
+  function normalizeCommentsShape() {
+    normalizeCommentListShape(state.comments);
   }
 
   function coerceIncomingComments(raw) {
@@ -2178,6 +2219,27 @@
     return null;
   }
 
+  /** Write-through: persist the latest Supabase row into `markframe_clip_*` keys (and drop legacy YouTube key). */
+  async function mirrorCloudRecordToLocalCache(clip, record) {
+    const key = clip.storageKey;
+    const payload = {
+      comments: state.comments,
+      updatedAt: record.updatedAt ?? Date.now(),
+      title: record.title ?? null,
+      thumbnailUrl: record.thumbnailUrl ?? null,
+      platform: clip.platform,
+      clipId: clip.clipId,
+    };
+    await chrome.storage.local.set({ [key]: payload });
+    if (clip.platform === "youtube") {
+      await chrome.storage.local.remove(legacyYoutubeKey(clip.clipId));
+    }
+    notchLog("loadClipData mirrored cloud row to chrome.storage.local", {
+      key,
+      commentCount: payload.comments.length,
+    });
+  }
+
   async function loadClipData(clip) {
     state.replyTargetId = null;
     state.collapsedReplyRoots.clear();
@@ -2189,15 +2251,18 @@
       (!state.cloudUser?.id ||
         normalizeUuidForCompare(hostBindingRaw) !== normalizeUuidForCompare(state.cloudUser.id));
     const configured = await getSupabaseConfigured();
+    const cloudActive = configured && isCloudActive();
     notchLog("loadClipData start", {
       platform: clip.platform,
       clipId: clip.clipId,
       storageKey: key,
       supabaseConfigured: configured,
+      cloudActive,
       cloudUser: !!state.cloudUser,
       sharedReviewTarget,
     });
-    if (configured) {
+
+    if (cloudActive) {
       let r;
       const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       try {
@@ -2231,9 +2296,20 @@
       else if (r.record == null)
         cloudSkipReason =
           "r.record is null — no row for this platform+clip_id for your user (compare to Supabase clip_reviews), or RLS hiding row";
-      if (cloudSkipReason) notchLog("loadClipData cloud skipped because", cloudSkipReason);
+      if (cloudSkipReason) notchLog("loadClipData cloud path note", cloudSkipReason);
 
-      if (r?.ok === true && r.record != null) {
+      if (r?.ok === true) {
+        if (r.record == null) {
+          await removeLocalClipCacheKeys(clip);
+          await clearCollabHostForClip(clip);
+          state.comments = [];
+          normalizeCommentsShape();
+          notchLog("loadClipData cloud: no row — cleared local cache, empty comments", {
+            key,
+            sharedReviewTarget,
+          });
+          return;
+        }
         const list = coerceIncomingComments(r.record);
         notchLog("loadClipData coerceIncomingComments", {
           listIsNull: list === null,
@@ -2241,29 +2317,32 @@
         });
         if (list !== null) {
           state.comments = list;
-          normalizeCommentsShape();
-          notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
-          return;
+        } else {
+          state.comments = [];
+          notchLog(
+            "loadClipData cloud: row present but comments invalid — using empty array",
+            { key }
+          );
         }
-        notchLog(
-          "loadClipData cloud skipped because",
-          "coerceIncomingComments returned null — record.comments missing or wrong type (expect JSON array)"
-        );
-      }
-      if (sharedReviewTarget) {
-        // For collaborator views, never show stale local cache when the host row is missing/inaccessible.
-        await chrome.storage.local.remove(key);
-        state.comments = [];
-        notchLog("loadClipData shared review: cleared local fallback cache", {
-          key,
-          hadHostBinding: !!hostBindingRaw,
-          cloudOk: r?.ok === true,
-          cloudRecordNull: r?.record == null,
-        });
+        normalizeCommentsShape();
+        await mirrorCloudRecordToLocalCache(clip, r.record);
+        notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
         return;
       }
-      notchLog("loadClipData falling back to local storage");
+      state.comments = [];
+      normalizeCommentsShape();
+      showToast("Could not load notes from the cloud. Check your connection and try again.");
+      notchLog("loadClipData cloud fetch failed — not using local clip cache");
+      return;
     }
+
+    if (configured && !isCloudActive()) {
+      state.comments = [];
+      normalizeCommentsShape();
+      notchLog("loadClipData: Supabase configured but not signed in — skip local clip cache");
+      return;
+    }
+
     let { [key]: raw } = await chrome.storage.local.get(key);
     if (!raw && clip.platform === "youtube") {
       const leg = legacyYoutubeKey(clip.clipId);
@@ -2274,7 +2353,7 @@
       }
     }
     const list = coerceIncomingComments(raw);
-    notchLog("loadClipData local path", {
+    notchLog("loadClipData local path (no cloud project)", {
       hadLocalRow: !!raw,
       listIsNull: list === null,
       listLength: Array.isArray(list) ? list.length : list ? "non-array-truthy" : 0,
@@ -2288,7 +2367,18 @@
     notchLog("loadClipData end (local)", { commentCount: state.comments.length });
   }
 
-  async function saveClipData(clip) {
+  /**
+   * Persist clip review: Supabase first when the project is configured and the user is signed in;
+   * only then mirror to chrome.storage.local (write-through cache). Returns false if cloud save was required but failed.
+   * @param {{ comments?: unknown[] }} [options] If `comments` is set, uses it instead of `state.comments` (no optimistic UI).
+   */
+  async function saveClipData(clip, options) {
+    const commentsPayload = options?.comments != null ? options.comments : state.comments;
+    if (!Array.isArray(commentsPayload)) {
+      notchLog("saveClipData abort: comments not an array");
+      return false;
+    }
+
     const key = clip.storageKey;
     const { [key]: prev } = await chrome.storage.local.get(key);
     let title = prev?.title ?? null;
@@ -2314,14 +2404,18 @@
     }
 
     const payload = {
-      comments: state.comments,
+      comments: commentsPayload,
       updatedAt: Date.now(),
       title,
       thumbnailUrl,
       platform: clip.platform,
       clipId: clip.clipId,
     };
-    if (await getSupabaseConfigured()) {
+
+    const configured = await getSupabaseConfigured();
+    const cloudActive = configured && isCloudActive();
+
+    if (cloudActive) {
       try {
         const hostBindingRaw = await readCollabHostUserIdForClip(clip);
         const cloudHostForSave = await getCloudLoadSaveHostUserId(clip);
@@ -2334,7 +2428,7 @@
           platform: clip.platform,
           clipId: clip.clipId,
           canonicalClipId,
-          commentCount: state.comments.length,
+          commentCount: commentsPayload.length,
           collabHost: !!cloudHostForSave,
           sharedReview,
         });
@@ -2344,51 +2438,67 @@
             canonicalClipId,
             hostBindingRaw: String(hostBindingRaw || ""),
           });
-          if (isCloudActive()) {
-            showToast("Shared review target missing. Re-open the review link.");
-          }
-        } else {
-          const r = await sendExtensionMessage({
-            type: "MF_CLOUD_SAVE_CLIP",
-            platform: clip.platform,
-            clipId: clip.clipId,
-            comments: state.comments,
-            title,
-            thumbnailUrl,
-            ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
-          });
-          const errCode = r?.error ? String(r.error) : "";
-          notchLog("saveClipData cloud result", {
-            ok: r?.ok === true,
-            typeofR: r == null ? "null" : typeof r,
-            error: errCode || null,
-            sharedReview,
-            hostUserId: cloudHostForSave || null,
-            platform: clip.platform,
-            canonicalClipId,
-          });
-          if (!r?.ok && isCloudActive()) {
-            showToast(cloudSaveFailureToast(errCode, sharedReview));
-          }
+          showToast("Shared review target missing. Re-open the review link.");
+          return false;
+        }
+        const r = await sendExtensionMessage({
+          type: "MF_CLOUD_SAVE_CLIP",
+          platform: clip.platform,
+          clipId: clip.clipId,
+          comments: commentsPayload,
+          title,
+          thumbnailUrl,
+          ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
+        });
+        const errCode = r?.error ? String(r.error) : "";
+        notchLog("saveClipData cloud result", {
+          ok: r?.ok === true,
+          typeofR: r == null ? "null" : typeof r,
+          error: errCode || null,
+          sharedReview,
+          hostUserId: cloudHostForSave || null,
+          platform: clip.platform,
+          canonicalClipId,
+        });
+        if (!r?.ok) {
+          showToast(cloudSaveFailureToast(errCode, sharedReview));
+          return false;
         }
       } catch (e) {
         console.error("Notch cloud save", e);
         notchLog("saveClipData cloud exception", String(e?.message || e));
-        if (isCloudActive()) showToast("Could not save to cloud — check your connection.");
+        showToast("Could not save to cloud — check your connection.");
+        return false;
       }
+      await chrome.storage.local.set({ [key]: payload });
+      notchLog("saveClipData mirrored to chrome.storage.local after cloud ok", {
+        key,
+        commentCount: payload.comments.length,
+      });
+      return true;
     }
+
+    if (configured && !isCloudActive()) {
+      showToast("Sign in to save notes to the cloud.");
+      return false;
+    }
+
     await chrome.storage.local.set({ [key]: payload });
-    notchLog("saveClipData mirrored to chrome.storage.local", {
+    notchLog("saveClipData local-only (no Supabase project)", {
       key,
       commentCount: payload.comments.length,
     });
+    return true;
   }
 
   async function mergeClipMetadata(clip) {
     await refreshCloudUser(false);
     const key = clip.storageKey;
+    const configured = await getSupabaseConfigured();
+    const cloudActive = configured && isCloudActive();
+
     let prev = null;
-    if (await getSupabaseConfigured()) {
+    if (cloudActive) {
       const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
@@ -2396,12 +2506,15 @@
         clipId: clip.clipId,
         ...(cloudHostForLoad ? { hostUserId: cloudHostForLoad } : {}),
       });
-      if (r?.ok && r.record) prev = r.record;
-    }
-    if (!prev) {
+      if (r?.ok !== true || !r.record) return;
+      prev = r.record;
+    } else if (configured && !isCloudActive()) {
+      return;
+    } else {
       const got = await chrome.storage.local.get(key);
       prev = got[key];
     }
+
     const prevComments = coerceIncomingComments(prev);
     if (!prev || !prevComments || prevComments.length === 0) return;
     const cur = resolveClipContext();
@@ -2435,7 +2548,8 @@
       clipId: clip.clipId,
     };
     delete next.customTitle;
-    if (await getSupabaseConfigured()) {
+
+    if (cloudActive) {
       try {
         const cloudHostForSave = await getCloudLoadSaveHostUserId(clip);
         const r = await sendExtensionMessage({
@@ -2448,17 +2562,22 @@
           ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
         });
         if (!r?.ok) {
-          notchLog("mergeClipMetadata cloud skip", {
+          notchLog("mergeClipMetadata cloud failed", {
             platform: clip.platform,
             canonicalClipId: canonicalClipIdForCloudLog(clip.platform, clip.clipId),
             error: r?.error ? String(r.error) : null,
             collabHost: !!cloudHostForSave,
           });
+          showToast("Could not update video details in the cloud.");
+          return;
         }
       } catch (e) {
         console.error("Notch cloud merge", e);
+        showToast("Could not update video details in the cloud.");
+        return;
       }
     }
+
     await chrome.storage.local.set({ [key]: next });
   }
 
@@ -2704,6 +2823,7 @@
         throw e;
       }
     }
+    // Write-through: drop mirrored `markframe_clip_<platform>_<clipId>` keys only after cloud delete succeeds (or when cloud is not configured).
     await chrome.storage.local.remove(keys);
 
     const cur = resolveClipContext();
@@ -2932,8 +3052,15 @@
     const png = canvas.toDataURL("image/png");
     const c = state.comments.find((x) => x.id === cid);
     if (c) {
+      const prevDrawing = c.drawing;
       c.drawing = png;
-      await saveClipData(clip);
+      const ok = await saveClipData(clip);
+      if (!ok) {
+        if (prevDrawing !== undefined) c.drawing = prevDrawing;
+        else delete c.drawing;
+        renderThread();
+        return;
+      }
       renderThread();
       clearCanvasVisuals();
       showToast("Drawing saved to nearest comment.");
@@ -3049,20 +3176,30 @@
       c.complete = false;
     }
 
-    state.comments.push(c);
+    const nextComments = state.comments.concat([c]);
+    normalizeCommentListShape(nextComments);
+    const ok = await saveClipData(clip, { comments: nextComments });
+    if (!ok) return;
+    state.comments = nextComments;
     state.replyTargetId = null;
-    await saveClipData(clip);
     renderThread();
   }
 
   function setCommentComplete(id, complete) {
     const c = state.comments.find((x) => x.id === id);
     if (!c || c.parentId) return;
+    const clip = resolveClipContext();
+    if (!clip) return;
+    const prevComplete = c.complete;
     c.complete = !!complete;
     delete c.reaction;
-    const clip = resolveClipContext();
-    if (clip) void saveClipData(clip);
-    renderThread();
+    void (async () => {
+      const ok = await saveClipData(clip);
+      if (!ok) {
+        c.complete = prevComplete;
+      }
+      renderThread();
+    })();
   }
 
   function repliesSortedForRoot(rootId) {
@@ -3838,6 +3975,9 @@
       root.classList.toggle("mf-collapsed", state.collapsed);
       const btn = root.querySelector('[data-action="collapse"]');
       btn.textContent = state.collapsed ? "▸" : "▾";
+      if (!state.collapsed) {
+        void refreshWatchClipFromSupabase();
+      }
     });
 
     root.querySelector('[data-action="open-settings"]').addEventListener("click", () => void openSettingsPanel());
@@ -4852,10 +4992,16 @@
       } else {
         return;
       }
-      state.comments = data.comments;
+      const imported = data.comments;
+      normalizeCommentListShape(imported);
+      const ok = await saveClipData(clip, { comments: imported });
+      if (!ok) {
+        showToast("Could not save imported review to the cloud.");
+        return;
+      }
+      state.comments = imported;
       state.collapsedReplyRoots.clear();
       normalizeCommentsShape();
-      await saveClipData(clip);
       await refreshAuthorPresentationCache();
       renderThread();
       showToast("Imported review from link.");

@@ -798,7 +798,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false });
       return false;
     }
-    getSessionSafe(client).then(({ session, error: sessErr }) => {
+    getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       if (sessErr) {
         sendResponse({ ok: false });
         return;
@@ -808,23 +808,42 @@ export function handleRuntimeMessage(msg, sendResponse) {
         sendResponse({ ok: false });
         return;
       }
-      let q = client.from("clip_reviews").delete().eq("user_id", uid).eq("platform", platform);
+      let reviewQ = client.from("clip_reviews").delete().eq("user_id", uid).eq("platform", platform);
       if (platform === "dropbox") {
         const canonical = normalizeDropboxClipIdForDb(platform, clipId);
         const pat = sqlLikePrefixFromPath(canonical);
-        if (pat) q = q.like("clip_id", pat);
-        else q = q.eq("clip_id", clipId);
+        if (pat) reviewQ = reviewQ.like("clip_id", pat);
+        else reviewQ = reviewQ.eq("clip_id", clipId);
       } else {
-        q = q.eq("clip_id", clipId);
+        reviewQ = reviewQ.eq("clip_id", clipId);
       }
-      q.then(({ error }) => {
-        if (error) {
-          console.error("Notch cloud delete", error);
-          sendResponse({ ok: false });
-          return;
-        }
-        sendResponse({ ok: true });
-      });
+      const { error: reviewErr } = await reviewQ;
+      if (reviewErr) {
+        console.error("Notch cloud delete clip_reviews", reviewErr);
+        sendResponse({ ok: false });
+        return;
+      }
+      let collabQ = client
+        .from("clip_review_collaborators")
+        .delete()
+        .eq("host_user_id", uid)
+        .eq("platform", platform);
+      if (platform === "dropbox") {
+        const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+        const pat = sqlLikePrefixFromPath(canonical);
+        if (pat) collabQ = collabQ.like("clip_id", pat);
+        else collabQ = collabQ.eq("clip_id", clipId);
+      } else {
+        collabQ = collabQ.eq("clip_id", clipId);
+      }
+      const { error: collabErr } = await collabQ;
+      if (collabErr) {
+        console.error("Notch cloud delete clip_review_collaborators", collabErr);
+        sendResponse({ ok: false });
+        return;
+      }
+      notchSwLog("MF_CLOUD_DELETE_CLIP ok", { platform, clipId: String(clipId).slice(0, 120) });
+      sendResponse({ ok: true });
     });
     return true;
   }
