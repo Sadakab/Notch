@@ -45,6 +45,134 @@
     return STORAGE_KEYS.clipPrefix + platform + "_" + encodeURIComponent(clipId);
   }
 
+  /** Keys for mapping a clip to a host user when reviewing as a collaborator (persists in chrome.storage.local). */
+  function collabHostStorageKey(platform, clipId) {
+    return "markframe_collab_host_" + platform + "_" + encodeURIComponent(clipId);
+  }
+
+  function collabHostKeysToTry(platform, clipId) {
+    const keys = [collabHostStorageKey(platform, clipId)];
+    if (platform === "dropbox" && typeof clipId === "string" && clipId.indexOf("?") !== -1) {
+      keys.push(collabHostStorageKey(platform, clipId.slice(0, clipId.indexOf("?"))));
+    }
+    return keys;
+  }
+
+  async function readCollabHostUserIdForClip(clip) {
+    if (!clip) return null;
+    const keys = collabHostKeysToTry(clip.platform, clip.clipId);
+    const o = await chrome.storage.local.get(keys);
+    for (const k of keys) {
+      const id = o[k];
+      if (id == null || id === "") continue;
+      const s = String(id).trim();
+      if (s.length > 0) return s;
+    }
+    return null;
+  }
+
+  function normalizeUuidForCompare(u) {
+    return String(u || "")
+      .trim()
+      .toLowerCase()
+      .replace(/-/g, "");
+  }
+
+  async function setCollabHostForRedeem(platform, clipId, hostUserId) {
+    const hid = String(hostUserId || "").trim();
+    if (!hid) return;
+    await chrome.storage.local.set({ [collabHostStorageKey(platform, clipId)]: hid });
+  }
+
+  async function clearCollabHostForClip(clip) {
+    if (!clip) return;
+    const keys = collabHostKeysToTry(clip.platform, clip.clipId);
+    await chrome.storage.local.remove(keys);
+  }
+
+  async function clearAllCollabHostBindings() {
+    const all = await chrome.storage.local.get(null);
+    const removals = Object.keys(all).filter((k) => k.startsWith("markframe_collab_host_"));
+    if (removals.length) await chrome.storage.local.remove(removals);
+  }
+
+  async function getCloudLoadSaveHostUserId(clip) {
+    if (!clip || !isCloudActive()) return undefined;
+    const hostRaw = await readCollabHostUserIdForClip(clip);
+    if (!hostRaw || !String(hostRaw).trim()) return undefined;
+    await refreshCloudUser(false);
+    if (!state.cloudUser?.id || String(state.cloudUser.id).trim() === "") {
+      await refreshCloudUser(true);
+    }
+    if (!isCloudActive()) return undefined;
+    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
+    if (myId && normalizeUuidForCompare(hostRaw) === normalizeUuidForCompare(myId)) {
+      await clearCollabHostForClip(clip);
+      return undefined;
+    }
+    return String(hostRaw).trim();
+  }
+
+  function clipMatchesRedeemTarget(clip, platform, serverClipId) {
+    if (!clip || clip.platform !== platform) return false;
+    if (clip.clipId === serverClipId) return true;
+    if (platform === "dropbox") return dropboxClipIdsEquivalent(clip.clipId, serverClipId);
+    return false;
+  }
+
+  function canonicalClipIdForCloudLog(platform, clipId) {
+    if (platform !== "dropbox" || typeof clipId !== "string") return clipId;
+    const q = clipId.indexOf("?");
+    return q === -1 ? clipId : clipId.slice(0, q);
+  }
+
+  function cloudSaveFailureToast(errorCode, sharedReview) {
+    if (!errorCode) return "Could not save to cloud — check your connection.";
+    if (errorCode === "not_authenticated") return "Cloud session expired. Sign in again.";
+    if (!sharedReview) return "Could not save to cloud — check your connection.";
+    if (errorCode === "invalid_host_binding") return "Shared review target missing. Re-join with invite code.";
+    if (errorCode === "host_row_missing")
+      return "Host has no cloud row for this video yet. Ask host to add one note first.";
+    if (errorCode === "rls_denied_or_no_match")
+      return "Shared review write denied. Re-join with a fresh invite code.";
+    return "Could not save shared review to cloud.";
+  }
+
+  function buildWatchUrlForPlatform(platform, clipId) {
+    if (platform === "youtube") return "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
+    if (platform === "vimeo") return "https://vimeo.com/" + encodeURIComponent(clipId);
+    if (platform === "loom") return "https://www.loom.com/share/" + encodeURIComponent(clipId);
+    if (platform === "googledrive")
+      return "https://drive.google.com/file/d/" + encodeURIComponent(clipId) + "/view";
+    if (platform === "dropbox") return buildDropboxOpenUrl(clipId);
+    return "";
+  }
+
+  async function updateWatchHeaderSub(clip) {
+    if (!root) return;
+    const sub = root.querySelector(".mf-header-sub");
+    const leaveBtn = root.querySelector('[data-action="leave-shared-review"]');
+    if (!sub || root.dataset.mfView !== "watch") {
+      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
+      return;
+    }
+    const h = await readCollabHostUserIdForClip(clip);
+    if (!h || !String(h).trim()) {
+      sub.textContent = "";
+      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
+      return;
+    }
+    await refreshCloudUser(false);
+    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
+    if (myId && normalizeUuidForCompare(h) === normalizeUuidForCompare(myId)) {
+      sub.textContent = "";
+      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
+      return;
+    }
+    sub.textContent = "Shared review";
+    if (leaveBtn) leaveBtn.classList.remove("mf-hidden");
+  }
+
   function parseClipStorageKey(key) {
     const p = STORAGE_KEYS.clipPrefix;
     if (!key.startsWith(p)) return null;
@@ -116,17 +244,32 @@
   let cloudAuthCacheValidUntil = 0;
   let cloudAuthCachedUser = null;
 
+  /** After extension reload/update, old content scripts lose the messaging port — avoid unhandled rejections everywhere. */
+  function isExtensionContextInvalidated(what) {
+    const m = typeof what === "string" ? what : String(what?.message ?? what ?? "");
+    return m.includes("Extension context invalidated");
+  }
+
   function sendExtensionMessage(payload) {
     return new Promise((resolve, reject) => {
       try {
         chrome.runtime.sendMessage(payload, (r) => {
           if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
+            const le = chrome.runtime.lastError.message || "";
+            if (isExtensionContextInvalidated(le)) {
+              resolve(undefined);
+              return;
+            }
+            reject(new Error(le || "sendMessage failed"));
             return;
           }
           resolve(r);
         });
       } catch (e) {
+        if (isExtensionContextInvalidated(e)) {
+          resolve(undefined);
+          return;
+        }
         reject(e);
       }
     });
@@ -146,7 +289,10 @@
         cloudAuthCacheValidUntil = 0;
         return;
       }
-      cloudAuthCachedUser = r.user && r.user.email ? { email: r.user.email } : null;
+      cloudAuthCachedUser =
+        r.user && (r.user.email || r.user.id)
+          ? { email: r.user.email || "", id: r.user.id || "" }
+          : null;
       state.cloudUser = cloudAuthCachedUser;
       cloudAuthCacheValidUntil = now + 45_000;
     } catch {
@@ -1622,10 +1768,12 @@
   async function getClipRecordForDisplay(clip) {
     await refreshCloudUser(false);
     if (await getSupabaseConfigured()) {
+      const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
         platform: clip.platform,
         clipId: clip.clipId,
+        ...(cloudHostForLoad ? { hostUserId: cloudHostForLoad } : {}),
       });
       if (r?.ok && r.record) return r.record;
     }
@@ -1760,6 +1908,15 @@
     return String.fromCodePoint(cp).toUpperCase();
   }
 
+  function normalizeCommentAvatarUrl(v) {
+    if (typeof v !== "string") return "";
+    const s = v.trim();
+    if (!s) return "";
+    if (s.startsWith("https://")) return s;
+    if (s.startsWith("data:image/")) return s;
+    return "";
+  }
+
   function applySettingsAvatarPreview(src, fallbackLabel) {
     if (!root) return;
     const img = root.querySelector(".mf-settings-avatar-preview");
@@ -1821,6 +1978,8 @@
     }
     const urlInp = root.querySelector(".mf-settings-avatar-url");
     if (urlInp) urlInp.value = "";
+    const inviteHint = root.querySelector(".mf-settings-invite-hint");
+    if (inviteHint) inviteHint.textContent = "";
     const storedAvatar = await loadStoredAvatar();
     if (urlInp && storedAvatar.startsWith("https://")) urlInp.value = storedAvatar;
     const previewLabel = inp.value.trim() || email || "You";
@@ -1984,6 +2143,9 @@
         c.complete = c.reaction === "approve";
       }
       delete c.reaction;
+      const av = normalizeCommentAvatarUrl(c.avatarUrl);
+      if (av) c.avatarUrl = av;
+      else delete c.avatarUrl;
     }
   }
 
@@ -2016,11 +2178,13 @@
     });
     if (configured) {
       let r;
+      const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       try {
         r = await sendExtensionMessage({
           type: "MF_CLOUD_LOAD_CLIP",
           platform: clip.platform,
           clipId: clip.clipId,
+          ...(cloudHostForLoad ? { hostUserId: cloudHostForLoad } : {}),
         });
       } catch (e) {
         notchLog("loadClipData MF_CLOUD_LOAD_CLIP threw", { message: String(e?.message || e) });
@@ -2126,22 +2290,53 @@
     };
     if (await getSupabaseConfigured()) {
       try {
+        const hostBindingRaw = await readCollabHostUserIdForClip(clip);
+        const cloudHostForSave = await getCloudLoadSaveHostUserId(clip);
+        const sharedReview =
+          !!hostBindingRaw &&
+          (!state.cloudUser?.id ||
+            normalizeUuidForCompare(hostBindingRaw) !== normalizeUuidForCompare(state.cloudUser.id));
+        const canonicalClipId = canonicalClipIdForCloudLog(clip.platform, clip.clipId);
         notchLog("saveClipData cloud upsert", {
           platform: clip.platform,
           clipId: clip.clipId,
+          canonicalClipId,
           commentCount: state.comments.length,
+          collabHost: !!cloudHostForSave,
+          sharedReview,
         });
-        const r = await sendExtensionMessage({
-          type: "MF_CLOUD_SAVE_CLIP",
-          platform: clip.platform,
-          clipId: clip.clipId,
-          comments: state.comments,
-          title,
-          thumbnailUrl,
-        });
-        notchLog("saveClipData cloud result", { ok: r?.ok === true, typeofR: r == null ? "null" : typeof r });
-        if (!r?.ok && isCloudActive()) {
-          showToast("Could not save to cloud — check your connection.");
+        if (sharedReview && !cloudHostForSave) {
+          notchLog("saveClipData shared target unresolved", {
+            platform: clip.platform,
+            canonicalClipId,
+            hostBindingRaw: String(hostBindingRaw || ""),
+          });
+          if (isCloudActive()) {
+            showToast("Shared review target missing. Re-join with invite code.");
+          }
+        } else {
+          const r = await sendExtensionMessage({
+            type: "MF_CLOUD_SAVE_CLIP",
+            platform: clip.platform,
+            clipId: clip.clipId,
+            comments: state.comments,
+            title,
+            thumbnailUrl,
+            ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
+          });
+          const errCode = r?.error ? String(r.error) : "";
+          notchLog("saveClipData cloud result", {
+            ok: r?.ok === true,
+            typeofR: r == null ? "null" : typeof r,
+            error: errCode || null,
+            sharedReview,
+            hostUserId: cloudHostForSave || null,
+            platform: clip.platform,
+            canonicalClipId,
+          });
+          if (!r?.ok && isCloudActive()) {
+            showToast(cloudSaveFailureToast(errCode, sharedReview));
+          }
         }
       } catch (e) {
         console.error("Notch cloud save", e);
@@ -2161,10 +2356,12 @@
     const key = clip.storageKey;
     let prev = null;
     if (await getSupabaseConfigured()) {
+      const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
       const r = await sendExtensionMessage({
         type: "MF_CLOUD_LOAD_CLIP",
         platform: clip.platform,
         clipId: clip.clipId,
+        ...(cloudHostForLoad ? { hostUserId: cloudHostForLoad } : {}),
       });
       if (r?.ok && r.record) prev = r.record;
     }
@@ -2207,14 +2404,24 @@
     delete next.customTitle;
     if (await getSupabaseConfigured()) {
       try {
-        await sendExtensionMessage({
+        const cloudHostForSave = await getCloudLoadSaveHostUserId(clip);
+        const r = await sendExtensionMessage({
           type: "MF_CLOUD_SAVE_CLIP",
           platform: clip.platform,
           clipId: clip.clipId,
           comments: prevComments,
           title: nextTitle,
           thumbnailUrl: nextThumb,
+          ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
         });
+        if (!r?.ok) {
+          notchLog("mergeClipMetadata cloud skip", {
+            platform: clip.platform,
+            canonicalClipId: canonicalClipIdForCloudLog(clip.platform, clip.clipId),
+            error: r?.error ? String(r.error) : null,
+            collabHost: !!cloudHostForSave,
+          });
+        }
       } catch (e) {
         console.error("Notch cloud merge", e);
       }
@@ -2754,16 +2961,20 @@
     return "mf_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   }
 
-  function createCommentAvatarEl(authorName) {
+  function createCommentAvatarEl(comment) {
     const holder = document.createElement("div");
     holder.className = "mf-comment-avatar";
+    const authorName = comment?.author;
     const label = authorName || "You";
-    const showImg =
-      cachedAuthorAvatarUrl && label === cachedEffectiveDisplayName;
+    const commentAvatar = normalizeCommentAvatarUrl(comment?.avatarUrl);
+    const ownAvatar =
+      cachedAuthorAvatarUrl && label === cachedEffectiveDisplayName ? cachedAuthorAvatarUrl : "";
+    const avatarToShow = commentAvatar || ownAvatar;
+    const showImg = !!avatarToShow;
     if (showImg) {
       const img = document.createElement("img");
       img.className = "mf-comment-avatar-img";
-      img.src = cachedAuthorAvatarUrl;
+      img.src = avatarToShow;
       img.alt = "";
       img.width = 22;
       img.height = 22;
@@ -2810,6 +3021,7 @@
       ts,
       text: trimmed,
       author,
+      avatarUrl: normalizeCommentAvatarUrl(cachedAuthorAvatarUrl),
       createdAt: Date.now(),
     };
     if (threadParentId) {
@@ -2936,7 +3148,7 @@
 
     const head = document.createElement("div");
     head.className = "mf-comment-head";
-    head.appendChild(createCommentAvatarEl(c.author));
+    head.appendChild(createCommentAvatarEl(c));
 
     const bodyCol = document.createElement("div");
     bodyCol.className = "mf-comment-body-col";
@@ -3125,6 +3337,9 @@
             <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
               This video
             </button>
+            <button type="button" class="mf-btn mf-hidden" data-action="leave-shared-review" title="Stop using the host's notes for this video">
+              Leave shared
+            </button>
             <button type="button" class="mf-settings-btn" data-action="open-settings" title="Settings" aria-label="Settings">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
@@ -3145,6 +3360,9 @@
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
             </div>
             <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
+            <button type="button" class="mf-btn" data-action="share-invite-code" title="Generate a code others can use to join this cloud review">
+              Share invite code
+            </button>
             <button type="button" class="mf-btn" data-action="export-pdf">Export PDF</button>
             <div class="mf-screengrab-wrap">
               <button
@@ -3266,6 +3484,22 @@
                   spellcheck="false"
                 />
               </label>
+            </div>
+            <div class="mf-settings-invite-block">
+              <span class="mf-settings-section-title">Join a shared review</span>
+              <label class="mf-settings-label mf-settings-label-tight"
+                >Invite code
+                <input
+                  type="text"
+                  class="mf-settings-invite-code"
+                  autocomplete="off"
+                  maxlength="16"
+                  placeholder="e.g. ABC12XY9"
+                  spellcheck="false"
+                />
+              </label>
+              <button type="button" class="mf-btn mf-btn-primary" data-action="redeem-invite">Join review</button>
+              <p class="mf-settings-invite-hint" aria-live="polite"></p>
             </div>
             <div class="mf-settings-actions">
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-settings">Save</button>
@@ -3538,6 +3772,7 @@
     if (signOutBtn) {
       signOutBtn.addEventListener("click", async () => {
         try {
+          await clearAllCollabHostBindings();
           await sendExtensionMessage({ type: "MF_SUPABASE_SIGN_OUT" });
           cloudAuthCacheValidUntil = 0;
           lastTickSignature = "";
@@ -3566,6 +3801,27 @@
     root.querySelector('[data-action="copy-link"]').addEventListener("click", () => {
       copyReviewLink();
     });
+    const shareInviteBtn = root.querySelector('[data-action="share-invite-code"]');
+    if (shareInviteBtn) {
+      shareInviteBtn.addEventListener("click", () => void shareInviteCodeForWatch());
+    }
+    const leaveSharedBtn = root.querySelector('[data-action="leave-shared-review"]');
+    if (leaveSharedBtn) {
+      leaveSharedBtn.addEventListener("click", () => void leaveSharedReviewForCurrentClip());
+    }
+    const redeemInviteBtn = root.querySelector('[data-action="redeem-invite"]');
+    if (redeemInviteBtn) {
+      redeemInviteBtn.addEventListener("click", () => void redeemInviteFromSettings());
+    }
+    const redeemInviteInp = root.querySelector(".mf-settings-invite-code");
+    if (redeemInviteInp) {
+      redeemInviteInp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void redeemInviteFromSettings();
+        }
+      });
+    }
 
     root.querySelector('[data-action="export-pdf"]').addEventListener("click", () => {
       void generateCommentsPdf();
@@ -4403,6 +4659,136 @@
     }
   }
 
+  async function shareInviteCodeForWatch() {
+    const clip = resolveClipContext();
+    if (!clip) return;
+    if (!isCloudActive()) {
+      showToast("Sign in to share an invite code.");
+      return;
+    }
+    if (!(await getSupabaseConfigured())) {
+      showToast("Cloud is not configured.");
+      return;
+    }
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_INVITE_CREATE",
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      if (!r?.ok || !r.code) {
+        const err = r?.error || "";
+        if (err === "no_review_row") {
+          showToast("Save this review to the cloud first (add a note), then share a code.");
+        } else {
+          showToast("Could not create invite code.");
+        }
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(r.code);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = r.code;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.documentElement.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      showToast("Invite code copied: " + r.code);
+    } catch (_e) {
+      showToast("Could not create invite code.");
+    }
+  }
+
+  async function redeemInviteFromSettings() {
+    if (!root) return;
+    const inp = root.querySelector(".mf-settings-invite-code");
+    const hint = root.querySelector(".mf-settings-invite-hint");
+    if (!inp || !hint) return;
+    hint.textContent = "";
+    const code = String(inp.value || "").trim();
+    if (!code) {
+      hint.textContent = "Enter a code.";
+      return;
+    }
+    if (!isCloudActive()) {
+      hint.textContent = "Sign in first.";
+      return;
+    }
+    try {
+      const r = await sendExtensionMessage({ type: "MF_INVITE_REDEEM", code });
+      if (!r?.ok) {
+        const err = r?.error || "";
+        if (err === "invalid_code") hint.textContent = "That code is not valid.";
+        else if (err === "expired") hint.textContent = "That code has expired.";
+        else if (err === "not_authenticated") hint.textContent = "Sign in first.";
+        else hint.textContent = "Could not join. Try again.";
+        return;
+      }
+      const redeemHost =
+        r.hostUserId != null && String(r.hostUserId).trim() !== ""
+          ? String(r.hostUserId).trim()
+          : null;
+      if (!redeemHost || !r.platform || !r.clipId) {
+        hint.textContent = "Could not join.";
+        return;
+      }
+      if (r.isHost) {
+        hint.textContent = "That invite is for your own review.";
+        return;
+      }
+      await setCollabHostForRedeem(r.platform, r.clipId, redeemHost);
+      inp.value = "";
+      hint.textContent = "";
+      closeSettingsPanel();
+      const cur = resolveClipContext();
+      if (clipMatchesRedeemTarget(cur, r.platform, r.clipId)) {
+        lastTickSignature = "";
+        showToast("Joined shared review.");
+        void tick();
+      } else {
+        const url = buildWatchUrlForPlatform(r.platform, r.clipId);
+        lastTickSignature = "";
+        void tick();
+        if (url) {
+          showToast("Opening the video…");
+          setTimeout(() => {
+            try {
+              location.href = url;
+            } catch (_) {}
+          }, 400);
+        } else {
+          showToast("Joined. Open the matching video to load notes.");
+        }
+      }
+    } catch (_e) {
+      hint.textContent = "Could not join.";
+    }
+  }
+
+  async function leaveSharedReviewForCurrentClip() {
+    const clip = resolveClipContext();
+    if (!clip) return;
+    const host = await readCollabHostUserIdForClip(clip);
+    if (!host) return;
+    try {
+      await sendExtensionMessage({
+        type: "MF_COLLAB_LEAVE",
+        platform: clip.platform,
+        clipId: clip.clipId,
+        hostUserId: host,
+      });
+    } catch (_) {}
+    await clearCollabHostForClip(clip);
+    lastTickSignature = "";
+    showToast("Left shared review.");
+    void tick();
+  }
+
   async function tryImportFromUrl(clip) {
     if (!clip) return;
     let param = null;
@@ -4480,6 +4866,7 @@
     }
     await mergeClipMetadata(clip);
     await refreshWatchVideoTitle(clip);
+    await updateWatchHeaderSub(clip);
 
     root.classList.toggle("mf-collapsed", state.collapsed);
 
@@ -4523,9 +4910,11 @@
       applyAutoPauseCommentTypingPref(changes[STORAGE_KEYS.autoPauseCommentTyping].newValue);
     }
     if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
-      void refreshAuthorPresentationCache().then(() => {
-        if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
-      });
+      void refreshAuthorPresentationCache()
+        .then(() => {
+          if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+        })
+        .catch(() => {});
     }
     if (
       changes[STORAGE_KEYS.authState] ||
@@ -4545,6 +4934,15 @@
   }
 
   async function tick() {
+    try {
+      await tickInner();
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return;
+      console.warn("[Notch] tick", e);
+    }
+  }
+
+  async function tickInner() {
     const href = location.href;
     const clip = resolveClipContext();
 
@@ -4561,10 +4959,15 @@
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
+    let collabPart = "";
+    if (clip && unlocked) {
+      collabPart = (await readCollabHostUserIdForClip(clip)) || "";
+    }
+
     const sig = unlocked
       ? !clip
         ? href + "\0no_clip"
-        : href + "\0" + clip.storageKey + "\0" + (state.dashboardForced ? "dashboard" : "watch")
+        : href + "\0" + clip.storageKey + "\0" + collabPart + "\0" + (state.dashboardForced ? "dashboard" : "watch")
       : href + "\0gate\0" + String(supabaseConfigured);
 
     if (sig === lastTickSignature) return;

@@ -18,6 +18,9 @@ const CLOUD_TYPES = new Set([
   "MF_CLOUD_LIST_CLIPS",
   "MF_CLOUD_UPDATE_THUMB",
   "MF_CLOUD_DELETE_CLIP",
+  "MF_INVITE_CREATE",
+  "MF_INVITE_REDEEM",
+  "MF_COLLAB_LEAVE",
 ]);
 
 function isSupabaseConfigured() {
@@ -69,6 +72,18 @@ function sendCloudFallback(msg, sendResponse) {
     return;
   }
   if (t === "MF_CLOUD_DELETE_CLIP") {
+    sendResponse({ ok: false });
+    return;
+  }
+  if (t === "MF_INVITE_CREATE") {
+    sendResponse({ ok: false, error: "fallback" });
+    return;
+  }
+  if (t === "MF_INVITE_REDEEM") {
+    sendResponse({ ok: false, error: "fallback" });
+    return;
+  }
+  if (t === "MF_COLLAB_LEAVE") {
     sendResponse({ ok: false });
     return;
   }

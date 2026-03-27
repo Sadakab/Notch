@@ -29,6 +29,39 @@ function normalizeDropboxClipIdForDb(platform, clipId) {
   return q === -1 ? clipId : clipId.slice(0, q);
 }
 
+/** Prefer message host id (collab) when non-empty after stringify — avoids missing saves if UI passes a non-string UUID. */
+function rowUserIdFromHostMessage(msgHost, sessionUserId) {
+  if (msgHost == null || msgHost === "") return sessionUserId;
+  const s = String(msgHost).trim();
+  return s.length > 0 ? s : sessionUserId;
+}
+
+function normalizedHostUserId(msgHost) {
+  if (msgHost == null || msgHost === "") return "";
+  return String(msgHost).trim();
+}
+
+/** Readable PostgREST / Postgres error for extension logs (avoids "[object Object]"). */
+function formatSupabaseError(err) {
+  if (err == null) return "unknown error";
+  if (typeof err === "string") return err;
+  const msg = err.message || err.error_description || "";
+  const code = err.code || "";
+  const details = err.details || "";
+  const hint = err.hint || "";
+  const parts = [msg, code ? `code=${code}` : "", details ? `details=${details}` : "", hint ? `hint=${hint}` : ""].filter(
+    Boolean
+  );
+  return parts.length ? parts.join(" | ") : JSON.stringify(err);
+}
+
+/** Supabase text / nullable columns — reject odd types from page metadata. */
+function cloudOptionalTextField(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "string") return v;
+  return String(v);
+}
+
 /** Escape for PostgreSQL LIKE; append % to match legacy rows saved as path?query… */
 function sqlLikePrefixFromPath(pathPrefix) {
   if (pathPrefix == null || typeof pathPrefix !== "string" || pathPrefix.length === 0) return null;
@@ -38,13 +71,20 @@ function sqlLikePrefixFromPath(pathPrefix) {
 /**
  * @param {import('@supabase/supabase-js').SupabaseClient} client
  */
-async function loadClipReviewRow(client, platform, clipId) {
+/**
+ * @param {string} clipOwnerUserId Row owner in clip_reviews (session user or collab host).
+ */
+async function loadClipReviewRow(client, platform, clipId, clipOwnerUserId) {
+  if (!clipOwnerUserId) {
+    return { data: null, error: { message: "missing clip owner id" } };
+  }
   if (platform === "dropbox") {
     const canonical = normalizeDropboxClipIdForDb(platform, clipId);
     const r1 = await client
       .from("clip_reviews")
       .select("*")
       .eq("platform", "dropbox")
+      .eq("user_id", clipOwnerUserId)
       .eq("clip_id", canonical)
       .maybeSingle();
     if (r1.error) return { data: null, error: r1.error };
@@ -55,6 +95,7 @@ async function loadClipReviewRow(client, platform, clipId) {
       .from("clip_reviews")
       .select("*")
       .eq("platform", "dropbox")
+      .eq("user_id", clipOwnerUserId)
       .like("clip_id", pat)
       .order("updated_at", { ascending: false })
       .limit(1);
@@ -73,6 +114,7 @@ async function loadClipReviewRow(client, platform, clipId) {
     .from("clip_reviews")
     .select("*")
     .eq("platform", platform)
+    .eq("user_id", clipOwnerUserId)
     .eq("clip_id", clipId)
     .maybeSingle();
   return { data: r.data ?? null, error: r.error };
@@ -166,10 +208,18 @@ function getSupabase() {
         persistSession: true,
         autoRefreshToken: true,
         detectSessionInUrl: false,
+        // MV3 service workers are not a normal document context; avoid Web Locks / SW quirks.
+        lock: async (_name, _acquireTimeout, fn) => await fn(),
       },
     });
     supabase.auth.onAuthStateChange((_event, session) => {
-      void syncAuthStateMarker(session);
+      void (async () => {
+        try {
+          await syncAuthStateMarker(session);
+        } catch (e) {
+          console.warn("Notch auth state marker", e?.message || e);
+        }
+      })();
     });
   }
   return supabase;
@@ -182,6 +232,22 @@ async function syncAuthStateMarker(session) {
     });
   } else {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
+  }
+}
+
+/** Safe in MV3 SW: never destructure `data.session` (missing `data` throws). */
+async function getSessionSafe(client) {
+  try {
+    const result = await client.auth.getSession();
+    const err = result?.error ?? null;
+    const session = result?.data?.session ?? null;
+    if (err) {
+      console.warn("Notch getSession", err.message ?? err);
+    }
+    return { session, error: err };
+  } catch (e) {
+    console.warn("Notch getSession", e?.message || e);
+    return { session: null, error: e };
   }
 }
 
@@ -376,15 +442,16 @@ export function handleRuntimeMessage(msg, sendResponse) {
           sendResponse({ ok: false });
           return;
         }
-        const {
-          data: { session },
-          error,
-        } = await client.auth.getSession();
-        if (error) {
+        const { session, error } = await getSessionSafe(client);
+        if (error && !session) {
           sendResponse({ ok: false });
           return;
         }
-        void syncAuthStateMarker(session);
+        try {
+          await syncAuthStateMarker(session);
+        } catch (e) {
+          console.warn("Notch MF_AUTH_CHANGED marker", e?.message || e);
+        }
         sendResponse({ ok: true, email: session?.user?.email ?? null });
       } catch (e) {
         console.error("Notch MF_AUTH_CHANGED", e);
@@ -400,9 +467,13 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ configured: false, user: null });
       return false;
     }
-    client.auth.getSession().then(({ data: { session }, error }) => {
-      if (error) {
-        sendResponse({ configured: true, user: null, error: error.message });
+    void getSessionSafe(client).then(({ session, error }) => {
+      if (error && !session) {
+        sendResponse({
+          configured: true,
+          user: null,
+          error: String(error?.message ?? error ?? ""),
+        });
         return;
       }
       const u = session?.user;
@@ -438,7 +509,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false, record: null });
       return false;
     }
-    client.auth.getSession().then(async ({ data: { session }, error: sessErr }) => {
+    getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       const user = session?.user;
       notchSwLog("MF_CLOUD_LOAD_CLIP session", {
         sessErr: sessErr?.message ?? null,
@@ -450,12 +521,15 @@ export function handleRuntimeMessage(msg, sendResponse) {
         return;
       }
       try {
-        const { data, error } = await loadClipReviewRow(client, platform, clipId);
+        const clipOwner = rowUserIdFromHostMessage(msg.hostUserId, user.id);
+        const { data, error } = await loadClipReviewRow(client, platform, clipId, clipOwner);
         if (error) {
-          console.error("Notch cloud load", error);
+          const errLine = formatSupabaseError(error);
+          console.error("Notch cloud load", errLine, error);
           notchSwLog("MF_CLOUD_LOAD_CLIP query error", {
             code: error.code,
             message: error.message,
+            formatted: errLine,
             details: error.details,
           });
           sendResponse({ ok: false, record: null });
@@ -498,61 +572,138 @@ export function handleRuntimeMessage(msg, sendResponse) {
       hasClient: !!client,
       commentsIsArray: Array.isArray(comments),
       commentCount: Array.isArray(comments) ? comments.length : "n/a",
+      collabTargetHost: msg.hostUserId != null && String(msg.hostUserId).trim() !== "",
     });
     if (!client || !platform || !clipId || !Array.isArray(comments)) {
       notchSwLog("MF_CLOUD_SAVE_CLIP abort: bad args");
-      sendResponse({ ok: false });
+      sendResponse({ ok: false, error: "invalid_args" });
       return false;
     }
-    client.auth.getSession().then(async ({ data: { session }, error: sessErr }) => {
+    getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       const user = session?.user;
       if (sessErr || !user) {
-        sendResponse({ ok: false });
+        sendResponse({ ok: false, error: "not_authenticated" });
         return;
       }
       const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+      const hostUserId = normalizedHostUserId(msg.hostUserId);
+      const rowUserId = rowUserIdFromHostMessage(hostUserId, user.id);
+      const isCollaboratorWrite = rowUserId !== user.id;
+      let commentsPayload = comments;
+      try {
+        commentsPayload = JSON.parse(JSON.stringify(comments));
+      } catch {
+        /* use raw */
+      }
       const row = {
-        user_id: user.id,
+        user_id: rowUserId,
         platform,
         clip_id: clipIdDb,
-        comments,
-        title: msg.title ?? null,
-        thumbnail_url: msg.thumbnailUrl ?? null,
+        comments: commentsPayload,
+        title: cloudOptionalTextField(msg.title),
+        thumbnail_url: cloudOptionalTextField(msg.thumbnailUrl),
         updated_at: new Date().toISOString(),
       };
-      const { error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" });
-      if (error) {
-        console.error("Notch cloud save", error);
-        notchSwLog("MF_CLOUD_SAVE_CLIP error", {
-          code: error.code,
-          message: error.message,
-          platform,
-          clipId,
-        });
-        sendResponse({ ok: false });
-        return;
-      }
-      if (platform === "dropbox") {
-        const pat = sqlLikePrefixFromPath(clipIdDb);
-        if (pat) {
-          const { error: dedupeErr } = await client
-            .from("clip_reviews")
-            .delete()
-            .eq("platform", "dropbox")
-            .eq("user_id", user.id)
-            .like("clip_id", pat)
-            .neq("clip_id", clipIdDb);
-          if (dedupeErr) {
-            notchSwLog("MF_CLOUD_SAVE_CLIP dropbox dedupe skipped", { message: dedupeErr.message });
+      try {
+        if (!isCollaboratorWrite) {
+          const { error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" });
+          if (error) {
+            const errLine = formatSupabaseError(error);
+            console.error("Notch cloud save", errLine, error);
+            notchSwLog("MF_CLOUD_SAVE_CLIP owner upsert error", {
+              code: error.code,
+              message: error.message,
+              formatted: errLine,
+              platform,
+              clipId: clipIdDb,
+            });
+            sendResponse({ ok: false, error: "save_failed", detail: errLine });
+            return;
           }
+          if (platform === "dropbox") {
+            const pat = sqlLikePrefixFromPath(clipIdDb);
+            if (pat) {
+              const { error: dedupeErr } = await client
+                .from("clip_reviews")
+                .delete()
+                .eq("platform", "dropbox")
+                .eq("user_id", user.id)
+                .like("clip_id", pat)
+                .neq("clip_id", clipIdDb);
+              if (dedupeErr) {
+                notchSwLog("MF_CLOUD_SAVE_CLIP dropbox dedupe skipped", { message: dedupeErr.message });
+              }
+            }
+          }
+          notchSwLog("MF_CLOUD_SAVE_CLIP ok", {
+            platform,
+            clipId: clipIdDb,
+            commentCount: comments.length,
+            mode: "owner",
+          });
+          sendResponse({ ok: true });
+          return;
         }
+        if (!hostUserId) {
+          sendResponse({ ok: false, error: "invalid_host_binding" });
+          return;
+        }
+        const { data: existingRow, error: loadErr } = await loadClipReviewRow(client, platform, clipId, rowUserId);
+        if (loadErr) {
+          const errLine = formatSupabaseError(loadErr);
+          console.error("Notch cloud save collab load", errLine, loadErr);
+          sendResponse({ ok: false, error: "rls_denied_or_no_match", detail: errLine });
+          return;
+        }
+        if (!existingRow?.id || !existingRow?.clip_id) {
+          sendResponse({ ok: false, error: "host_row_missing" });
+          return;
+        }
+        const { data: updatedRows, error: updateErr } = await client
+          .from("clip_reviews")
+          .update({
+            comments: commentsPayload,
+            title: cloudOptionalTextField(msg.title),
+            thumbnail_url: cloudOptionalTextField(msg.thumbnailUrl),
+            updated_at: row.updated_at,
+          })
+          .eq("id", existingRow.id)
+          .eq("user_id", rowUserId)
+          .eq("platform", platform)
+          .eq("clip_id", existingRow.clip_id)
+          .select("id")
+          .limit(1);
+        if (updateErr) {
+          const errLine = formatSupabaseError(updateErr);
+          console.error("Notch cloud save collab update", errLine, updateErr);
+          notchSwLog("MF_CLOUD_SAVE_CLIP collab update error", {
+            code: updateErr.code,
+            message: updateErr.message,
+            formatted: errLine,
+            platform,
+            clipId: clipIdDb,
+            hostUserId,
+          });
+          sendResponse({ ok: false, error: "rls_denied_or_no_match", detail: errLine });
+          return;
+        }
+        if (!Array.isArray(updatedRows) || updatedRows.length === 0) {
+          sendResponse({ ok: false, error: "host_row_missing" });
+          return;
+        }
+        notchSwLog("MF_CLOUD_SAVE_CLIP ok", {
+          platform,
+          clipId: clipIdDb,
+          commentCount: comments.length,
+          mode: "collab",
+          hostUserId,
+          dbClipId: existingRow.clip_id,
+        });
+        sendResponse({ ok: true });
+      } catch (e) {
+        console.error("Notch cloud save exception", e);
+        sendResponse({ ok: false, error: "save_failed", detail: String(e?.message || e) });
       }
-      notchSwLog("MF_CLOUD_SAVE_CLIP ok", {
-        platform,
-        clipId: clipIdDb,
-        commentCount: comments.length,
-      });
-      sendResponse({ ok: true });
     });
     return true;
   }
@@ -563,7 +714,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false, items: [] });
       return false;
     }
-    client.auth.getSession().then(({ data: { session }, error: sessErr }) => {
+    getSessionSafe(client).then(({ session, error: sessErr }) => {
       const user = session?.user;
       if (sessErr || !user) {
         sendResponse({ ok: true, items: [] });
@@ -600,28 +751,40 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false });
       return false;
     }
-    let q = client
-      .from("clip_reviews")
-      .update({
-        thumbnail_url: thumbnailUrl,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("platform", platform);
-    if (platform === "dropbox") {
-      const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-      const pat = sqlLikePrefixFromPath(canonical);
-      if (pat) q = q.like("clip_id", pat);
-      else q = q.eq("clip_id", clipId);
-    } else {
-      q = q.eq("clip_id", clipId);
-    }
-    q.then(({ error }) => {
-      if (error) {
-        console.error("Notch cloud thumb", error);
+    getSessionSafe(client).then(({ session, error: sessErr }) => {
+      if (sessErr) {
         sendResponse({ ok: false });
         return;
       }
-      sendResponse({ ok: true });
+      const thumbUid = session?.user?.id;
+      if (!thumbUid) {
+        sendResponse({ ok: false });
+        return;
+      }
+      let q = client
+        .from("clip_reviews")
+        .update({
+          thumbnail_url: thumbnailUrl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", thumbUid)
+        .eq("platform", platform);
+      if (platform === "dropbox") {
+        const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+        const pat = sqlLikePrefixFromPath(canonical);
+        if (pat) q = q.like("clip_id", pat);
+        else q = q.eq("clip_id", clipId);
+      } else {
+        q = q.eq("clip_id", clipId);
+      }
+      q.then(({ error }) => {
+        if (error) {
+          console.error("Notch cloud thumb", error);
+          sendResponse({ ok: false });
+          return;
+        }
+        sendResponse({ ok: true });
+      });
     });
     return true;
   }
@@ -634,22 +797,141 @@ export function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({ ok: false });
       return false;
     }
-    let q = client.from("clip_reviews").delete().eq("platform", platform);
-    if (platform === "dropbox") {
-      const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-      const pat = sqlLikePrefixFromPath(canonical);
-      if (pat) q = q.like("clip_id", pat);
-      else q = q.eq("clip_id", clipId);
-    } else {
-      q = q.eq("clip_id", clipId);
-    }
-    q.then(({ error }) => {
-      if (error) {
-        console.error("Notch cloud delete", error);
+    getSessionSafe(client).then(({ session, error: sessErr }) => {
+      if (sessErr) {
         sendResponse({ ok: false });
         return;
       }
-      sendResponse({ ok: true });
+      const uid = session?.user?.id;
+      if (!uid) {
+        sendResponse({ ok: false });
+        return;
+      }
+      let q = client.from("clip_reviews").delete().eq("user_id", uid).eq("platform", platform);
+      if (platform === "dropbox") {
+        const canonical = normalizeDropboxClipIdForDb(platform, clipId);
+        const pat = sqlLikePrefixFromPath(canonical);
+        if (pat) q = q.like("clip_id", pat);
+        else q = q.eq("clip_id", clipId);
+      } else {
+        q = q.eq("clip_id", clipId);
+      }
+      q.then(({ error }) => {
+        if (error) {
+          console.error("Notch cloud delete", error);
+          sendResponse({ ok: false });
+          return;
+        }
+        sendResponse({ ok: true });
+      });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_INVITE_CREATE") {
+    const client = getSupabase();
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    if (!client || !platform || !clipId) {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      const { data, error } = await client.rpc("create_review_invite", {
+        p_platform: platform,
+        p_clip_id: clipId,
+      });
+      if (error) {
+        console.error("Notch invite create", error);
+        sendResponse({ ok: false, error: error.message || "rpc_error" });
+        return;
+      }
+      const row = data;
+      if (row && typeof row === "object" && row.ok === true && typeof row.code === "string") {
+        sendResponse({ ok: true, code: row.code });
+        return;
+      }
+      const err =
+        row && typeof row === "object" && typeof row.error === "string" ? row.error : "unknown";
+      sendResponse({ ok: false, error: err });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_INVITE_REDEEM") {
+    const client = getSupabase();
+    const code = String(msg.code || "").trim();
+    if (!client || !code) {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      if (sessErr || !session?.user) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      const { data, error } = await client.rpc("redeem_review_invite", { p_code: code });
+      if (error) {
+        console.error("Notch invite redeem", error);
+        sendResponse({ ok: false, error: error.message || "rpc_error" });
+        return;
+      }
+      const row = data;
+      if (row && typeof row === "object" && row.ok === true) {
+        const hidRaw = row.host_user_id ?? row.hostUserId;
+        const hid = hidRaw != null && String(hidRaw).trim() !== "" ? String(hidRaw).trim() : null;
+        sendResponse({
+          ok: true,
+          hostUserId: hid,
+          platform: row.platform != null ? String(row.platform) : null,
+          clipId: row.clip_id != null ? String(row.clip_id) : row.clipId != null ? String(row.clipId) : null,
+          isHost: row.is_host === true || row.isHost === true,
+        });
+        return;
+      }
+      const err =
+        row && typeof row === "object" && typeof row.error === "string" ? row.error : "unknown";
+      sendResponse({ ok: false, error: err });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_COLLAB_LEAVE") {
+    const client = getSupabase();
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    const hostUserId = msg.hostUserId;
+    if (!client || !platform || !clipId || !hostUserId) {
+      sendResponse({ ok: false });
+      return false;
+    }
+    const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+    getSessionSafe(client).then(({ session, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
+        sendResponse({ ok: false });
+        return;
+      }
+      client
+        .from("clip_review_collaborators")
+        .delete()
+        .eq("host_user_id", hostUserId)
+        .eq("platform", platform)
+        .eq("clip_id", clipIdDb)
+        .eq("member_user_id", user.id)
+        .then(({ error }) => {
+          if (error) {
+            console.error("Notch collab leave", error);
+            sendResponse({ ok: false });
+            return;
+          }
+          sendResponse({ ok: true });
+        });
     });
     return true;
   }
@@ -658,11 +940,14 @@ export function handleRuntimeMessage(msg, sendResponse) {
 }
 
 export async function restoreAuthMarker() {
-  await syncAuthMarkerFromChromeStorage();
-  const client = getSupabase();
-  if (!client) return;
-  const {
-    data: { session },
-  } = await client.auth.getSession();
-  await syncAuthStateMarker(session);
+  try {
+    await syncAuthMarkerFromChromeStorage();
+    const client = getSupabase();
+    if (!client) return;
+    const { session, error } = await getSessionSafe(client);
+    if (error && !session) return;
+    await syncAuthStateMarker(session);
+  } catch (e) {
+    console.warn("Notch restoreAuthMarker", e?.message || e);
+  }
 }
