@@ -3363,7 +3363,14 @@
             <button type="button" class="mf-btn" data-action="share-invite-code" title="Generate a code others can use to join this cloud review">
               Share invite code
             </button>
-            <button type="button" class="mf-btn" data-action="export-pdf">Export PDF</button>
+            <button type="button" class="mf-btn mf-export-pdf-btn" data-action="export-pdf" title="Export PDF" aria-label="Export PDF">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-file-down" aria-hidden="true">
+                <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+                <path d="M12 18v-6" />
+                <path d="m9 15 3 3 3-3" />
+                <path d="M4 12V4a2 2 0 0 1 2-2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2" />
+              </svg>
+            </button>
             <div class="mf-screengrab-wrap">
               <button
                 type="button"
@@ -3384,7 +3391,7 @@
                   title="Download PNG"
                   aria-label="Download PNG"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-download" aria-hidden="true">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-download" aria-hidden="true">
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                     <polyline points="7 10 12 15 17 10" />
                     <line x1="12" x2="12" y1="15" y2="3" />
@@ -3397,7 +3404,7 @@
                   title="Copy image to clipboard"
                   aria-label="Copy image to clipboard"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-clipboard" aria-hidden="true">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-clipboard" aria-hidden="true">
                     <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
                     <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
                   </svg>
@@ -3647,6 +3654,77 @@
     }
   }
 
+  function wireScreengrabFlyoutPortal(root) {
+    const wrap = root.querySelector(".mf-screengrab-wrap");
+    const trigger = root.querySelector(".mf-screengrab-hover-label");
+    const flyout = root.querySelector(".mf-screengrab-flyout");
+    if (!wrap || !trigger || !flyout) return;
+
+    document.body.appendChild(flyout);
+    flyout.classList.add("mf-screengrab-flyout--portaled");
+
+    let hideTimer = null;
+    const gapPx = 6;
+    const hideDelayMs = 140;
+
+    function positionFlyout() {
+      const r = trigger.getBoundingClientRect();
+      const top = Math.round(r.bottom + gapPx);
+      const left = Math.round(r.left);
+      const minW = Math.round(r.width);
+      flyout.style.top = `${top}px`;
+      flyout.style.left = `${left}px`;
+      flyout.style.minWidth = `${minW}px`;
+      requestAnimationFrame(() => {
+        const fr = flyout.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const pad = 8;
+        let adjLeft = left;
+        if (fr.right > vw - pad) adjLeft = Math.max(pad, Math.round(vw - fr.width - pad));
+        if (adjLeft < pad) adjLeft = pad;
+        if (adjLeft !== left) flyout.style.left = `${adjLeft}px`;
+      });
+    }
+
+    function openFlyout() {
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+      flyout.classList.add("mf-screengrab-flyout-open");
+      positionFlyout();
+    }
+
+    function closeFlyout() {
+      flyout.classList.remove("mf-screengrab-flyout-open");
+    }
+
+    function scheduleClose() {
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        closeFlyout();
+        hideTimer = null;
+      }, hideDelayMs);
+    }
+
+    wrap.addEventListener("mouseenter", openFlyout);
+    flyout.addEventListener("mouseenter", () => {
+      if (hideTimer) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    });
+    wrap.addEventListener("mouseleave", scheduleClose);
+    flyout.addEventListener("mouseleave", scheduleClose);
+
+    function onScrollOrResize() {
+      if (!flyout.classList.contains("mf-screengrab-flyout-open")) return;
+      positionFlyout();
+    }
+    window.addEventListener("resize", onScrollOrResize);
+    window.addEventListener("scroll", onScrollOrResize, true);
+  }
+
   function wireSidebar() {
     root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
       state.dashboardForced = true;
@@ -3833,6 +3911,7 @@
     root.querySelector('[data-action="screengrab-copy"]').addEventListener("click", () => {
       void copyCurrentVideoFrameToClipboard();
     });
+    wireScreengrabFlyoutPortal(root);
 
     const commentInp = root.querySelector(".mf-comment-input");
     commentInp.addEventListener("focus", () => {

@@ -816,24 +816,37 @@
 #markframe-root .mf-toolbar {
   padding: 8px 12px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   align-items: center;
+  overflow-x: visible;
   border-bottom: 1px solid var(--mf-border);
+  justify-content: space-between;
+}
+
+/* Copy / share / export / screengrab — same height (draw cluster is nested separately). */
+#markframe-root .mf-toolbar > .mf-btn,
+#markframe-root .mf-toolbar .mf-btn.mf-screengrab-hover-label {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 #markframe-root .mf-toolbar-draw {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 #markframe-root .mf-screengrab-wrap {
-  position: relative;
   display: inline-flex;
   align-items: center;
   vertical-align: middle;
+  flex-shrink: 0;
 }
 
 #markframe-root .mf-screengrab-hover-label {
@@ -843,6 +856,22 @@
   line-height: 0;
   user-select: none;
   cursor: default;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+#markframe-root .mf-export-pdf-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+#markframe-root .mf-export-pdf-btn .mf-lucide {
+  display: block;
+  flex-shrink: 0;
 }
 
 #markframe-root .mf-screengrab-hover-label .mf-lucide {
@@ -850,31 +879,61 @@
   flex-shrink: 0;
 }
 
-#markframe-root .mf-screengrab-flyout {
+/* Flyout is moved to document.body in JS (wireScreengrabFlyoutPortal) — see body > .mf-screengrab-flyout rules below. */
+
+/* Portaled under body: not clipped by #markframe-root overflow or toolbar scroll. Theme vars duplicated so styles apply outside #markframe-root. */
+body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled {
+  --mf-bg-elevated: #141418;
+  --mf-border: rgba(255, 255, 255, 0.08);
+  --mf-text: rgba(255, 255, 255, 0.88);
+  --mf-font: "Roboto", "YouTube Noto", ui-sans-serif, system-ui, sans-serif;
+
   display: none;
-  position: absolute;
-  top: 100%;
-  left: 0;
-  padding-top: 6px;
+  position: fixed;
+  margin: 0;
+  padding: 0;
   flex-direction: column;
   gap: 6px;
-  z-index: 20;
-  min-width: 100%;
+  z-index: 2147483647;
   box-sizing: border-box;
+  min-width: 0;
+  font-family: var(--mf-font);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--mf-text);
+  pointer-events: auto;
 }
 
-#markframe-root .mf-screengrab-wrap:hover .mf-screengrab-flyout {
+body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled.mf-screengrab-flyout-open {
   display: flex;
 }
 
-#markframe-root .mf-screengrab-flyout-btn {
+body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-btn.mf-screengrab-flyout-btn {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  box-sizing: border-box;
+  background: var(--mf-bg-elevated);
+  border: 1px solid var(--mf-border);
+  color: var(--mf-text);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+  font-family: var(--mf-font);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 100%;
 }
 
-#markframe-root .mf-screengrab-flyout-btn .mf-lucide {
+body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-btn.mf-screengrab-flyout-btn:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-lucide {
   display: block;
   flex-shrink: 0;
 }
@@ -894,6 +953,11 @@
   line-height: 1.35;
   cursor: pointer;
   font-family: var(--mf-font);
+}
+
+#markframe-root .mf-btn.mf-export-pdf-btn,
+#markframe-root .mf-btn.mf-screengrab-hover-label {
+  padding: 6px 5px;
 }
 
 #markframe-root .mf-btn:hover {
