@@ -246,6 +246,8 @@
     selectedId: null,
     /** Root comment id when inline reply composer is open; null when closed. */
     replyTargetId: null,
+    /** Root comment ids whose reply threads are collapsed in the thread list. */
+    collapsedReplyRoots: new Set(),
     hasInk: false,
     /** True while a clip is active but user chose "All reviews" (no navigation). */
     dashboardForced: false,
@@ -2180,6 +2182,7 @@
 
   async function loadClipData(clip) {
     state.replyTargetId = null;
+    state.collapsedReplyRoots.clear();
     await refreshCloudUser(false);
     const key = clip.storageKey;
     const configured = await getSupabaseConfigured();
@@ -2698,6 +2701,7 @@
       state.comments = [];
       state.selectedId = null;
       state.replyTargetId = null;
+      state.collapsedReplyRoots.clear();
       teardownCanvas();
       if (root && root.dataset.mfView === "watch") {
         renderThread();
@@ -3245,6 +3249,7 @@
         e.preventDefault();
         e.stopPropagation();
         state.replyTargetId = state.replyTargetId === c.id ? null : c.id;
+        if (state.replyTargetId === c.id) state.collapsedReplyRoots.delete(c.id);
         renderThread();
       });
       actions.appendChild(replyBtn);
@@ -3273,9 +3278,36 @@
     for (const rootComment of roots) {
       const block = document.createElement("div");
       block.className = "mf-comment-block";
-      block.appendChild(createCommentElement(rootComment, false));
+      const rootEl = createCommentElement(rootComment, false);
       const reps = repliesSortedForRoot(rootComment.id);
-      if (reps.length) {
+      const replyCount = reps.length;
+      const threadCollapsed =
+        replyCount > 0 && state.collapsedReplyRoots.has(rootComment.id);
+      if (replyCount) {
+        const actions = rootEl.querySelector(".mf-comment-actions");
+        if (actions) {
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "mf-comment-replies-toggle";
+          toggle.textContent = threadCollapsed
+            ? `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
+            : "Hide replies";
+          toggle.title = threadCollapsed ? "Show replies" : "Hide replies";
+          toggle.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (state.collapsedReplyRoots.has(rootComment.id)) {
+              state.collapsedReplyRoots.delete(rootComment.id);
+            } else {
+              state.collapsedReplyRoots.add(rootComment.id);
+            }
+            renderThread();
+          });
+          actions.appendChild(toggle);
+        }
+      }
+      block.appendChild(rootEl);
+      if (replyCount && !threadCollapsed) {
         const repliesEl = document.createElement("div");
         repliesEl.className = "mf-replies";
         for (const r of reps) repliesEl.appendChild(createCommentElement(r, true));
@@ -4937,6 +4969,7 @@
         return;
       }
       state.comments = data.comments;
+      state.collapsedReplyRoots.clear();
       normalizeCommentsShape();
       await saveClipData(clip);
       await refreshAuthorPresentationCache();
@@ -5122,6 +5155,7 @@
       state.comments = [];
       state.selectedId = null;
       state.replyTargetId = null;
+      state.collapsedReplyRoots.clear();
       state.drawMode = false;
       return;
     }
