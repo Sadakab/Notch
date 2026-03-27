@@ -149,11 +149,11 @@
     if (!errorCode) return "Could not save to cloud — check your connection.";
     if (errorCode === "not_authenticated") return "Cloud session expired. Sign in again.";
     if (!sharedReview) return "Could not save to cloud — check your connection.";
-    if (errorCode === "invalid_host_binding") return "Shared review target missing. Re-join with invite code.";
+    if (errorCode === "invalid_host_binding") return "Shared review target missing. Re-open the review link.";
     if (errorCode === "host_row_missing")
       return "Host has no cloud row for this video yet. Ask host to add one note first.";
     if (errorCode === "rls_denied_or_no_match")
-      return "Shared review write denied. Re-join with a fresh invite code.";
+      return "Shared review write denied. Re-open the review link.";
     return "Could not save shared review to cloud.";
   }
 
@@ -1994,8 +1994,6 @@
     }
     const urlInp = root.querySelector(".mf-settings-avatar-url");
     if (urlInp) urlInp.value = "";
-    const inviteHint = root.querySelector(".mf-settings-invite-hint");
-    if (inviteHint) inviteHint.textContent = "";
     const storedAvatar = await loadStoredAvatar();
     if (urlInp && storedAvatar.startsWith("https://")) urlInp.value = storedAvatar;
     const previewLabel = inp.value.trim() || email || "You";
@@ -2185,6 +2183,11 @@
     state.collapsedReplyRoots.clear();
     await refreshCloudUser(false);
     const key = clip.storageKey;
+    const hostBindingRaw = await readCollabHostUserIdForClip(clip);
+    const sharedReviewTarget =
+      !!hostBindingRaw &&
+      (!state.cloudUser?.id ||
+        normalizeUuidForCompare(hostBindingRaw) !== normalizeUuidForCompare(state.cloudUser.id));
     const configured = await getSupabaseConfigured();
     notchLog("loadClipData start", {
       platform: clip.platform,
@@ -2192,6 +2195,7 @@
       storageKey: key,
       supabaseConfigured: configured,
       cloudUser: !!state.cloudUser,
+      sharedReviewTarget,
     });
     if (configured) {
       let r;
@@ -2245,6 +2249,18 @@
           "loadClipData cloud skipped because",
           "coerceIncomingComments returned null — record.comments missing or wrong type (expect JSON array)"
         );
+      }
+      if (sharedReviewTarget) {
+        // For collaborator views, never show stale local cache when the host row is missing/inaccessible.
+        await chrome.storage.local.remove(key);
+        state.comments = [];
+        notchLog("loadClipData shared review: cleared local fallback cache", {
+          key,
+          hadHostBinding: !!hostBindingRaw,
+          cloudOk: r?.ok === true,
+          cloudRecordNull: r?.record == null,
+        });
+        return;
       }
       notchLog("loadClipData falling back to local storage");
     }
@@ -2329,7 +2345,7 @@
             hostBindingRaw: String(hostBindingRaw || ""),
           });
           if (isCloudActive()) {
-            showToast("Shared review target missing. Re-join with invite code.");
+            showToast("Shared review target missing. Re-open the review link.");
           }
         } else {
           const r = await sendExtensionMessage({
@@ -2707,21 +2723,6 @@
         renderThread();
       }
     }
-  }
-
-  async function compressToBase64Url(obj) {
-    const json = JSON.stringify(obj);
-    const bytes = new TextEncoder().encode(json);
-    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
-    const buf = await new Response(stream).arrayBuffer();
-    let binary = "";
-    const u8 = new Uint8Array(buf);
-    const chunk = 0x8000;
-    for (let i = 0; i < u8.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
-    }
-    const b64 = btoa(binary);
-    return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   }
 
   async function decompressFromBase64Url(b64url) {
@@ -3259,8 +3260,18 @@
     return el;
   }
 
+  function updateCopyReviewLinkButtonState() {
+    if (!root) return;
+    const copyBtn = root.querySelector('[data-action="copy-link"]');
+    if (!copyBtn) return;
+    const hasComments = Array.isArray(state.comments) && state.comments.length > 0;
+    copyBtn.disabled = !hasComments;
+    copyBtn.title = hasComments ? "Copy review link" : "Needs at least 1 comment first";
+  }
+
   function renderThread() {
     if (!root) return;
+    updateCopyReviewLinkButtonState();
     const thread = root.querySelector(".mf-thread");
     if (!thread) return;
     thread.innerHTML = "";
@@ -3404,9 +3415,6 @@
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
             </div>
             <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
-            <button type="button" class="mf-btn" data-action="share-invite-code" title="Generate a code others can use to join this cloud review">
-              Share invite code
-            </button>
             <button type="button" class="mf-btn mf-export-pdf-btn" data-action="export-pdf" title="Export PDF" aria-label="Export PDF">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-file-down" aria-hidden="true">
                 <path d="M14 2v4a2 2 0 0 0 2 2h4" />
@@ -3532,22 +3540,6 @@
                   spellcheck="false"
                 />
               </label>
-            </div>
-            <div class="mf-settings-invite-block">
-              <span class="mf-settings-section-title">Join a shared review</span>
-              <label class="mf-settings-label mf-settings-label-tight"
-                >Invite code
-                <input
-                  type="text"
-                  class="mf-settings-display-name mf-settings-invite-code"
-                  autocomplete="off"
-                  maxlength="16"
-                  placeholder="e.g. ABC12XY9"
-                  spellcheck="false"
-                />
-              </label>
-              <button type="button" class="mf-btn mf-btn-primary" data-action="redeem-invite">Join review</button>
-              <p class="mf-settings-invite-hint" aria-live="polite"></p>
             </div>
             <div class="mf-settings-actions">
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-settings">Save</button>
@@ -3979,27 +3971,13 @@
       saveDrawingToComment();
     });
 
-    root.querySelector('[data-action="copy-link"]').addEventListener("click", () => {
-      copyReviewLink();
-    });
-    const shareInviteBtn = root.querySelector('[data-action="share-invite-code"]');
-    if (shareInviteBtn) {
-      shareInviteBtn.addEventListener("click", () => void shareInviteCodeForWatch());
-    }
-    const redeemInviteBtn = root.querySelector('[data-action="redeem-invite"]');
-    if (redeemInviteBtn) {
-      redeemInviteBtn.addEventListener("click", () => void redeemInviteFromSettings());
-    }
-    const redeemInviteInp = root.querySelector(".mf-settings-invite-code");
-    if (redeemInviteInp) {
-      redeemInviteInp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          void redeemInviteFromSettings();
-        }
+    const copyLinkBtn = root.querySelector('[data-action="copy-link"]');
+    if (copyLinkBtn) {
+      copyLinkBtn.addEventListener("click", () => {
+        if (copyLinkBtn.disabled) return;
+        copyReviewLink();
       });
     }
-
     root.querySelector('[data-action="export-pdf"]').addEventListener("click", () => {
       void generateCommentsPdf();
     });
@@ -4808,15 +4786,32 @@
   async function copyReviewLink() {
     const clip = resolveClipContext();
     if (!clip) return;
-    const payload = {
-      v: 2,
-      platform: clip.platform,
-      clipId: clip.clipId,
-      comments: state.comments,
-    };
+    if (!isCloudActive()) {
+      showToast("Sign in to copy a review link.");
+      return;
+    }
+    if (!(await getSupabaseConfigured())) {
+      showToast("Cloud is not configured.");
+      return;
+    }
     try {
-      const enc = await compressToBase64Url(payload);
-      const url = `https://markframe.io/review?data=${enc}`;
+      const r = await sendExtensionMessage({
+        type: "MF_ENSURE_CLIP_REVIEW_ROW",
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      if (!r?.ok || !r.userId || !r.platform || r.clipId == null || String(r.clipId) === "") {
+        const err = r?.error || "";
+        if (err === "not_authenticated") showToast("Sign in to copy a review link.");
+        else showToast("Could not prepare review link.");
+        return;
+      }
+      const qs = new URLSearchParams({
+        uid: String(r.userId),
+        platform: String(r.platform),
+        clip: String(r.clipId),
+      });
+      const url = `https://notch.video/review?${qs.toString()}`;
       try {
         await navigator.clipboard.writeText(url);
       } catch {
@@ -4834,117 +4829,6 @@
     } catch (err) {
       showToast("Could not copy link.");
       console.error(err);
-    }
-  }
-
-  async function shareInviteCodeForWatch() {
-    const clip = resolveClipContext();
-    if (!clip) return;
-    if (!isCloudActive()) {
-      showToast("Sign in to share an invite code.");
-      return;
-    }
-    if (!(await getSupabaseConfigured())) {
-      showToast("Cloud is not configured.");
-      return;
-    }
-    try {
-      const r = await sendExtensionMessage({
-        type: "MF_INVITE_CREATE",
-        platform: clip.platform,
-        clipId: clip.clipId,
-      });
-      if (!r?.ok || !r.code) {
-        const err = r?.error || "";
-        if (err === "no_review_row") {
-          showToast("Save this review to the cloud first (add a note), then share a code.");
-        } else {
-          showToast("Could not create invite code.");
-        }
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(r.code);
-      } catch {
-        const ta = document.createElement("textarea");
-        ta.value = r.code;
-        ta.style.position = "fixed";
-        ta.style.left = "-9999px";
-        document.documentElement.appendChild(ta);
-        ta.focus();
-        ta.select();
-        document.execCommand("copy");
-        ta.remove();
-      }
-      showToast("Invite code copied: " + r.code);
-    } catch (_e) {
-      showToast("Could not create invite code.");
-    }
-  }
-
-  async function redeemInviteFromSettings() {
-    if (!root) return;
-    const inp = root.querySelector(".mf-settings-invite-code");
-    const hint = root.querySelector(".mf-settings-invite-hint");
-    if (!inp || !hint) return;
-    hint.textContent = "";
-    const code = String(inp.value || "").trim();
-    if (!code) {
-      hint.textContent = "Enter a code.";
-      return;
-    }
-    if (!isCloudActive()) {
-      hint.textContent = "Sign in first.";
-      return;
-    }
-    try {
-      const r = await sendExtensionMessage({ type: "MF_INVITE_REDEEM", code });
-      if (!r?.ok) {
-        const err = r?.error || "";
-        if (err === "invalid_code") hint.textContent = "That code is not valid.";
-        else if (err === "expired") hint.textContent = "That code has expired.";
-        else if (err === "not_authenticated") hint.textContent = "Sign in first.";
-        else hint.textContent = "Could not join. Try again.";
-        return;
-      }
-      const redeemHost =
-        r.hostUserId != null && String(r.hostUserId).trim() !== ""
-          ? String(r.hostUserId).trim()
-          : null;
-      if (!redeemHost || !r.platform || !r.clipId) {
-        hint.textContent = "Could not join.";
-        return;
-      }
-      if (r.isHost) {
-        hint.textContent = "That invite is for your own review.";
-        return;
-      }
-      await setCollabHostForRedeem(r.platform, r.clipId, redeemHost);
-      inp.value = "";
-      hint.textContent = "";
-      closeSettingsPanel();
-      const cur = resolveClipContext();
-      if (clipMatchesRedeemTarget(cur, r.platform, r.clipId)) {
-        lastTickSignature = "";
-        showToast("Joined shared review.");
-        void tick();
-      } else {
-        const url = buildWatchUrlForPlatform(r.platform, r.clipId);
-        lastTickSignature = "";
-        void tick();
-        if (url) {
-          showToast("Opening the video…");
-          setTimeout(() => {
-            try {
-              location.href = url;
-            } catch (_) {}
-          }, 400);
-        } else {
-          showToast("Joined. Open the matching video to load notes.");
-        }
-      }
-    } catch (_e) {
-      hint.textContent = "Could not join.";
     }
   }
 
@@ -5037,6 +4921,92 @@
     videoEl = clip.getVideoElement();
   }
 
+  let openSharedReviewDedupAt = 0;
+
+  /** Ensures clip_review_collaborators has a row so RLS allows reading the host's notes (share link flow). */
+  async function ensureSharedReviewCollaboratorMembership(hostUserId, clip) {
+    const hid = String(hostUserId || "").trim();
+    if (!hid || !clip) return { ok: false, error: "invalid_args" };
+    await refreshCloudUser(false);
+    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
+    if (!myId) return { ok: false, error: "not_authenticated" };
+    if (normalizeUuidForCompare(hid) === normalizeUuidForCompare(myId)) {
+      return { ok: true, isHost: true };
+    }
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_JOIN_SHARED_REVIEW",
+        hostUserId: hid,
+        platform: clip.platform,
+        clipId: clip.clipId,
+      });
+      if (r?.ok === true) return { ok: true, isHost: !!r.isHost };
+      return { ok: false, error: String(r?.error || "join_failed") };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }
+
+  async function patchNotchSharedReviewStorage(patch) {
+    const curRaw = await chrome.storage.local.get("notch_shared_review");
+    const cur = curRaw.notch_shared_review;
+    const base = cur && typeof cur === "object" ? { ...cur } : {};
+    await chrome.storage.local.set({ notch_shared_review: { ...base, ...patch } });
+  }
+
+  async function handleOpenSharedReview(msg) {
+    const uid = String(msg.uid || "").trim();
+    const platform = msg.platform;
+    const sharedClipId = msg.clip != null ? String(msg.clip) : "";
+    if (!uid || !platform || !sharedClipId) return;
+
+    const now = Date.now();
+    if (now - openSharedReviewDedupAt < 800) return;
+    openSharedReviewDedupAt = now;
+
+    await setSidebarVisible(true);
+
+    const clip = resolveClipContext();
+    if (!clip || !clipMatchesRedeemTarget(clip, platform, sharedClipId)) {
+      showToast("Open the matching video page to load this review.");
+      return;
+    }
+
+    await refreshCloudUser(false);
+    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
+    if (myId && normalizeUuidForCompare(uid) === normalizeUuidForCompare(myId)) {
+      await clearCollabHostForClip(clip);
+      await patchNotchSharedReviewStorage({ needsDbJoin: false });
+    } else {
+      await setCollabHostForRedeem(clip.platform, clip.clipId, uid);
+
+      if (!isCloudActive()) {
+        await patchNotchSharedReviewStorage({ needsDbJoin: true });
+      } else {
+        const j = await ensureSharedReviewCollaboratorMembership(uid, clip);
+        if (j.ok) {
+          await patchNotchSharedReviewStorage({ needsDbJoin: false });
+        } else {
+          const err = j.error || "";
+          if (err === "not_authenticated") {
+            await patchNotchSharedReviewStorage({ needsDbJoin: true });
+          } else {
+            if (err === "no_review") {
+              showToast("This review is not available in the cloud yet.");
+            } else {
+              showToast("Could not join this shared review.");
+            }
+            await patchNotchSharedReviewStorage({ needsDbJoin: false });
+          }
+        }
+      }
+    }
+
+    lastTickSignature = "";
+    await tick();
+    showToast("Loaded shared review.");
+  }
+
   async function initDashboard() {
     const mount = document.body || document.documentElement;
     if (!mount) return;
@@ -5124,6 +5094,24 @@
       collabPart = (await readCollabHostUserIdForClip(clip)) || "";
     }
 
+    const { notch_shared_review: nsr } = await chrome.storage.local.get("notch_shared_review");
+    if (
+      unlocked &&
+      clip &&
+      nsr &&
+      nsr.needsDbJoin &&
+      clipMatchesRedeemTarget(clip, nsr.platform, String(nsr.clip ?? ""))
+    ) {
+      const host = await readCollabHostUserIdForClip(clip);
+      if (host && normalizeUuidForCompare(host) === normalizeUuidForCompare(String(nsr.uid || ""))) {
+        const j = await ensureSharedReviewCollaboratorMembership(nsr.uid, clip);
+        if (j.ok) {
+          await patchNotchSharedReviewStorage({ needsDbJoin: false });
+          lastTickSignature = "";
+        }
+      }
+    }
+
     const sig = unlocked
       ? !clip
         ? href + "\0no_clip"
@@ -5188,11 +5176,17 @@
     });
   }
 
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((msg, _e, sendResponse) => {
     if (msg && msg.type === "TOGGLE_SIDEBAR") {
       loadSidebarVisible().then((v) => {
         setSidebarVisible(!v).then(() => sendResponse({ ok: true, sidebarVisible: !v }));
       });
+      return true;
+    }
+    if (msg && msg.action === "open-shared-review") {
+      void handleOpenSharedReview(msg)
+        .then(() => sendResponse({ ok: true }))
+        .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
       return true;
     }
   });

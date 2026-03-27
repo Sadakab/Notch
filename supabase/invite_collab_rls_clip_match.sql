@@ -10,8 +10,8 @@ immutable
 as $$
   select case
     when p_platform = 'dropbox' then
-      public.normalize_clip_id_for_invite('dropbox', coalesce(id_a, ''))
-        = public.normalize_clip_id_for_invite('dropbox', coalesce(id_b, ''))
+      public.normalize_clip_id_for_collab('dropbox', coalesce(id_a, ''))
+        = public.normalize_clip_id_for_collab('dropbox', coalesce(id_b, ''))
     else coalesce(id_a, '') = coalesce(id_b, '')
   end;
 $$;

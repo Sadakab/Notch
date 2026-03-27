@@ -532,24 +532,6 @@
   margin: 0;
 }
 
-#markframe-root .mf-settings-invite-block {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--mf-border);
-}
-
-#markframe-root .mf-settings-invite-block .mf-btn {
-  margin-top: 8px;
-}
-
-#markframe-root .mf-settings-invite-hint {
-  margin: 8px 0 0;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--mf-text-muted);
-  min-height: 1.2em;
-}
-
 #markframe-root .mf-settings-avatar-section {
   margin: 0;
   padding-top: 12px;
@@ -1023,6 +1005,11 @@ body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-lucide {
 
 #markframe-root .mf-btn:hover {
   border-color: rgba(255, 255, 255, 0.18);
+}
+
+#markframe-root .mf-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 #markframe-root .mf-btn.mf-active {

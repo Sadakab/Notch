@@ -18108,7 +18108,7 @@ function handleRuntimeMessage(msg, sendResponse) {
     });
     return true;
   }
-  if (msg?.type === "MF_INVITE_CREATE") {
+  if (msg?.type === "MF_ENSURE_CLIP_REVIEW_ROW") {
     const client = getSupabase();
     const platform = msg.platform;
     const clipId = msg.clipId;
@@ -18118,33 +18118,89 @@ function handleRuntimeMessage(msg, sendResponse) {
     }
     getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       const user = session?.user;
-      if (sessErr || !user) {
+      if (sessErr || !user?.id) {
         sendResponse({ ok: false, error: "not_authenticated" });
         return;
       }
-      const { data, error } = await client.rpc("create_review_invite", {
-        p_platform: platform,
-        p_clip_id: clipId
-      });
-      if (error) {
-        console.error("Notch invite create", error);
-        sendResponse({ ok: false, error: error.message || "rpc_error" });
-        return;
+      const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+      try {
+        const { data: existing, error: loadErr } = await loadClipReviewRow(
+          client,
+          platform,
+          clipId,
+          user.id
+        );
+        if (loadErr) {
+          const errLine = formatSupabaseError(loadErr);
+          console.error("Notch ensure clip row load", errLine, loadErr);
+          sendResponse({ ok: false, error: "load_failed", detail: errLine });
+          return;
+        }
+        if (existing) {
+          const clipIdOut = existing.clip_id != null && String(existing.clip_id) !== "" ? String(existing.clip_id) : clipIdDb;
+          sendResponse({
+            ok: true,
+            userId: user.id,
+            platform,
+            clipId: clipIdOut
+          });
+          return;
+        }
+        const row = {
+          user_id: user.id,
+          platform,
+          clip_id: clipIdDb,
+          comments: [],
+          updated_at: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        const { error: insertErr } = await client.from("clip_reviews").insert(row);
+        if (insertErr) {
+          if (insertErr.code === "23505") {
+            const { data: raced } = await loadClipReviewRow(client, platform, clipId, user.id);
+            const clipIdOut = raced?.clip_id != null && String(raced.clip_id) !== "" ? String(raced.clip_id) : clipIdDb;
+            sendResponse({
+              ok: true,
+              userId: user.id,
+              platform,
+              clipId: clipIdOut
+            });
+            return;
+          }
+          const errLine = formatSupabaseError(insertErr);
+          console.error("Notch ensure clip row insert", errLine, insertErr);
+          sendResponse({ ok: false, error: "insert_failed", detail: errLine });
+          return;
+        }
+        if (platform === "dropbox") {
+          const pat = sqlLikePrefixFromPath(clipIdDb);
+          if (pat) {
+            const { error: dedupeErr } = await client.from("clip_reviews").delete().eq("platform", "dropbox").eq("user_id", user.id).like("clip_id", pat).neq("clip_id", clipIdDb);
+            if (dedupeErr) {
+              notchSwLog("MF_ENSURE_CLIP_REVIEW_ROW dropbox dedupe skipped", {
+                message: dedupeErr.message
+              });
+            }
+          }
+        }
+        sendResponse({
+          ok: true,
+          userId: user.id,
+          platform,
+          clipId: clipIdDb
+        });
+      } catch (e) {
+        console.error("Notch ensure clip row", e);
+        sendResponse({ ok: false, error: "ensure_failed", detail: String(e?.message || e) });
       }
-      const row = data;
-      if (row && typeof row === "object" && row.ok === true && typeof row.code === "string") {
-        sendResponse({ ok: true, code: row.code });
-        return;
-      }
-      const err = row && typeof row === "object" && typeof row.error === "string" ? row.error : "unknown";
-      sendResponse({ ok: false, error: err });
     });
     return true;
   }
-  if (msg?.type === "MF_INVITE_REDEEM") {
+  if (msg?.type === "MF_JOIN_SHARED_REVIEW") {
     const client = getSupabase();
-    const code = String(msg.code || "").trim();
-    if (!client || !code) {
+    const hostUserId = msg.hostUserId != null ? String(msg.hostUserId).trim() : "";
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    if (!client || !hostUserId || !platform || !clipId) {
       sendResponse({ ok: false, error: "invalid_args" });
       return false;
     }
@@ -18153,23 +18209,19 @@ function handleRuntimeMessage(msg, sendResponse) {
         sendResponse({ ok: false, error: "not_authenticated" });
         return;
       }
-      const { data, error } = await client.rpc("redeem_review_invite", { p_code: code });
+      const { data, error } = await client.rpc("join_shared_review_link", {
+        p_host_user_id: hostUserId,
+        p_platform: platform,
+        p_clip_id: clipId
+      });
       if (error) {
-        console.error("Notch invite redeem", error);
+        console.error("Notch join shared review", error);
         sendResponse({ ok: false, error: error.message || "rpc_error" });
         return;
       }
       const row = data;
       if (row && typeof row === "object" && row.ok === true) {
-        const hidRaw = row.host_user_id ?? row.hostUserId;
-        const hid = hidRaw != null && String(hidRaw).trim() !== "" ? String(hidRaw).trim() : null;
-        sendResponse({
-          ok: true,
-          hostUserId: hid,
-          platform: row.platform != null ? String(row.platform) : null,
-          clipId: row.clip_id != null ? String(row.clip_id) : row.clipId != null ? String(row.clipId) : null,
-          isHost: row.is_host === true || row.isHost === true
-        });
+        sendResponse({ ok: true, isHost: row.is_host === true || row.isHost === true });
         return;
       }
       const err = row && typeof row === "object" && typeof row.error === "string" ? row.error : "unknown";
@@ -18249,8 +18301,8 @@ var require_sw_main = __commonJS({
       "MF_CLOUD_LIST_CLIPS",
       "MF_CLOUD_UPDATE_THUMB",
       "MF_CLOUD_DELETE_CLIP",
-      "MF_INVITE_CREATE",
-      "MF_INVITE_REDEEM",
+      "MF_ENSURE_CLIP_REVIEW_ROW",
+      "MF_JOIN_SHARED_REVIEW",
       "MF_COLLAB_LEAVE"
     ]);
     function isSupabaseConfigured() {
@@ -18263,6 +18315,102 @@ var require_sw_main = __commonJS({
       } catch {
         return false;
       }
+    }
+    var NOTCH_SHARED_REVIEW_STORAGE_KEY = "notch_shared_review";
+    function buildWatchUrlForSharedReview(platform, clipIdRaw) {
+      if (clipIdRaw == null) return "";
+      const clipId = String(clipIdRaw);
+      if (!clipId.trim()) return "";
+      if (platform === "youtube") {
+        return "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
+      }
+      if (platform === "vimeo") {
+        return "https://vimeo.com/" + encodeURIComponent(clipId);
+      }
+      if (platform === "loom") {
+        return "https://www.loom.com/share/" + encodeURIComponent(clipId);
+      }
+      if (platform === "googledrive") {
+        return "https://drive.google.com/file/d/" + encodeURIComponent(clipId) + "/view";
+      }
+      if (platform === "dropbox") {
+        if (clipId.startsWith("http")) return clipId;
+        if (!clipId.startsWith("/")) {
+          return "https://www.dropbox.com/";
+        }
+        try {
+          const qIdx = clipId.indexOf("?");
+          const pathOnly = qIdx === -1 ? clipId : clipId.slice(0, qIdx);
+          const search = qIdx === -1 ? "" : clipId.slice(qIdx);
+          const segments = pathOnly.split("/").filter(Boolean).map((seg) => encodeURIComponent(decodeURIComponent(seg)));
+          return "https://www.dropbox.com/" + segments.join("/") + search;
+        } catch {
+          return "https://www.dropbox.com/";
+        }
+      }
+      return "";
+    }
+    function tabUrlPatternsForSharedReview(platform, clipIdRaw) {
+      const clipId = encodeURIComponent(String(clipIdRaw ?? ""));
+      if (platform === "youtube") {
+        return [
+          `*://www.youtube.com/watch?v=${clipId}*`,
+          `*://youtube.com/watch?v=${clipId}*`,
+          `*://m.youtube.com/watch?v=${clipId}*`,
+          `*://youtu.be/${clipId}*`
+        ];
+      }
+      if (platform === "vimeo") {
+        return [`*://vimeo.com/${clipId}*`, `*://player.vimeo.com/video/${clipId}*`];
+      }
+      if (platform === "loom") {
+        return [`*://www.loom.com/share/${clipId}*`];
+      }
+      if (platform === "googledrive") {
+        return [`*://drive.google.com/file/d/${clipId}/*`, `*://docs.google.com/file/d/${clipId}/*`];
+      }
+      if (platform === "dropbox") {
+        const full = buildWatchUrlForSharedReview(platform, clipIdRaw);
+        return full && full !== "https://www.dropbox.com/" ? [`${full}*`] : [];
+      }
+      return [];
+    }
+    async function focusTab(tab) {
+      if (!tab?.id) return;
+      await chrome.tabs.update(tab.id, { active: true });
+      if (tab.windowId != null) {
+        await chrome.windows.update(tab.windowId, { focused: true });
+      }
+    }
+    async function findOrOpenTabForSharedReview(platform, clipId) {
+      const patterns = tabUrlPatternsForSharedReview(platform, clipId);
+      for (const pattern of patterns) {
+        try {
+          const tabs = await chrome.tabs.query({ url: pattern });
+          const hit = tabs.find((t) => t.id != null && isInjectableUrl(t.url));
+          if (hit) {
+            await focusTab(hit);
+            return hit.id;
+          }
+        } catch {
+        }
+      }
+      const openUrl = buildWatchUrlForSharedReview(platform, clipId);
+      if (!openUrl || !isInjectableUrl(openUrl)) return null;
+      const created = await chrome.tabs.create({ url: openUrl, active: true });
+      return created?.id ?? null;
+    }
+    async function dispatchOpenSharedReviewToTab(tabId, payload) {
+      const sendOnce = () => chrome.tabs.sendMessage(tabId, payload);
+      for (let i = 0; i < 25; i++) {
+        try {
+          await sendOnce();
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 400));
+        }
+      }
+      console.warn("[Notch] open-shared-review: could not reach content script on tab", tabId);
     }
     function sendCloudFallback(msg, sendResponse) {
       if (!sendResponse) return;
@@ -18303,11 +18451,11 @@ var require_sw_main = __commonJS({
         sendResponse({ ok: false });
         return;
       }
-      if (t === "MF_INVITE_CREATE") {
+      if (t === "MF_ENSURE_CLIP_REVIEW_ROW") {
         sendResponse({ ok: false, error: "fallback" });
         return;
       }
-      if (t === "MF_INVITE_REDEEM") {
+      if (t === "MF_JOIN_SHARED_REVIEW") {
         sendResponse({ ok: false, error: "fallback" });
         return;
       }
@@ -18329,6 +18477,50 @@ var require_sw_main = __commonJS({
       if (!tab?.id || !isInjectableUrl(tab.url)) return;
       chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_SIDEBAR" }).catch(() => {
       });
+    });
+    chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
+      if (msg?.action !== "load-shared-review") return false;
+      const uidRaw = msg.uid;
+      const platformRaw = msg.platform;
+      const clipRaw = msg.clip;
+      if (uidRaw == null || String(uidRaw).trim() === "" || platformRaw == null || String(platformRaw).trim() === "" || clipRaw == null || String(clipRaw).trim() === "") {
+        sendResponse({ ok: false, error: "invalid_args" });
+        return false;
+      }
+      const stored = {
+        uid: String(uidRaw).trim(),
+        platform: String(platformRaw).trim(),
+        clip: String(clipRaw),
+        receivedAt: Date.now()
+      };
+      const internal = {
+        action: "open-shared-review",
+        uid: stored.uid,
+        platform: stored.platform,
+        clip: stored.clip
+      };
+      void (async () => {
+        try {
+          await chrome.storage.local.set({ [NOTCH_SHARED_REVIEW_STORAGE_KEY]: stored });
+          try {
+            if (typeof chrome.action?.openPopup === "function") {
+              await chrome.action.openPopup();
+            }
+          } catch {
+          }
+          const tabId = await findOrOpenTabForSharedReview(stored.platform, stored.clip);
+          if (tabId != null) {
+            await dispatchOpenSharedReviewToTab(tabId, internal);
+          }
+          chrome.runtime.sendMessage(internal).catch(() => {
+          });
+          sendResponse({ ok: true, tabId: tabId ?? null });
+        } catch (e) {
+          console.error("[Notch] load-shared-review", e);
+          sendResponse({ ok: false, error: String(e?.message || e) });
+        }
+      })();
+      return true;
     });
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {

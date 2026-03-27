@@ -21,6 +21,9 @@
     "type": "module"
   },
   "permissions": ["storage", "clipboardWrite", "tabs"],
+  "externally_connectable": {
+    "matches": ["https://notch.video/*"]
+  },
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {

@@ -829,7 +829,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
     return true;
   }
 
-  if (msg?.type === "MF_INVITE_CREATE") {
+  if (msg?.type === "MF_ENSURE_CLIP_REVIEW_ROW") {
     const client = getSupabase();
     const platform = msg.platform;
     const clipId = msg.clipId;
@@ -839,35 +839,102 @@ export function handleRuntimeMessage(msg, sendResponse) {
     }
     getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       const user = session?.user;
-      if (sessErr || !user) {
+      if (sessErr || !user?.id) {
         sendResponse({ ok: false, error: "not_authenticated" });
         return;
       }
-      const { data, error } = await client.rpc("create_review_invite", {
-        p_platform: platform,
-        p_clip_id: clipId,
-      });
-      if (error) {
-        console.error("Notch invite create", error);
-        sendResponse({ ok: false, error: error.message || "rpc_error" });
-        return;
+      const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+      try {
+        const { data: existing, error: loadErr } = await loadClipReviewRow(
+          client,
+          platform,
+          clipId,
+          user.id,
+        );
+        if (loadErr) {
+          const errLine = formatSupabaseError(loadErr);
+          console.error("Notch ensure clip row load", errLine, loadErr);
+          sendResponse({ ok: false, error: "load_failed", detail: errLine });
+          return;
+        }
+        if (existing) {
+          const clipIdOut =
+            existing.clip_id != null && String(existing.clip_id) !== ""
+              ? String(existing.clip_id)
+              : clipIdDb;
+          sendResponse({
+            ok: true,
+            userId: user.id,
+            platform,
+            clipId: clipIdOut,
+          });
+          return;
+        }
+        const row = {
+          user_id: user.id,
+          platform,
+          clip_id: clipIdDb,
+          comments: [],
+          updated_at: new Date().toISOString(),
+        };
+        const { error: insertErr } = await client.from("clip_reviews").insert(row);
+        if (insertErr) {
+          if (insertErr.code === "23505") {
+            const { data: raced } = await loadClipReviewRow(client, platform, clipId, user.id);
+            const clipIdOut =
+              raced?.clip_id != null && String(raced.clip_id) !== ""
+                ? String(raced.clip_id)
+                : clipIdDb;
+            sendResponse({
+              ok: true,
+              userId: user.id,
+              platform,
+              clipId: clipIdOut,
+            });
+            return;
+          }
+          const errLine = formatSupabaseError(insertErr);
+          console.error("Notch ensure clip row insert", errLine, insertErr);
+          sendResponse({ ok: false, error: "insert_failed", detail: errLine });
+          return;
+        }
+        if (platform === "dropbox") {
+          const pat = sqlLikePrefixFromPath(clipIdDb);
+          if (pat) {
+            const { error: dedupeErr } = await client
+              .from("clip_reviews")
+              .delete()
+              .eq("platform", "dropbox")
+              .eq("user_id", user.id)
+              .like("clip_id", pat)
+              .neq("clip_id", clipIdDb);
+            if (dedupeErr) {
+              notchSwLog("MF_ENSURE_CLIP_REVIEW_ROW dropbox dedupe skipped", {
+                message: dedupeErr.message,
+              });
+            }
+          }
+        }
+        sendResponse({
+          ok: true,
+          userId: user.id,
+          platform,
+          clipId: clipIdDb,
+        });
+      } catch (e) {
+        console.error("Notch ensure clip row", e);
+        sendResponse({ ok: false, error: "ensure_failed", detail: String(e?.message || e) });
       }
-      const row = data;
-      if (row && typeof row === "object" && row.ok === true && typeof row.code === "string") {
-        sendResponse({ ok: true, code: row.code });
-        return;
-      }
-      const err =
-        row && typeof row === "object" && typeof row.error === "string" ? row.error : "unknown";
-      sendResponse({ ok: false, error: err });
     });
     return true;
   }
 
-  if (msg?.type === "MF_INVITE_REDEEM") {
+  if (msg?.type === "MF_JOIN_SHARED_REVIEW") {
     const client = getSupabase();
-    const code = String(msg.code || "").trim();
-    if (!client || !code) {
+    const hostUserId = msg.hostUserId != null ? String(msg.hostUserId).trim() : "";
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    if (!client || !hostUserId || !platform || !clipId) {
       sendResponse({ ok: false, error: "invalid_args" });
       return false;
     }
@@ -876,23 +943,19 @@ export function handleRuntimeMessage(msg, sendResponse) {
         sendResponse({ ok: false, error: "not_authenticated" });
         return;
       }
-      const { data, error } = await client.rpc("redeem_review_invite", { p_code: code });
+      const { data, error } = await client.rpc("join_shared_review_link", {
+        p_host_user_id: hostUserId,
+        p_platform: platform,
+        p_clip_id: clipId,
+      });
       if (error) {
-        console.error("Notch invite redeem", error);
+        console.error("Notch join shared review", error);
         sendResponse({ ok: false, error: error.message || "rpc_error" });
         return;
       }
       const row = data;
       if (row && typeof row === "object" && row.ok === true) {
-        const hidRaw = row.host_user_id ?? row.hostUserId;
-        const hid = hidRaw != null && String(hidRaw).trim() !== "" ? String(hidRaw).trim() : null;
-        sendResponse({
-          ok: true,
-          hostUserId: hid,
-          platform: row.platform != null ? String(row.platform) : null,
-          clipId: row.clip_id != null ? String(row.clip_id) : row.clipId != null ? String(row.clipId) : null,
-          isHost: row.is_host === true || row.isHost === true,
-        });
+        sendResponse({ ok: true, isHost: row.is_host === true || row.isHost === true });
         return;
       }
       const err =
