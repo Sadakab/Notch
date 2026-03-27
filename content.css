@@ -861,10 +861,10 @@
   display: flex;
   flex-wrap: nowrap;
   gap: 6px;
-  align-items: center;
+  align-items: left;
   overflow-x: visible;
   border-bottom: 1px solid var(--mf-border);
-  justify-content: space-between;
+  /* justify-content: space-between; */
 }
 
 /* Copy / share / export / screengrab — same height (draw cluster is nested separately). */
