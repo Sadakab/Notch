@@ -231,6 +231,8 @@
   let cachedAuthorAvatarUrl = "";
   /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
   let lastTickSignature = "";
+  /** Bumps on each dashboard paint; stale async completions skip DOM so concurrent renders cannot duplicate rows. */
+  let dashboardRenderGeneration = 0;
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
   let canvasMountParent = null;
@@ -3858,13 +3860,15 @@
 
   async function renderDashboard() {
     if (!root) return;
+    const gen = ++dashboardRenderGeneration;
     await refreshCloudUser(false);
     await updateSyncBar();
     updateOffClipBanner();
     const listEl = root.querySelector(".mf-dashboard-list");
     if (!listEl) return;
-    listEl.innerHTML = "";
     const items = await listVideosWithFeedback();
+    if (gen !== dashboardRenderGeneration) return;
+    listEl.innerHTML = "";
     if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "mf-dashboard-empty";
