@@ -22,11 +22,66 @@ function notchSwLog(msg, detail) {
   }
 }
 
-/** Dropbox: store/query path without ?volatile= params so refresh keeps the same clip_id. */
+function dropboxHostnameOk(h) {
+  return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
+}
+
+/**
+ * Parse a Dropbox clip id (path, path?query, or full https URL) for normalization.
+ * @returns {URL | null}
+ */
+function parseDropboxClipIdToUrl(clipId) {
+  if (!clipId || typeof clipId !== "string") return null;
+  const s = clipId.trim();
+  if (!s) return null;
+  try {
+    if (/^https?:\/\//i.test(s)) {
+      const u = new URL(s);
+      if (!dropboxHostnameOk(u.hostname)) return null;
+      return u;
+    }
+    const pathAndQuery = s.startsWith("/") ? s : "/" + s.replace(/^\/+/, "");
+    return new URL("https://www.dropbox.com" + pathAndQuery);
+  } catch {
+    return null;
+  }
+}
+
+/** Guests need `rlkey` on /scl/fi/… links; omit volatile params (`e`, `st`, …). */
+function dropboxStableQueryString(searchParams) {
+  if (!searchParams || typeof searchParams.get !== "function") return "";
+  const rlkey = searchParams.get("rlkey");
+  const dl = searchParams.get("dl");
+  const parts = [];
+  if (rlkey) parts.push("rlkey=" + encodeURIComponent(rlkey));
+  if (dl != null && dl !== "") parts.push("dl=" + encodeURIComponent(dl));
+  return parts.length ? "?" + parts.join("&") : "";
+}
+
+function dropboxPathnameOnlyFromClipId(clipId) {
+  const u = parseDropboxClipIdToUrl(clipId);
+  if (u && dropboxHostnameOk(u.hostname)) {
+    return u.pathname || "";
+  }
+  const raw = String(clipId || "");
+  const q = raw.indexOf("?");
+  return q === -1 ? raw : raw.slice(0, q);
+}
+
+/**
+ * Stable clip_id for clip_reviews: pathname + ?rlkey=… (& dl if present).
+ * Matches legacy path-only rows via load/dedupe prefix logic.
+ */
 function normalizeDropboxClipIdForDb(platform, clipId) {
   if (platform !== "dropbox" || typeof clipId !== "string" || !clipId) return clipId;
-  const q = clipId.indexOf("?");
-  return q === -1 ? clipId : clipId.slice(0, q);
+  const u = parseDropboxClipIdToUrl(clipId);
+  if (!u || !dropboxHostnameOk(u.hostname)) {
+    const q = clipId.indexOf("?");
+    return q === -1 ? clipId : clipId.slice(0, q);
+  }
+  const path = u.pathname || "";
+  if (!path) return clipId;
+  return path + dropboxStableQueryString(u.searchParams);
 }
 
 /** Prefer message host id (collab) when non-empty after stringify — avoids missing saves if UI passes a non-string UUID. */
@@ -79,17 +134,30 @@ async function loadClipReviewRow(client, platform, clipId, clipOwnerUserId) {
     return { data: null, error: { message: "missing clip owner id" } };
   }
   if (platform === "dropbox") {
-    const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-    const r1 = await client
+    const normalized = normalizeDropboxClipIdForDb(platform, clipId);
+    const pathOnly = dropboxPathnameOnlyFromClipId(normalized);
+
+    const rExact = await client
       .from("clip_reviews")
       .select("*")
       .eq("platform", "dropbox")
       .eq("user_id", clipOwnerUserId)
-      .eq("clip_id", canonical)
+      .eq("clip_id", normalized)
       .maybeSingle();
-    if (r1.error) return { data: null, error: r1.error };
-    if (r1.data) return { data: r1.data, error: null };
-    const pat = sqlLikePrefixFromPath(canonical);
+    if (rExact.error) return { data: null, error: rExact.error };
+    if (rExact.data) return { data: rExact.data, error: null };
+
+    const rLegacyPath = await client
+      .from("clip_reviews")
+      .select("*")
+      .eq("platform", "dropbox")
+      .eq("user_id", clipOwnerUserId)
+      .eq("clip_id", pathOnly)
+      .maybeSingle();
+    if (rLegacyPath.error) return { data: null, error: rLegacyPath.error };
+    if (rLegacyPath.data) return { data: rLegacyPath.data, error: null };
+
+    const pat = sqlLikePrefixFromPath(pathOnly);
     if (!pat) return { data: null, error: null };
     const r2 = await client
       .from("clip_reviews")
@@ -103,8 +171,8 @@ async function loadClipReviewRow(client, platform, clipId, clipOwnerUserId) {
     const row = r2.data?.[0] ?? null;
     if (row) {
       notchSwLog("MF_CLOUD_LOAD_CLIP dropbox legacy prefix match", {
-        requested: clipId.slice(0, 80),
-        canonical: canonical.slice(0, 80),
+        requested: String(clipId).slice(0, 80),
+        normalized: String(normalized).slice(0, 80),
         dbClipIdPrefix: String(row.clip_id).slice(0, 80),
       });
     }
@@ -622,7 +690,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
             return;
           }
           if (platform === "dropbox") {
-            const pat = sqlLikePrefixFromPath(clipIdDb);
+            const pat = sqlLikePrefixFromPath(dropboxPathnameOnlyFromClipId(clipIdDb));
             if (pat) {
               const { error: dedupeErr } = await client
                 .from("clip_reviews")
@@ -772,7 +840,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
         .eq("platform", platform);
       if (platform === "dropbox") {
         const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-        const pat = sqlLikePrefixFromPath(canonical);
+        const pat = sqlLikePrefixFromPath(dropboxPathnameOnlyFromClipId(canonical));
         if (pat) q = q.like("clip_id", pat);
         else q = q.eq("clip_id", clipId);
       } else {
@@ -811,7 +879,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
       let reviewQ = client.from("clip_reviews").delete().eq("user_id", uid).eq("platform", platform);
       if (platform === "dropbox") {
         const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-        const pat = sqlLikePrefixFromPath(canonical);
+        const pat = sqlLikePrefixFromPath(dropboxPathnameOnlyFromClipId(canonical));
         if (pat) reviewQ = reviewQ.like("clip_id", pat);
         else reviewQ = reviewQ.eq("clip_id", clipId);
       } else {
@@ -830,7 +898,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
         .eq("platform", platform);
       if (platform === "dropbox") {
         const canonical = normalizeDropboxClipIdForDb(platform, clipId);
-        const pat = sqlLikePrefixFromPath(canonical);
+        const pat = sqlLikePrefixFromPath(dropboxPathnameOnlyFromClipId(canonical));
         if (pat) collabQ = collabQ.like("clip_id", pat);
         else collabQ = collabQ.eq("clip_id", clipId);
       } else {
@@ -877,10 +945,17 @@ export function handleRuntimeMessage(msg, sendResponse) {
           return;
         }
         if (existing) {
-          const clipIdOut =
-            existing.clip_id != null && String(existing.clip_id) !== ""
-              ? String(existing.clip_id)
-              : clipIdDb;
+          const stored =
+            existing.clip_id != null && String(existing.clip_id) !== "" ? String(existing.clip_id) : "";
+          let clipIdOut = stored || clipIdDb;
+          if (
+            platform === "dropbox" &&
+            /[?&]rlkey=/.test(clipIdDb) &&
+            stored &&
+            !/[?&]rlkey=/.test(stored)
+          ) {
+            clipIdOut = clipIdDb;
+          }
           sendResponse({
             ok: true,
             userId: user.id,
@@ -900,15 +975,22 @@ export function handleRuntimeMessage(msg, sendResponse) {
         if (insertErr) {
           if (insertErr.code === "23505") {
             const { data: raced } = await loadClipReviewRow(client, platform, clipId, user.id);
-            const clipIdOut =
-              raced?.clip_id != null && String(raced.clip_id) !== ""
-                ? String(raced.clip_id)
-                : clipIdDb;
+            const storedR =
+              raced?.clip_id != null && String(raced.clip_id) !== "" ? String(raced.clip_id) : "";
+            let clipIdOutR = storedR || clipIdDb;
+            if (
+              platform === "dropbox" &&
+              /[?&]rlkey=/.test(clipIdDb) &&
+              storedR &&
+              !/[?&]rlkey=/.test(storedR)
+            ) {
+              clipIdOutR = clipIdDb;
+            }
             sendResponse({
               ok: true,
               userId: user.id,
               platform,
-              clipId: clipIdOut,
+              clipId: clipIdOutR,
             });
             return;
           }
@@ -918,7 +1000,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
           return;
         }
         if (platform === "dropbox") {
-          const pat = sqlLikePrefixFromPath(clipIdDb);
+          const pat = sqlLikePrefixFromPath(dropboxPathnameOnlyFromClipId(clipIdDb));
           if (pat) {
             const { error: dedupeErr } = await client
               .from("clip_reviews")
@@ -994,6 +1076,8 @@ export function handleRuntimeMessage(msg, sendResponse) {
       return false;
     }
     const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+    const collabClipId =
+      platform === "dropbox" ? dropboxPathnameOnlyFromClipId(clipIdDb) : clipIdDb;
     getSessionSafe(client).then(({ session, error: sessErr }) => {
       const user = session?.user;
       if (sessErr || !user) {
@@ -1005,7 +1089,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
         .delete()
         .eq("host_user_id", hostUserId)
         .eq("platform", platform)
-        .eq("clip_id", clipIdDb)
+        .eq("clip_id", collabClipId)
         .eq("member_user_id", user.id)
         .then(({ error }) => {
           if (error) {

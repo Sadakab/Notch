@@ -231,6 +231,8 @@
   let cachedAuthorAvatarUrl = "";
   /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
   let lastTickSignature = "";
+  /** At most one delayed reload per storageKey when shared-review binding exists but host row not returned yet. */
+  const sharedReviewCloudReloadOnce = new Set();
   /** Bumps on each dashboard paint; stale async completions skip DOM so concurrent renders cannot duplicate rows. */
   let dashboardRenderGeneration = 0;
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
@@ -1506,7 +1508,7 @@
     return isDropboxSiteHostname(location.hostname);
   }
 
-  /** Shared file preview paths (video or other); we only attach when a usable <video> exists. */
+  /** Shared file preview paths (video or other); clip id comes from the URL while the player may mount later. */
   function isDropboxShareViewerPath(pathname) {
     if (!pathname || typeof pathname !== "string") return false;
     if (/^\/s\/[^/]+\/.+/i.test(pathname)) return true;
@@ -1516,14 +1518,38 @@
     return false;
   }
 
+  /** Keep share-critical query; drop volatile tracking (`e`, `st`, …) so clip_id stays stable across refresh. */
+  function dropboxStableQueryFromSearchParams(searchParams) {
+    if (!searchParams || typeof searchParams.get !== "function") return "";
+    const rlkey = searchParams.get("rlkey");
+    const dl = searchParams.get("dl");
+    const parts = [];
+    if (rlkey) parts.push("rlkey=" + encodeURIComponent(rlkey));
+    if (dl != null && dl !== "") parts.push("dl=" + encodeURIComponent(dl));
+    return parts.length ? "?" + parts.join("&") : "";
+  }
+
   /**
-   * Stable clip key for Dropbox: pathname only. Query params (dl, e, st, rlkey, …) change on refresh
-   * and broke Supabase upsert/load (clip_id mismatch).
+   * Stable clip key for Dropbox: pathname plus `rlkey` (and optional `dl`). Guests need `rlkey` on /scl/fi/… links.
    */
-  function normalizeDropboxClipPath(pathname, _searchParams) {
+  function normalizeDropboxClipPath(pathname, searchParams) {
     if (!pathname) return null;
     if (!isDropboxShareViewerPath(pathname)) return null;
-    return pathname;
+    return pathname + dropboxStableQueryFromSearchParams(searchParams);
+  }
+
+  function dropboxClipPathnameOnly(clipIdStr) {
+    if (!clipIdStr || typeof clipIdStr !== "string") return "";
+    try {
+      const pathAndQuery = clipIdStr.startsWith("/")
+        ? clipIdStr
+        : "/" + clipIdStr.replace(/^\/+/, "");
+      const u = new URL("https://www.dropbox.com" + pathAndQuery);
+      return u.pathname || "";
+    } catch {
+      const q = clipIdStr.indexOf("?");
+      return q === -1 ? clipIdStr : clipIdStr.slice(0, q);
+    }
   }
 
   function parseDropboxClipIdFromUrlString(href) {
@@ -1581,7 +1607,10 @@
     if (a === b) return true;
     const na = normalizeDropboxClipKey(a);
     const nb = normalizeDropboxClipKey(b);
-    return Boolean(na && nb && na === nb);
+    if (na && nb && na === nb) return true;
+    const pa = dropboxClipPathnameOnly(a);
+    const pb = dropboxClipPathnameOnly(b);
+    return Boolean(pa && pb && pa === pb && isDropboxShareViewerPath(pa));
   }
 
   function isDropboxClipHost() {
@@ -1589,10 +1618,11 @@
     return !!parseDropboxClipId();
   }
 
-  function dropboxClipPathInUrl(urlStr, expectedPath) {
-    if (!urlStr || !expectedPath) return false;
+  function dropboxClipPathInUrl(urlStr, expectedClipId) {
+    if (!urlStr || !expectedClipId) return false;
     const parsed = parseDropboxClipIdFromUrlString(urlStr);
-    return parsed === expectedPath;
+    if (!parsed) return false;
+    return dropboxClipPathnameOnly(parsed) === dropboxClipPathnameOnly(expectedClipId);
   }
 
   function scrapeDropboxPageMetadata(expectedPath) {
@@ -1726,7 +1756,6 @@
     if (!isDropboxClipHost()) return null;
     const clipPath = parseDropboxClipId();
     if (!clipPath) return null;
-    if (!findDropboxNativeVideo()) return null;
     const storageKey = clipStorageKey("dropbox", clipPath);
     return {
       platform: "dropbox",
@@ -2266,7 +2295,8 @@
 
     if (cloudActive) {
       let r;
-      const cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
+      let cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
+      let hostUserIdSent = !!cloudHostForLoad;
       try {
         r = await sendExtensionMessage({
           type: "MF_CLOUD_LOAD_CLIP",
@@ -2277,6 +2307,25 @@
       } catch (e) {
         notchLog("loadClipData MF_CLOUD_LOAD_CLIP threw", { message: String(e?.message || e) });
         r = null;
+      }
+      if (r?.ok === true && r.record == null && !hostUserIdSent) {
+        cloudHostForLoad = await getCloudLoadSaveHostUserId(clip);
+        if (cloudHostForLoad) {
+          hostUserIdSent = true;
+          try {
+            r = await sendExtensionMessage({
+              type: "MF_CLOUD_LOAD_CLIP",
+              platform: clip.platform,
+              clipId: clip.clipId,
+              hostUserId: cloudHostForLoad,
+            });
+          } catch (e) {
+            notchLog("loadClipData MF_CLOUD_LOAD_CLIP retry threw", {
+              message: String(e?.message || e),
+            });
+            r = null;
+          }
+        }
       }
       const cloudSummary = {
         typeofR: r === undefined ? "undefined" : r === null ? "null" : typeof r,
@@ -2302,6 +2351,28 @@
 
       if (r?.ok === true) {
         if (r.record == null) {
+          const collabHost = await readCollabHostUserIdForClip(clip);
+          const sharedBindingActive =
+            collabHost &&
+            (!state.cloudUser?.id ||
+              normalizeUuidForCompare(collabHost) !== normalizeUuidForCompare(state.cloudUser.id));
+          if (sharedBindingActive) {
+            await removeLocalClipCacheKeys(clip);
+            state.comments = [];
+            normalizeCommentsShape();
+            notchLog(
+              "loadClipData cloud: no row — keeping shared-review host binding (retry when host row exists)",
+              { key },
+            );
+            if (!sharedReviewCloudReloadOnce.has(key)) {
+              sharedReviewCloudReloadOnce.add(key);
+              setTimeout(() => {
+                lastTickSignature = "";
+                void tick();
+              }, 500);
+            }
+            return;
+          }
           await removeLocalClipCacheKeys(clip);
           await clearCollabHostForClip(clip);
           state.comments = [];
@@ -2328,6 +2399,7 @@
         }
         normalizeCommentsShape();
         await mirrorCloudRecordToLocalCache(clip, r.record);
+        sharedReviewCloudReloadOnce.delete(key);
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
         return;
       }
@@ -5262,10 +5334,26 @@
       }
     }
 
+    const overlaySig = !clip
+      ? ""
+      : state.dashboardForced
+        ? "dash"
+        : typeof clip.getOverlayParent === "function" && clip.getOverlayParent()
+          ? "ov1"
+          : "ov0";
+
     const sig = unlocked
       ? !clip
         ? href + "\0no_clip"
-        : href + "\0" + clip.storageKey + "\0" + collabPart + "\0" + (state.dashboardForced ? "dashboard" : "watch")
+        : href +
+          "\0" +
+          clip.storageKey +
+          "\0" +
+          collabPart +
+          "\0" +
+          (state.dashboardForced ? "dashboard" : "watch") +
+          "\0" +
+          overlaySig
       : href + "\0gate\0" + String(supabaseConfigured);
 
     if (sig === lastTickSignature) return;
