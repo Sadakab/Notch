@@ -273,7 +273,7 @@ chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
   return true;
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {
     const watchUrl = "https://vimeo.com/" + encodeURIComponent(String(msg.clipId));
     const api =
@@ -305,6 +305,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
       })
       .catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
+    return true;
+  }
+
+  /** Google Drive screengrab: crop visible tab to the embed iframe (cross-origin player). */
+  if (msg?.type === "MF_CAPTURE_VISIBLE_TAB") {
+    const windowId = sender.tab?.windowId;
+    if (windowId == null) {
+      sendResponse({ ok: false, error: "no_tab" });
+      return false;
+    }
+    chrome.tabs
+      .captureVisibleTab(windowId, { format: "png" })
+      .then((dataUrl) => {
+        if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
+          sendResponse({ ok: true, dataUrl });
+        } else {
+          sendResponse({ ok: false, error: "bad_capture" });
+        }
+      })
+      .catch((e) => {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      });
     return true;
   }
 

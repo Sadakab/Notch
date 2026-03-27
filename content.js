@@ -1271,34 +1271,193 @@
     return r.width >= 8 && r.height >= 8;
   }
 
+  /**
+   * Drive's current file viewer often puts <video> inside open shadow roots; querySelector does not
+   * see those nodes, which breaks screengrabs and any logic that lists document videos only.
+   */
+  function collectVideoElementsDeep(root) {
+    const out = [];
+    if (!root) return out;
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.tagName === "VIDEO") out.push(node);
+      const shadow = node.shadowRoot;
+      if (shadow) {
+        for (let c = shadow.firstElementChild; c; c = c.nextElementSibling) {
+          stack.push(c);
+        }
+      }
+      for (let c = node.firstElementChild; c; c = c.nextElementSibling) {
+        stack.push(c);
+      }
+    }
+    return out;
+  }
+
+  function collectIframesDeep(root) {
+    const iframes = [];
+    if (!root) return iframes;
+    const stack = [root];
+    while (stack.length) {
+      const node = stack.pop();
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) continue;
+      if (node.tagName === "IFRAME" && !node.closest("#markframe-root")) {
+        iframes.push(node);
+      }
+      const shadow = node.shadowRoot;
+      if (shadow) {
+        for (let c = shadow.firstElementChild; c; c = c.nextElementSibling) {
+          stack.push(c);
+        }
+      }
+      for (let c = node.firstElementChild; c; c = c.nextElementSibling) {
+        stack.push(c);
+      }
+    }
+    return iframes;
+  }
+
+  /**
+   * Drive often hosts the real <video> in a same-origin nested frame; the top document only sees
+   * a YouTube-style embed (postMessage surface), which is not drawable on a canvas.
+   */
+  function collectAllGoogleDriveVideoCandidates() {
+    const videos = new Set();
+    function addFromBody(body) {
+      if (!body) return;
+      for (const v of collectVideoElementsDeep(body)) {
+        videos.add(v);
+      }
+    }
+    addFromBody(document.body);
+    const seenDoc = new WeakSet();
+    seenDoc.add(document);
+    const frontier = collectIframesDeep(document.body).filter((f) => !f.closest("#markframe-root"));
+    let steps = 0;
+    while (frontier.length && steps < 80) {
+      const frame = frontier.shift();
+      steps++;
+      let doc = null;
+      try {
+        doc = frame.contentDocument;
+      } catch (_) {
+        continue;
+      }
+      if (!doc?.body || seenDoc.has(doc)) continue;
+      seenDoc.add(doc);
+      addFromBody(doc.body);
+      for (const nested of collectIframesDeep(doc.body)) {
+        if (!nested.closest("#markframe-root")) {
+          frontier.push(nested);
+        }
+      }
+    }
+    return [...videos];
+  }
+
   function findGoogleDriveNativeVideo() {
     const selectors = [
       "#drive-viewer video",
       ".drive-viewer-root video",
       ".drive-viewer-paginated-scrollable video",
+      'section[aria-label="Video Player"] video',
       "div[role='main'] video",
       "video",
     ];
     for (const sel of selectors) {
-      const v = document.querySelector(sel);
+      let v = null;
+      try {
+        v = document.querySelector(sel);
+      } catch (_) {
+        v = null;
+      }
       if (googleDriveVideoIsUsable(v)) return v;
     }
-    const videos = [...document.querySelectorAll("video")].filter(googleDriveVideoIsUsable);
+    const merged = new Set([
+      ...document.querySelectorAll("video"),
+      ...collectAllGoogleDriveVideoCandidates(),
+    ]);
+    const videos = [...merged].filter(googleDriveVideoIsUsable);
     let best = null;
     let bestArea = 0;
     const vpH = window.innerHeight;
     const vpW = window.innerWidth;
-    for (const v of videos) {
+    function videoPickArea(v) {
       const r = v.getBoundingClientRect();
-      const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
-      const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
-      const area = w * h;
-      if (area >= 400 && area > bestArea) {
-        bestArea = area;
-        best = v;
+      if (v.ownerDocument === document) {
+        const w = Math.max(0, Math.min(r.right, vpW) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, vpH) - Math.max(r.top, 0));
+        return w * h;
       }
+      return Math.max(0, r.width) * Math.max(0, r.height);
     }
+    function pickBest(minArea) {
+      let b = null;
+      let ba = 0;
+      for (const v of videos) {
+        const area = videoPickArea(v);
+        if (area >= minArea && area > ba) {
+          ba = area;
+          b = v;
+        }
+      }
+      return b;
+    }
+    best = pickBest(400);
+    if (!best) best = pickBest(64);
     return best;
+  }
+
+  /**
+   * `getBoundingClientRect()` for nodes in nested frames is in the frame's viewport, not the tab's.
+   * captureVisibleTab is in top-level innerWidth × innerHeight space — translate coordinates up the iframe chain.
+   */
+  function elementBoundingRectInTopLevelViewport(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    const r = el.getBoundingClientRect();
+    let left = r.left;
+    let top = r.top;
+    const width = r.width;
+    const height = r.height;
+    if (width < 4 || height < 4) return null;
+    let doc = el.ownerDocument;
+    while (doc && doc !== document) {
+      const win = doc.defaultView;
+      const frame = win && win.frameElement;
+      if (!frame || frame.nodeType !== Node.ELEMENT_NODE) return null;
+      const fr = frame.getBoundingClientRect();
+      left += fr.left;
+      top += fr.top;
+      doc = frame.ownerDocument;
+    }
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  }
+
+  /** CSS viewport rectangle to crop from chrome.tabs.captureVisibleTab (Google Drive embed / DRM fallback). */
+  function getGoogleDriveScreengrabCropRect() {
+    const iframe = findGoogleDriveYoutubeEmbedIframe();
+    if (iframe) {
+      const r = elementBoundingRectInTopLevelViewport(iframe);
+      if (r && r.width >= 8 && r.height >= 8) return r;
+    }
+    const v = findGoogleDriveNativeVideo();
+    if (v) {
+      const r = elementBoundingRectInTopLevelViewport(v);
+      if (r && r.width >= 8 && r.height >= 8) return r;
+    }
+    let el = null;
+    try {
+      el = document.querySelector('section[aria-label="Video Player"]');
+    } catch (_) {
+      el = null;
+    }
+    if (el) {
+      const r = elementBoundingRectInTopLevelViewport(el);
+      if (r && r.width >= 8 && r.height >= 8) return r;
+    }
+    return null;
   }
 
   function isDriveBackedYoutubeEmbedSrc(src) {
@@ -1423,6 +1582,11 @@
           const el = driveYtState.iframe;
           if (!el?.contentWindow) return;
           postToDriveYtEmbed(el, { event: "command", func: "playVideo", args: [] });
+        },
+        pause() {
+          const el = driveYtState.iframe;
+          if (!el?.contentWindow) return;
+          postToDriveYtEmbed(el, { event: "command", func: "pauseVideo", args: [] });
         },
       };
       Object.defineProperty(surface, "currentTime", {
@@ -4364,18 +4528,42 @@
 
   /** For PDF: seek, wait for a decodable frame, return canvas (jsPDF addImage handles canvas reliably). */
   async function captureVideoFrameCanvasForPdf(clip, timeSec) {
-    const raw = clip && clip.getVideoElement();
-    if (!(raw instanceof HTMLVideoElement) || !raw.isConnected) return null;
-    try {
-      await seekVideoAwaitSeeked(raw, timeSec, 6000);
-    } catch {
+    if (!clip) return null;
+    const el = clip.getVideoElement();
+    if (!el) return null;
+
+    if (el instanceof HTMLVideoElement && el.isConnected) {
+      try {
+        await seekVideoAwaitSeeked(el, timeSec, 6000);
+      } catch {
+        return null;
+      }
+      const ok = await waitVideoHasDrawableFrame(el, 2500);
+      if (!ok) return null;
+      await new Promise((r) => requestAnimationFrame(r));
+      await new Promise((r) => requestAnimationFrame(r));
+      let cap = videoFrameToCaptureCanvas(el);
+      if (cap) return cap;
+      if (clip.platform === "googledrive") {
+        const pngUrl = await captureGoogleDriveVisibleTabPngDataUrl({ quiet: true });
+        if (pngUrl) return await pngDataUrlToCaptureCanvas(pngUrl);
+      }
       return null;
     }
-    const ok = await waitVideoHasDrawableFrame(raw, 2500);
-    if (!ok) return null;
-    await new Promise((r) => requestAnimationFrame(r));
-    await new Promise((r) => requestAnimationFrame(r));
-    return videoFrameToCaptureCanvas(raw);
+
+    if (clip.platform === "googledrive") {
+      try {
+        el.currentTime = timeSec;
+      } catch (_) {}
+      await new Promise((r) => setTimeout(r, 900));
+      await new Promise((r) => requestAnimationFrame(r));
+      await new Promise((r) => requestAnimationFrame(r));
+      const pngUrl = await captureGoogleDriveVisibleTabPngDataUrl({ quiet: true });
+      if (!pngUrl) return null;
+      return await pngDataUrlToCaptureCanvas(pngUrl);
+    }
+
+    return null;
   }
 
   function naturalSizeFromDataUrl(dataUrl) {
@@ -4385,6 +4573,29 @@
       im.onerror = () => reject(new Error("image load"));
       im.src = dataUrl;
     });
+  }
+
+  async function pngDataUrlToCaptureCanvas(dataUrl) {
+    if (!dataUrl || typeof dataUrl !== "string") return null;
+    try {
+      const { w, h } = await naturalSizeFromDataUrl(dataUrl);
+      if (!w || !h) return null;
+      const im = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error("img"));
+        i.src = dataUrl;
+      });
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const g = c.getContext("2d");
+      if (!g) return null;
+      g.drawImage(im, 0, 0, w, h);
+      return { canvas: c, w, h };
+    } catch {
+      return null;
+    }
   }
 
   /** Match content.css —mf-bg / —mf-text / —mf-accent */
@@ -4642,12 +4853,18 @@
       showToast("PDF export unavailable — reload the page.");
       return;
     }
-    const raw = clip.getVideoElement();
-    if (!(raw instanceof HTMLVideoElement)) {
+    const media = clip.getVideoElement();
+    if (!media) {
+      showToast("No video found.");
+      return;
+    }
+    const raw = media instanceof HTMLVideoElement ? media : null;
+    const driveEmbedOnly = clip.platform === "googledrive" && raw === null;
+    if (!raw && !driveEmbedOnly) {
       showToast("Open a video page to include frames.");
       return;
     }
-    if (!raw.isConnected) {
+    if (raw && !raw.isConnected) {
       showToast("No video found.");
       return;
     }
@@ -4657,9 +4874,15 @@
 
     showToast("Generating PDF…");
     const roots = state.comments.filter((c) => !c.parentId).sort((a, b) => a.ts - b.ts);
-    const prevTime = raw.currentTime;
-    const wasPaused = raw.paused;
-    raw.pause();
+    const prevTime = Number.isFinite(media.currentTime) ? media.currentTime : 0;
+    const wasPaused = raw ? raw.paused : false;
+    if (raw) {
+      raw.pause();
+    } else {
+      try {
+        media.pause();
+      } catch (_) {}
+    }
 
     try {
       const rawRecord = await getClipRecordForDisplay(clip);
@@ -4913,21 +5136,137 @@
       showToast("Could not generate PDF.");
     } finally {
       try {
-        raw.currentTime = prevTime;
+        media.currentTime = prevTime;
       } catch (_) {}
       if (!wasPaused) {
         try {
-          void raw.play();
+          void media.play();
         } catch (_) {}
       }
       if (exportBtn) exportBtn.disabled = false;
     }
   }
 
+  async function cropDataUrlToViewportRectPng(dataUrl, rectCss) {
+    if (!dataUrl || !rectCss) return null;
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("img"));
+      i.src = dataUrl;
+    });
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (!iw || !ih || !vw || !vh) return null;
+    const scaleX = iw / vw;
+    const scaleY = ih / vh;
+    const sx = Math.max(0, Math.round(rectCss.left * scaleX));
+    const sy = Math.max(0, Math.round(rectCss.top * scaleY));
+    const sw = Math.max(1, Math.round(rectCss.width * scaleX));
+    const sh = Math.max(1, Math.round(rectCss.height * scaleY));
+    const c = document.createElement("canvas");
+    c.width = sw;
+    c.height = sh;
+    const g = c.getContext("2d");
+    if (!g) return null;
+    try {
+      g.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    } catch (_) {
+      return null;
+    }
+    try {
+      return c.toDataURL("image/png");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Tab screenshots are composited: anything painted over the crop rect (other extensions, OS UI in
+   * practice not included) appears in the grab. True decoded frame-only pixels require drawing from an
+   * HTMLVideoElement when the browser allows it. Here we only unpaint layers this extension injects so
+   * Notch itself does not occlude Drive's player for the few frames we capture.
+   */
+  async function suppressExtensionUIPaintDuringCapture(asyncWork) {
+    const nodes = [];
+    const markFrame = document.getElementById("markframe-root");
+    if (markFrame?.isConnected) nodes.push(markFrame);
+    document.body?.querySelectorAll(".mf-screengrab-flyout.mf-screengrab-flyout--portaled").forEach((n) => {
+      if (n.isConnected) nodes.push(n);
+    });
+    for (const n of nodes) {
+      n.style.setProperty("visibility", "hidden", "important");
+    }
+    await new Promise((cb) => requestAnimationFrame(cb));
+    await new Promise((cb) => requestAnimationFrame(cb));
+    try {
+      return await asyncWork();
+    } finally {
+      for (const n of nodes) {
+        n.style.removeProperty("visibility");
+      }
+    }
+  }
+
+  /** @param {{ quiet?: boolean }} [options] quiet: no toasts (PDF multi-frame capture). */
+  async function captureGoogleDriveVisibleTabPngDataUrl(options) {
+    const quiet = options?.quiet === true;
+    return suppressExtensionUIPaintDuringCapture(async () => {
+      const r = getGoogleDriveScreengrabCropRect();
+      if (!r) {
+        if (!quiet) showToast("Could not find the video area on screen.");
+        return null;
+      }
+      let resp;
+      try {
+        resp = await sendExtensionMessage({ type: "MF_CAPTURE_VISIBLE_TAB" });
+      } catch (_) {
+        resp = null;
+      }
+      if (!resp?.ok || !resp.dataUrl) {
+        if (!quiet) {
+          showToast(
+            resp?.error || "Could not capture the tab — try closing other overlays and try again."
+          );
+        }
+        return null;
+      }
+      const cropped = await cropDataUrlToViewportRectPng(resp.dataUrl, r);
+      if (!cropped) {
+        if (!quiet) showToast("Could not crop the capture.");
+        return null;
+      }
+      return cropped;
+    });
+  }
+
+  async function captureGoogleDriveFrameViaVisibleTab() {
+    return captureGoogleDriveVisibleTabPngDataUrl({ quiet: false });
+  }
+
   async function captureCurrentVideoFrameBlob() {
     const clip = resolveClipContext();
     if (!clip) return null;
     const raw = clip.getVideoElement();
+
+    if (clip.platform === "googledrive" && raw && !(raw instanceof HTMLVideoElement)) {
+      const dataUrl = await captureGoogleDriveFrameViaVisibleTab();
+      if (!dataUrl) return null;
+      let blob;
+      try {
+        blob = await (await fetch(dataUrl)).blob();
+      } catch (e) {
+        console.error("Notch screengrab blob", e);
+        showToast("Could not export frame (this site may block captures).");
+        return null;
+      }
+      const t = Number.isFinite(raw.currentTime) ? raw.currentTime : 0;
+      const base = `notch-frame_${sanitizeFilenamePart(clip.clipId)}_${formatTimestampForFilename(t)}`;
+      return { blob, base };
+    }
+
     if (!raw) {
       showToast("No video found.");
       return null;
@@ -4950,7 +5289,10 @@
       showToast("Could not read video frame.");
       return null;
     }
-    const dataUrl = videoElementToPngDataUrl(raw);
+    let dataUrl = videoElementToPngDataUrl(raw);
+    if (!dataUrl && clip.platform === "googledrive") {
+      dataUrl = await captureGoogleDriveFrameViaVisibleTab();
+    }
     if (!dataUrl) {
       showToast("Could not capture this video (protected content).");
       return null;

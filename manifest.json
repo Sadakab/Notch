@@ -20,11 +20,11 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "clipboardWrite", "tabs"],
+  "permissions": ["storage", "clipboardWrite", "tabs", "activeTab"],
   "externally_connectable": {
     "matches": ["https://notch.video/*"]
   },
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["<all_urls>"],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],

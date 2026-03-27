@@ -18593,7 +18593,7 @@ var require_sw_main = __commonJS({
       })();
       return true;
     });
-    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg?.type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {
         const watchUrl = "https://vimeo.com/" + encodeURIComponent(String(msg.clipId));
         const api = "https://vimeo.com/api/oembed.json?url=" + encodeURIComponent(watchUrl) + "&width=640";
@@ -18610,6 +18610,23 @@ var require_sw_main = __commonJS({
           const thumbnailUrl = j && typeof j.thumbnail_url === "string" && j.thumbnail_url.startsWith("http") ? j.thumbnail_url : null;
           sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
         }).catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
+        return true;
+      }
+      if (msg?.type === "MF_CAPTURE_VISIBLE_TAB") {
+        const windowId = sender.tab?.windowId;
+        if (windowId == null) {
+          sendResponse({ ok: false, error: "no_tab" });
+          return false;
+        }
+        chrome.tabs.captureVisibleTab(windowId, { format: "png" }).then((dataUrl) => {
+          if (typeof dataUrl === "string" && dataUrl.startsWith("data:")) {
+            sendResponse({ ok: true, dataUrl });
+          } else {
+            sendResponse({ ok: false, error: "bad_capture" });
+          }
+        }).catch((e) => {
+          sendResponse({ ok: false, error: String(e?.message || e) });
+        });
         return true;
       }
       if (msg?.type === "MF_SUPABASE_CONFIG") {
