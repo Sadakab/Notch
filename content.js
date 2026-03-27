@@ -90,6 +90,25 @@
     await chrome.storage.local.remove(keys);
   }
 
+  /** Removes current user from clip_review_collaborators only; host clip_reviews data unchanged. */
+  async function removeSelfAsCollaborator(platform, clipId, hostUserId) {
+    const host = String(hostUserId || "").trim();
+    if (!host || !platform || !clipId) return false;
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_COLLAB_LEAVE",
+        platform,
+        clipId,
+        hostUserId: host,
+      });
+      if (!r?.ok) return false;
+    } catch (_) {
+      return false;
+    }
+    await clearCollabHostForClip({ platform, clipId });
+    return true;
+  }
+
   async function clearAllCollabHostBindings() {
     const all = await chrome.storage.local.get(null);
     const removals = Object.keys(all).filter((k) => k.startsWith("markframe_collab_host_"));
@@ -151,26 +170,19 @@
   async function updateWatchHeaderSub(clip) {
     if (!root) return;
     const sub = root.querySelector(".mf-header-sub");
-    const leaveBtn = root.querySelector('[data-action="leave-shared-review"]');
-    if (!sub || root.dataset.mfView !== "watch") {
-      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
-      return;
-    }
+    if (!sub || root.dataset.mfView !== "watch") return;
     const h = await readCollabHostUserIdForClip(clip);
     if (!h || !String(h).trim()) {
       sub.textContent = "";
-      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
       return;
     }
     await refreshCloudUser(false);
     const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
     if (myId && normalizeUuidForCompare(h) === normalizeUuidForCompare(myId)) {
       sub.textContent = "";
-      if (leaveBtn) leaveBtn.classList.add("mf-hidden");
       return;
     }
     sub.textContent = "Shared review";
-    if (leaveBtn) leaveBtn.classList.remove("mf-hidden");
   }
 
   function parseClipStorageKey(key) {
@@ -3340,9 +3352,6 @@
             <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
               This video
             </button>
-            <button type="button" class="mf-btn mf-hidden" data-action="leave-shared-review" title="Stop using the host's notes for this video">
-              Leave shared
-            </button>
             <button type="button" class="mf-settings-btn" data-action="open-settings" title="Settings" aria-label="Settings">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
@@ -3549,82 +3558,94 @@
     }
   }
 
-  async function renderDashboard() {
-    if (!root) return;
-    await refreshCloudUser(false);
-    await updateSyncBar();
-    updateOffClipBanner();
-    const listEl = root.querySelector(".mf-dashboard-list");
-    if (!listEl) return;
-    listEl.innerHTML = "";
-    const items = await listVideosWithFeedback();
-    if (items.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "mf-dashboard-empty";
-      empty.textContent =
-        "No reviews yet. Open a YouTube, Vimeo, Loom, Google Drive, or Dropbox video and add a note.";
-      listEl.appendChild(empty);
-      return;
-    }
-    for (const item of items) {
-      const row = document.createElement("div");
-      row.className = "mf-dash-row";
+  function appendDashboardRow(listEl, item, sharedWithMe) {
+    const row = document.createElement("div");
+    row.className = "mf-dash-row";
 
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = "mf-dash-card";
-      card.title = item.title;
-      const thumb = document.createElement("img");
-      thumb.className = "mf-dash-thumb";
-      thumb.src = item.thumbnailUrl;
-      thumb.alt = "";
-      thumb.loading = "lazy";
-      const meta = document.createElement("span");
-      meta.className = "mf-dash-meta";
-      const badge = document.createElement("span");
-      badge.className = "mf-dash-platform";
-      badge.textContent = item.platform;
-      const t = document.createElement("span");
-      t.className = "mf-dash-title";
-      t.textContent = item.title;
-      const c = document.createElement("span");
-      c.className = "mf-dash-count";
-      c.textContent = item.commentCount + " note" + (item.commentCount === 1 ? "" : "s");
-      meta.appendChild(badge);
-      meta.appendChild(t);
-      meta.appendChild(c);
-      card.appendChild(thumb);
-      card.appendChild(meta);
-      card.addEventListener("click", () => {
-        state.dashboardForced = false;
-        const cur = resolveClipContext();
-        let sameClip = cur && cur.platform === item.platform && cur.clipId === item.clipId;
-        if (
-          !sameClip &&
-          item.platform === "dropbox" &&
-          isDropboxSite()
-        ) {
-          const dropId = parseDropboxClipId();
-          if (dropId && dropboxClipIdsEquivalent(item.clipId, dropId)) {
-            sameClip = true;
-          }
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "mf-dash-card";
+    card.title = item.title;
+    const thumb = document.createElement("img");
+    thumb.className = "mf-dash-thumb";
+    thumb.src = item.thumbnailUrl;
+    thumb.alt = "";
+    thumb.loading = "lazy";
+    const meta = document.createElement("span");
+    meta.className = "mf-dash-meta";
+    const badge = document.createElement("span");
+    badge.className = "mf-dash-platform";
+    badge.textContent = item.platform;
+    const t = document.createElement("span");
+    t.className = "mf-dash-title";
+    t.textContent = item.title;
+    const c = document.createElement("span");
+    c.className = "mf-dash-count";
+    c.textContent = item.commentCount + " note" + (item.commentCount === 1 ? "" : "s");
+    meta.appendChild(badge);
+    meta.appendChild(t);
+    meta.appendChild(c);
+    card.appendChild(thumb);
+    card.appendChild(meta);
+    card.addEventListener("click", () => {
+      state.dashboardForced = false;
+      const cur = resolveClipContext();
+      let sameClip = cur && cur.platform === item.platform && cur.clipId === item.clipId;
+      if (
+        !sameClip &&
+        item.platform === "dropbox" &&
+        isDropboxSite()
+      ) {
+        const dropId = parseDropboxClipId();
+        if (dropId && dropboxClipIdsEquivalent(item.clipId, dropId)) {
+          sameClip = true;
         }
-        if (sameClip) {
-          setDrawModeUi(false);
-          void tick();
+      }
+      if (sameClip) {
+        setDrawModeUi(false);
+        void tick();
+        return;
+      }
+      if (item.openUrl) {
+        location.href = item.openUrl;
+      }
+    });
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "mf-dash-delete";
+    if (sharedWithMe) {
+      const hostId = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
+      delBtn.classList.add("mf-dash-delete--icon");
+      delBtn.setAttribute("aria-label", "Remove yourself as collaborator — host keeps all notes");
+      delBtn.title = "Remove yourself as collaborator";
+      delBtn.innerHTML =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-log-out" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>';
+      delBtn.addEventListener("click", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!hostId) return;
+        if (
+          !confirm(
+            "Remove yourself as a collaborator on this review? The host keeps every note; you will no longer see this in Shared with me."
+          )
+        ) {
           return;
         }
-        if (item.openUrl) {
-          location.href = item.openUrl;
+        const ok = await removeSelfAsCollaborator(item.platform, item.clipId, hostId);
+        if (ok) {
+          lastTickSignature = "";
+          showToast("You are no longer a collaborator.");
+          await renderDashboard();
+          void tick();
+        } else {
+          console.error("Notch: collab leave failed");
+          showToast("Could not update — try again.");
         }
       });
-
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "mf-dash-delete";
+    } else {
       delBtn.setAttribute("aria-label", "Delete saved notes for this video");
       delBtn.title = "Delete from library";
-      delBtn.textContent = "×";
       delBtn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -3644,11 +3665,64 @@
           showToast("Could not remove — try again.");
         }
       });
-
-      row.appendChild(card);
-      row.appendChild(delBtn);
-      listEl.appendChild(row);
+      delBtn.textContent = "×";
     }
+
+    row.appendChild(card);
+    row.appendChild(delBtn);
+    listEl.appendChild(row);
+  }
+
+  function partitionDashboardItems(items) {
+    const mine = [];
+    const shared = [];
+    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
+    for (const item of items) {
+      const owner = item.reviewOwnerUserId;
+      if (
+        !owner ||
+        !myId ||
+        normalizeUuidForCompare(owner) === normalizeUuidForCompare(myId)
+      ) {
+        mine.push(item);
+      } else {
+        shared.push(item);
+      }
+    }
+    const byUpdated = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
+    mine.sort(byUpdated);
+    shared.sort(byUpdated);
+    return { mine, shared };
+  }
+
+  async function renderDashboard() {
+    if (!root) return;
+    await refreshCloudUser(false);
+    await updateSyncBar();
+    updateOffClipBanner();
+    const listEl = root.querySelector(".mf-dashboard-list");
+    if (!listEl) return;
+    listEl.innerHTML = "";
+    const items = await listVideosWithFeedback();
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "mf-dashboard-empty";
+      empty.textContent =
+        "No reviews yet. Open a YouTube, Vimeo, Loom, Google Drive, or Dropbox video and add a note.";
+      listEl.appendChild(empty);
+      return;
+    }
+    const { mine, shared } = partitionDashboardItems(items);
+    function appendSection(title, sectionItems, sectionShared) {
+      if (sectionItems.length === 0) return;
+      const h = document.createElement("div");
+      h.className = "mf-dashboard-section-title";
+      h.textContent = title;
+      listEl.appendChild(h);
+      for (const item of sectionItems) appendDashboardRow(listEl, item, sectionShared);
+    }
+    appendSection("My reviews", mine, false);
+    appendSection("Shared with me", shared, true);
   }
 
   function wireScreengrabFlyoutPortal(root) {
@@ -3879,10 +3953,6 @@
     const shareInviteBtn = root.querySelector('[data-action="share-invite-code"]');
     if (shareInviteBtn) {
       shareInviteBtn.addEventListener("click", () => void shareInviteCodeForWatch());
-    }
-    const leaveSharedBtn = root.querySelector('[data-action="leave-shared-review"]');
-    if (leaveSharedBtn) {
-      leaveSharedBtn.addEventListener("click", () => void leaveSharedReviewForCurrentClip());
     }
     const redeemInviteBtn = root.querySelector('[data-action="redeem-invite"]');
     if (redeemInviteBtn) {
@@ -4844,25 +4914,6 @@
     } catch (_e) {
       hint.textContent = "Could not join.";
     }
-  }
-
-  async function leaveSharedReviewForCurrentClip() {
-    const clip = resolveClipContext();
-    if (!clip) return;
-    const host = await readCollabHostUserIdForClip(clip);
-    if (!host) return;
-    try {
-      await sendExtensionMessage({
-        type: "MF_COLLAB_LEAVE",
-        platform: clip.platform,
-        clipId: clip.clipId,
-        hostUserId: host,
-      });
-    } catch (_) {}
-    await clearCollabHostForClip(clip);
-    lastTickSignature = "";
-    showToast("Left shared review.");
-    void tick();
   }
 
   async function tryImportFromUrl(clip) {

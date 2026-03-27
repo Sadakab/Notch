@@ -345,6 +345,7 @@ function rowToDashboardItem(row) {
     commentCount: comments.length,
     updatedAt: v.updatedAt || 0,
     openUrl: openUrlForClip(platform, clipId),
+    reviewOwnerUserId: row.user_id ?? null,
   };
 }
 

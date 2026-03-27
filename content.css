@@ -24,6 +24,7 @@
   background: var(--mf-bg);
   overflow: hidden;
   max-height: min(70vh, calc(100vh - 32px));
+  min-height: min(300px, calc(100vh - 32px));
   display: flex;
   flex-direction: column;
   position: fixed;
@@ -68,7 +69,7 @@
    position:absolute so it does not stretch the root — min-height does. */
 #markframe-root.mf-settings-open {
   max-height: calc(100vh - 32px);
-  min-height: min(520px, calc(100vh - 32px));
+  min-height: min(300px, calc(100vh - 32px));
 }
 
 /* Narrow viewport */
@@ -76,12 +77,13 @@
   width: min(260px, calc(100vw - 12px));
   font-size: 11px;
   max-height: min(88vh, calc(100vh - 16px));
+  min-height: min(300px, calc(100vh - 16px));
   border-radius: 8px;
 }
 
 #markframe-root[data-mf-compact="1"].mf-settings-open {
   max-height: calc(100vh - 16px);
-  min-height: min(520px, calc(100vh - 16px));
+  min-height: min(300px, calc(100vh - 16px));
 }
 
 #markframe-root[data-mf-compact="1"] .mf-header {
@@ -645,15 +647,18 @@
 
 #markframe-root.mf-collapsed {
   max-height: none;
+  min-height: 0;
 }
 
 /* Collapsed panel uses max-height: none; cap it again while settings are open. */
 #markframe-root.mf-collapsed.mf-settings-open {
   max-height: calc(100vh - 32px);
+  min-height: min(300px, calc(100vh - 32px));
 }
 
 #markframe-root[data-mf-compact="1"].mf-collapsed.mf-settings-open {
   max-height: calc(100vh - 16px);
+  min-height: min(300px, calc(100vh - 16px));
 }
 
 #markframe-root .mf-watch-pane {
@@ -710,6 +715,22 @@
   background: rgba(255, 193, 77, 0.08);
   border: 1px solid rgba(255, 193, 77, 0.22);
   border-radius: 8px;
+}
+
+#markframe-root .mf-dashboard-section-title {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 4px 2px 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--mf-text-muted);
+  line-height: 1.35;
+}
+
+#markframe-root .mf-dashboard-section-title:not(:first-child) {
+  margin-top: 10px;
 }
 
 #markframe-root .mf-dashboard-list {
@@ -792,6 +813,17 @@
   font-weight: 300;
   cursor: pointer;
   font-family: var(--mf-font);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#markframe-root .mf-dash-delete.mf-dash-delete--icon {
+  font-size: 0;
+}
+
+#markframe-root .mf-dash-delete.mf-dash-delete--icon svg {
+  flex-shrink: 0;
 }
 
 #markframe-root .mf-dash-delete:hover {

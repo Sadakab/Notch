@@ -17668,7 +17668,8 @@ function rowToDashboardItem(row) {
     thumbnailUrl: thumb || defaultThumbForPlatform(platform, clipId) || "",
     commentCount: comments.length,
     updatedAt: v.updatedAt || 0,
-    openUrl: openUrlForClip(platform, clipId)
+    openUrl: openUrlForClip(platform, clipId),
+    reviewOwnerUserId: row.user_id ?? null
   };
 }
 function handleRuntimeMessage(msg, sendResponse) {
