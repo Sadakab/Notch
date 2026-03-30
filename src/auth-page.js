@@ -3,18 +3,19 @@ import { isClientSafeSupabaseKey } from "./supabase-client-key.js";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./supabase-config.js";
 
 const AUTH_STORAGE_KEY = "sb-notch-auth";
+const AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
 
 function createChromeStorageAdapter() {
   return {
     getItem: async (key) => {
-      const o = await chrome.storage.local.get(key);
+      const o = await chrome.storage.sync.get(key);
       return o[key] ?? null;
     },
     setItem: async (key, value) => {
-      await chrome.storage.local.set({ [key]: value });
+      await chrome.storage.sync.set({ [key]: value });
     },
     removeItem: async (key) => {
-      await chrome.storage.local.remove(key);
+      await chrome.storage.sync.remove(key);
     },
   };
 }
@@ -27,15 +28,9 @@ function showStatus(el, text, kind) {
 function main() {
   const statusEl = document.getElementById("nf-status");
   const signedOutWrap = document.getElementById("nf-signed-out-wrap");
-  const authFields = document.getElementById("nf-auth-fields");
-  const tabSignIn = document.getElementById("nf-tab-sign-in");
-  const tabSignUp = document.getElementById("nf-tab-sign-up");
-  const signupOnly = document.getElementById("nf-signup-only");
   const emailEl = document.getElementById("nf-email");
-  const passEl = document.getElementById("nf-password");
-  const passConfirmEl = document.getElementById("nf-password-confirm");
-  const signInBtn = document.getElementById("nf-sign-in");
-  const signUpBtn = document.getElementById("nf-sign-up");
+  const googleBtn = document.getElementById("nf-google-sign-in");
+  const magicLinkBtn = document.getElementById("nf-send-magic-link");
   const signOutBtn = document.getElementById("nf-sign-out");
   const configWarn = document.getElementById("nf-config-warn");
 
@@ -55,26 +50,15 @@ function main() {
       storageKey: AUTH_STORAGE_KEY,
       persistSession: true,
       autoRefreshToken: true,
+      detectSessionInUrl: false,
     },
   });
 
-  function setAuthTab(mode) {
-    const isSignUp = mode === "sign-up";
-    tabSignIn.classList.toggle("nf-tab-active", !isSignUp);
-    tabSignUp.classList.toggle("nf-tab-active", isSignUp);
-    tabSignIn.setAttribute("aria-selected", String(!isSignUp));
-    tabSignUp.setAttribute("aria-selected", String(isSignUp));
-    if (authFields) {
-      authFields.setAttribute("aria-labelledby", isSignUp ? "nf-tab-sign-up" : "nf-tab-sign-in");
-    }
-    if (signupOnly) signupOnly.hidden = !isSignUp;
-    signInBtn.hidden = isSignUp;
-    signUpBtn.hidden = !isSignUp;
-    passEl.setAttribute("autocomplete", isSignUp ? "new-password" : "current-password");
+  function setSignedOutBusy(busy) {
+    emailEl.disabled = !!busy;
+    googleBtn.disabled = !!busy;
+    magicLinkBtn.disabled = !!busy;
   }
-
-  tabSignIn.addEventListener("click", () => setAuthTab("sign-in"));
-  tabSignUp.addEventListener("click", () => setAuthTab("sign-up"));
 
   async function refreshUi() {
     const {
@@ -83,63 +67,62 @@ function main() {
     const signedIn = !!session?.user;
     if (signedOutWrap) signedOutWrap.hidden = signedIn;
     emailEl.disabled = signedIn;
-    passEl.disabled = signedIn;
-    if (passConfirmEl) passConfirmEl.disabled = signedIn;
+    googleBtn.disabled = signedIn;
+    magicLinkBtn.disabled = signedIn;
     signOutBtn.hidden = !signedIn;
     if (signedIn) {
       showStatus(statusEl, "Signed in as " + (session.user.email || "user") + ". You can close this tab.", "ok");
     } else {
-      setAuthTab("sign-in");
       showStatus(statusEl, "Sign in to sync your reviews across browsers.", "");
     }
   }
 
-  signInBtn.addEventListener("click", async () => {
-    const email = (emailEl.value || "").trim();
-    const password = passEl.value || "";
-    if (!email || !password) {
-      showStatus(statusEl, "Enter email and password.", "err");
-      return;
-    }
-    showStatus(statusEl, "Signing in…", "");
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+  googleBtn.addEventListener("click", async () => {
+    setSignedOutBusy(true);
+    showStatus(statusEl, "Opening Google sign-in…", "");
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: AUTH_CONFIRM_URL,
+        skipBrowserRedirect: true,
+      },
+    });
     if (error) {
       showStatus(statusEl, error.message, "err");
+      setSignedOutBusy(false);
       return;
     }
-    try {
-      await chrome.runtime.sendMessage({ type: "MF_AUTH_CHANGED" });
-    } catch (_) {}
-    await refreshUi();
+    if (!data?.url) {
+      showStatus(statusEl, "Could not start Google sign-in.", "err");
+      setSignedOutBusy(false);
+      return;
+    }
+    window.open(data.url, "_blank", "noopener,noreferrer");
+    showStatus(statusEl, "Continue in the opened Google sign-in tab.", "ok");
+    setSignedOutBusy(false);
   });
 
-  signUpBtn.addEventListener("click", async () => {
+  magicLinkBtn.addEventListener("click", async () => {
     const email = (emailEl.value || "").trim();
-    const password = passEl.value || "";
-    if (!email || !password) {
-      showStatus(statusEl, "Enter email and password.", "err");
+    if (!email) {
+      showStatus(statusEl, "Enter your email.", "err");
       return;
     }
-    if (password.length < 6) {
-      showStatus(statusEl, "Password must be at least 6 characters.", "err");
-      return;
-    }
-    const confirm = passConfirmEl?.value || "";
-    if (password !== confirm) {
-      showStatus(statusEl, "Passwords do not match.", "err");
-      return;
-    }
-    showStatus(statusEl, "Creating account…", "");
-    const { error } = await supabase.auth.signUp({ email, password });
+    setSignedOutBusy(true);
+    showStatus(statusEl, "Sending magic link…", "");
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: AUTH_CONFIRM_URL,
+      },
+    });
     if (error) {
       showStatus(statusEl, error.message, "err");
+      setSignedOutBusy(false);
       return;
     }
-    showStatus(
-      statusEl,
-      "Check your email to confirm (if confirmation is enabled in Supabase), then sign in.",
-      "ok"
-    );
+    showStatus(statusEl, "Check your email for a login link", "ok");
+    setSignedOutBusy(false);
   });
 
   signOutBtn.addEventListener("click", async () => {

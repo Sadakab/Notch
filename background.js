@@ -17525,14 +17525,14 @@ function clipStorageKey(platform, clipId) {
 function createChromeStorageAdapter() {
   return {
     getItem: async (key) => {
-      const o = await chrome.storage.local.get(key);
+      const o = await chrome.storage.sync.get(key);
       return o[key] ?? null;
     },
     setItem: async (key, value) => {
-      await chrome.storage.local.set({ [key]: value });
+      await chrome.storage.sync.set({ [key]: value });
     },
     removeItem: async (key) => {
-      await chrome.storage.local.remove(key);
+      await chrome.storage.sync.remove(key);
     }
   };
 }
@@ -17541,7 +17541,7 @@ function invalidateSupabaseClient() {
 }
 async function syncAuthMarkerFromChromeStorage() {
   const userKey = `${AUTH_STORAGE_KEY}-user`;
-  const data = await chrome.storage.local.get([AUTH_STORAGE_KEY, userKey]);
+  const data = await chrome.storage.sync.get([AUTH_STORAGE_KEY, userKey]);
   const main = data[AUTH_STORAGE_KEY];
   if (main == null || main === "") {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
@@ -17617,19 +17617,68 @@ async function syncAuthStateMarker(session) {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
   }
 }
+async function clearStoredSupabaseSession() {
+  const all = await chrome.storage.sync.get(null);
+  const keys = Object.keys(all).filter((k) => k === AUTH_STORAGE_KEY || k.startsWith(`${AUTH_STORAGE_KEY}-`));
+  if (keys.length) {
+    await chrome.storage.sync.remove(keys);
+  }
+  await chrome.storage.local.remove(AUTH_STATE_KEY);
+}
+function isUnauthorizedError(err) {
+  if (!err) return false;
+  const status = Number(err?.status || err?.statusCode || 0);
+  if (status === 401) return true;
+  const code = String(err?.code || "").toUpperCase();
+  if (code === "PGRST301" || code === "401") return true;
+  const message = String(err?.message || err?.error_description || "").toLowerCase();
+  return message.includes("jwt") && (message.includes("expired") || message.includes("invalid") || message.includes("malformed"));
+}
+async function clearAuthSessionAndClient() {
+  await clearStoredSupabaseSession();
+  invalidateSupabaseClient();
+}
 async function getSessionSafe(client) {
   try {
     const result = await client.auth.getSession();
     const err = result?.error ?? null;
     const session = result?.data?.session ?? null;
     if (err) {
+      if (isUnauthorizedError(err)) {
+        await clearAuthSessionAndClient();
+      }
       console.warn("Notch getSession", err.message ?? err);
     }
     return { session, error: err };
   } catch (e) {
     console.warn("Notch getSession", e?.message || e);
+    if (isUnauthorizedError(e)) {
+      await clearAuthSessionAndClient();
+    }
     return { session: null, error: e };
   }
+}
+async function handoffSupabaseSession(sessionPayload) {
+  const client = getSupabase();
+  if (!client) return { ok: false, error: "Supabase is not configured." };
+  const accessToken = String(sessionPayload?.access_token || "").trim();
+  const refreshToken = String(sessionPayload?.refresh_token || "").trim();
+  if (!accessToken || !refreshToken) {
+    return { ok: false, error: "invalid_session_payload" };
+  }
+  const { data, error } = await client.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken
+  });
+  if (error) {
+    return { ok: false, error: error.message || "set_session_failed" };
+  }
+  await syncAuthStateMarker(data?.session ?? null);
+  await syncAuthMarkerFromChromeStorage();
+  return {
+    ok: true,
+    email: data?.session?.user?.email ?? null
+  };
 }
 function commentsFromDb(value) {
   if (Array.isArray(value)) return value;
@@ -17720,13 +17769,7 @@ function rowToDashboardItem(row) {
   };
 }
 function handleRuntimeMessage(msg, sendResponse) {
-  if (msg?.type === "MF_AUTH_SIGN_IN") {
-    const email = String(msg.email || "").trim();
-    const password = String(msg.password || "");
-    if (!email || !password) {
-      sendResponse({ ok: false, error: "Enter email and password." });
-      return false;
-    }
+  if (msg?.type === "MF_AUTH_OAUTH_GOOGLE") {
     void (async () => {
       try {
         const client = getSupabase();
@@ -17734,31 +17777,35 @@ function handleRuntimeMessage(msg, sendResponse) {
           sendResponse({ ok: false, error: "Supabase is not configured." });
           return;
         }
-        const { data, error } = await client.auth.signInWithPassword({ email, password });
+        const { data, error } = await client.auth.signInWithOAuth({
+          provider: "google",
+          options: {
+            redirectTo: AUTH_CONFIRM_URL,
+            skipBrowserRedirect: true
+          }
+        });
         if (error) {
           sendResponse({ ok: false, error: error.message });
           return;
         }
-        const session = data?.session ?? null;
-        await syncAuthStateMarker(session);
-        await syncAuthMarkerFromChromeStorage();
-        sendResponse({ ok: true, email: session?.user?.email ?? null });
+        const url = String(data?.url || "");
+        if (!url) {
+          sendResponse({ ok: false, error: "Could not start Google sign-in." });
+          return;
+        }
+        await chrome.tabs.create({ url, active: true });
+        sendResponse({ ok: true });
       } catch (e) {
-        console.error("Notch MF_AUTH_SIGN_IN", e);
+        console.error("Notch MF_AUTH_OAUTH_GOOGLE", e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       }
     })();
     return true;
   }
-  if (msg?.type === "MF_AUTH_SIGN_UP") {
+  if (msg?.type === "MF_AUTH_MAGIC_LINK") {
     const email = String(msg.email || "").trim();
-    const password = String(msg.password || "");
-    if (!email || !password) {
-      sendResponse({ ok: false, error: "Enter email and password." });
-      return false;
-    }
-    if (password.length < 6) {
-      sendResponse({ ok: false, error: "Password must be at least 6 characters." });
+    if (!email) {
+      sendResponse({ ok: false, error: "Enter your email." });
       return false;
     }
     void (async () => {
@@ -17768,30 +17815,19 @@ function handleRuntimeMessage(msg, sendResponse) {
           sendResponse({ ok: false, error: "Supabase is not configured." });
           return;
         }
-        const { data, error } = await client.auth.signUp({ email, password });
+        const { error } = await client.auth.signInWithOtp({
+          email,
+          options: {
+            emailRedirectTo: AUTH_CONFIRM_URL
+          }
+        });
         if (error) {
           sendResponse({ ok: false, error: error.message });
           return;
         }
-        const session = data?.session ?? null;
-        if (session?.user) {
-          await syncAuthStateMarker(session);
-          await syncAuthMarkerFromChromeStorage();
-          sendResponse({
-            ok: true,
-            email: session.user.email ?? null,
-            needsEmailConfirm: false
-          });
-        } else {
-          sendResponse({
-            ok: true,
-            email: null,
-            needsEmailConfirm: true,
-            message: "Check your email to confirm your account (if confirmation is enabled), then sign in."
-          });
-        }
+        sendResponse({ ok: true, message: "Check your email for a login link" });
       } catch (e) {
-        console.error("Notch MF_AUTH_SIGN_UP", e);
+        console.error("Notch MF_AUTH_MAGIC_LINK", e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       }
     })();
@@ -18416,7 +18452,7 @@ async function restoreAuthMarker() {
     console.warn("Notch restoreAuthMarker", e?.message || e);
   }
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, CLIP_PLATFORMS, NOTCH_DIAG, supabase;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, NOTCH_DIAG, supabase;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -18424,6 +18460,7 @@ var init_sw_cloud = __esm({
     init_supabase_config();
     AUTH_STORAGE_KEY = "sb-notch-auth";
     AUTH_STATE_KEY = "markframe_auth_state";
+    AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
     CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
     NOTCH_DIAG = true;
     supabase = null;
@@ -18437,8 +18474,8 @@ var require_sw_main = __commonJS({
     init_supabase_config();
     init_sw_cloud();
     var CLOUD_TYPES = /* @__PURE__ */ new Set([
-      "MF_AUTH_SIGN_IN",
-      "MF_AUTH_SIGN_UP",
+      "MF_AUTH_OAUTH_GOOGLE",
+      "MF_AUTH_MAGIC_LINK",
       "MF_AUTH_CHANGED",
       "MF_SUPABASE_SESSION",
       "MF_SUPABASE_SIGN_OUT",
@@ -18568,7 +18605,7 @@ var require_sw_main = __commonJS({
         sendResponse({ configured: isSupabaseConfigured(), user: null });
         return;
       }
-      if (t === "MF_AUTH_SIGN_IN" || t === "MF_AUTH_SIGN_UP") {
+      if (t === "MF_AUTH_OAUTH_GOOGLE" || t === "MF_AUTH_MAGIC_LINK") {
         sendResponse({ ok: false, error: "Cloud handler failed." });
         return;
       }
@@ -18624,7 +18661,7 @@ var require_sw_main = __commonJS({
     void restoreAuthMarker();
     var SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "local") return;
+      if (area !== "sync") return;
       const touched = Object.prototype.hasOwnProperty.call(changes, SUPABASE_AUTH_STORAGE_KEY) || Object.prototype.hasOwnProperty.call(changes, `${SUPABASE_AUTH_STORAGE_KEY}-user`);
       if (!touched) return;
       invalidateSupabaseClient();
@@ -18636,6 +18673,17 @@ var require_sw_main = __commonJS({
       });
     });
     chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
+      if (msg && typeof msg === "object" && msg.session) {
+        void (async () => {
+          try {
+            const result = await handoffSupabaseSession(msg.session);
+            sendResponse(result);
+          } catch (e) {
+            sendResponse({ ok: false, error: String(e?.message || e) });
+          }
+        })();
+        return true;
+      }
       if (msg?.action !== "load-shared-review") return false;
       const uidRaw = msg.uid;
       const platformRaw = msg.platform;

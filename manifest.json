@@ -22,7 +22,7 @@
   },
   "permissions": ["storage", "clipboardWrite", "tabs", "activeTab"],
   "externally_connectable": {
-    "matches": ["https://notch.video/*"]
+    "matches": ["https://notch.video/*", "https://notch.so/*"]
   },
   "host_permissions": ["<all_urls>"],
   "content_scripts": [

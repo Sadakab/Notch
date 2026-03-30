@@ -25,47 +25,22 @@ h1 {
   font-size: 0.9rem;
 }
 
-.nf-tabs {
+.nf-or-wrap {
   display: flex;
-  gap: 0;
-  margin-bottom: 1rem;
-  border-radius: 8px;
-  padding: 3px;
-  background: #1a222c;
-  border: 1px solid #2a3441;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.25rem 0 0.9rem;
 }
 
-.nf-tab {
+.nf-or-line {
   flex: 1;
-  margin: 0;
-  padding: 0.45rem 0.65rem;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
+  height: 1px;
+  background: #2a3441;
+}
+
+.nf-or-label {
+  font-size: 0.8rem;
   color: #8b9aab;
-  font-size: 0.85rem;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-.nf-tab:hover:not(.nf-tab-active) {
-  color: #c5d0dc;
-}
-
-.nf-tab.nf-tab-active {
-  background: #00c4dc;
-  color: #021014;
-  font-weight: 600;
-  box-shadow: none;
-}
-
-.nf-tab.nf-tab-active:hover {
-  background: #00e5ff;
-  color: #021014;
-}
-
-.nf-signup-only {
-  margin-bottom: 0;
 }
 
 .nf-banner {
@@ -118,6 +93,10 @@ h1 {
   margin-bottom: 1rem;
 }
 
+.nf-actions-stack {
+  margin-bottom: 0.45rem;
+}
+
 #nf-sign-out {
   margin-top: 0.35rem;
   margin-bottom: 1rem;
@@ -131,6 +110,10 @@ h1 {
   color: #e7ecf1;
   font-size: 0.9rem;
   cursor: pointer;
+}
+
+.nf-btn-google {
+  width: 100%;
 }
 
 .nf-btn:hover {

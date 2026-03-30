@@ -2,14 +2,15 @@ import { isClientSafeSupabaseKey } from "./supabase-client-key.js";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-config.js";
 import {
   handleRuntimeMessage,
+  handoffSupabaseSession,
   invalidateSupabaseClient,
   restoreAuthMarker,
   syncAuthMarkerFromChromeStorage,
 } from "./sw-cloud.js";
 
 const CLOUD_TYPES = new Set([
-  "MF_AUTH_SIGN_IN",
-  "MF_AUTH_SIGN_UP",
+  "MF_AUTH_OAUTH_GOOGLE",
+  "MF_AUTH_MAGIC_LINK",
   "MF_AUTH_CHANGED",
   "MF_SUPABASE_SESSION",
   "MF_SUPABASE_SIGN_OUT",
@@ -159,7 +160,7 @@ function sendCloudFallback(msg, sendResponse) {
     sendResponse({ configured: isSupabaseConfigured(), user: null });
     return;
   }
-  if (t === "MF_AUTH_SIGN_IN" || t === "MF_AUTH_SIGN_UP") {
+  if (t === "MF_AUTH_OAUTH_GOOGLE" || t === "MF_AUTH_MAGIC_LINK") {
     sendResponse({ ok: false, error: "Cloud handler failed." });
     return;
   }
@@ -218,7 +219,7 @@ void restoreAuthMarker();
 const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "local") return;
+  if (area !== "sync") return;
   const touched =
     Object.prototype.hasOwnProperty.call(changes, SUPABASE_AUTH_STORAGE_KEY) ||
     Object.prototype.hasOwnProperty.call(changes, `${SUPABASE_AUTH_STORAGE_KEY}-user`);
@@ -233,6 +234,17 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
+  if (msg && typeof msg === "object" && msg.session) {
+    void (async () => {
+      try {
+        const result = await handoffSupabaseSession(msg.session);
+        sendResponse(result);
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      }
+    })();
+    return true;
+  }
   if (msg?.action !== "load-shared-review") return false;
   const uidRaw = msg.uid;
   const platformRaw = msg.platform;

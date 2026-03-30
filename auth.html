@@ -16,46 +16,22 @@
         <code>chrome://extensions</code>.
       </div>
       <div id="nf-signed-out-wrap">
-        <div class="nf-tabs" role="tablist" aria-label="Account">
-          <button
-            type="button"
-            id="nf-tab-sign-in"
-            class="nf-tab nf-tab-active"
-            role="tab"
-            aria-selected="true"
-            aria-controls="nf-auth-fields"
-          >
-            Log in
-          </button>
-          <button
-            type="button"
-            id="nf-tab-sign-up"
-            class="nf-tab"
-            role="tab"
-            aria-selected="false"
-            aria-controls="nf-auth-fields"
-          >
-            Sign up
+        <div class="nf-actions nf-actions-stack">
+          <button type="button" id="nf-google-sign-in" class="nf-btn nf-btn-primary nf-btn-google">
+            Continue with Google
           </button>
         </div>
-        <div id="nf-auth-fields" class="nf-auth-fields" role="tabpanel" aria-labelledby="nf-tab-sign-in">
+        <div class="nf-or-wrap" aria-hidden="true">
+          <span class="nf-or-line"></span>
+          <span class="nf-or-label">or</span>
+          <span class="nf-or-line"></span>
+        </div>
+        <div id="nf-auth-fields" class="nf-auth-fields">
           <label class="nf-label" for="nf-email">Email</label>
           <input id="nf-email" class="nf-input" type="email" autocomplete="username" />
-          <label class="nf-label" for="nf-password">Password</label>
-          <input id="nf-password" class="nf-input" type="password" autocomplete="current-password" />
-          <div id="nf-signup-only" class="nf-signup-only" hidden>
-            <label class="nf-label" for="nf-password-confirm">Confirm password</label>
-            <input
-              id="nf-password-confirm"
-              class="nf-input"
-              type="password"
-              autocomplete="new-password"
-            />
-          </div>
         </div>
         <div class="nf-actions">
-          <button type="button" id="nf-sign-in" class="nf-btn nf-btn-primary">Sign in</button>
-          <button type="button" id="nf-sign-up" class="nf-btn nf-btn-primary" hidden>Create account</button>
+          <button type="button" id="nf-send-magic-link" class="nf-btn">Send magic link</button>
         </div>
       </div>
       <button type="button" id="nf-sign-out" class="nf-btn" hidden>Sign out</button>
