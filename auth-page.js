@@ -17429,8 +17429,14 @@ ${suffix}`;
       }
       function main() {
         const statusEl = document.getElementById("nf-status");
+        const signedOutWrap = document.getElementById("nf-signed-out-wrap");
+        const authFields = document.getElementById("nf-auth-fields");
+        const tabSignIn = document.getElementById("nf-tab-sign-in");
+        const tabSignUp = document.getElementById("nf-tab-sign-up");
+        const signupOnly = document.getElementById("nf-signup-only");
         const emailEl = document.getElementById("nf-email");
         const passEl = document.getElementById("nf-password");
+        const passConfirmEl = document.getElementById("nf-password-confirm");
         const signInBtn = document.getElementById("nf-sign-in");
         const signUpBtn = document.getElementById("nf-sign-up");
         const signOutBtn = document.getElementById("nf-sign-out");
@@ -17452,19 +17458,36 @@ ${suffix}`;
             autoRefreshToken: true
           }
         });
+        function setAuthTab(mode) {
+          const isSignUp = mode === "sign-up";
+          tabSignIn.classList.toggle("nf-tab-active", !isSignUp);
+          tabSignUp.classList.toggle("nf-tab-active", isSignUp);
+          tabSignIn.setAttribute("aria-selected", String(!isSignUp));
+          tabSignUp.setAttribute("aria-selected", String(isSignUp));
+          if (authFields) {
+            authFields.setAttribute("aria-labelledby", isSignUp ? "nf-tab-sign-up" : "nf-tab-sign-in");
+          }
+          if (signupOnly) signupOnly.hidden = !isSignUp;
+          signInBtn.hidden = isSignUp;
+          signUpBtn.hidden = !isSignUp;
+          passEl.setAttribute("autocomplete", isSignUp ? "new-password" : "current-password");
+        }
+        tabSignIn.addEventListener("click", () => setAuthTab("sign-in"));
+        tabSignUp.addEventListener("click", () => setAuthTab("sign-up"));
         async function refreshUi() {
           const {
             data: { session }
           } = await supabase.auth.getSession();
           const signedIn = !!session?.user;
+          if (signedOutWrap) signedOutWrap.hidden = signedIn;
           emailEl.disabled = signedIn;
           passEl.disabled = signedIn;
-          signInBtn.hidden = signedIn;
-          signUpBtn.hidden = signedIn;
+          if (passConfirmEl) passConfirmEl.disabled = signedIn;
           signOutBtn.hidden = !signedIn;
           if (signedIn) {
             showStatus(statusEl, "Signed in as " + (session.user.email || "user") + ". You can close this tab.", "ok");
           } else {
+            setAuthTab("sign-in");
             showStatus(statusEl, "Sign in to sync your reviews across browsers.", "");
           }
         }
@@ -17496,6 +17519,11 @@ ${suffix}`;
           }
           if (password.length < 6) {
             showStatus(statusEl, "Password must be at least 6 characters.", "err");
+            return;
+          }
+          const confirm = passConfirmEl?.value || "";
+          if (password !== confirm) {
+            showStatus(statusEl, "Passwords do not match.", "err");
             return;
           }
           showStatus(statusEl, "Creating account\u2026", "");

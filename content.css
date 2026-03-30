@@ -1498,6 +1498,49 @@ body > .mf-screengrab-flyout.mf-screengrab-flyout--portaled .mf-lucide {
   margin-top: 6px;
 }
 
+#markframe-root .mf-gate-tabs {
+  display: flex;
+  gap: 0;
+  padding: 3px;
+  border-radius: 6px;
+  background: var(--mf-bg-elevated);
+  border: 1px solid var(--mf-border, #2a3441);
+}
+
+#markframe-root .mf-gate-tab {
+  flex: 1;
+  margin: 0;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mf-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#markframe-root .mf-gate-tab:hover:not(.mf-gate-tab-active) {
+  color: var(--mf-text);
+}
+
+#markframe-root .mf-gate-tab.mf-gate-tab-active {
+  background: var(--mf-accent);
+  color: #0d1315;
+  box-shadow: none;
+}
+
+#markframe-root .mf-gate-tab.mf-gate-tab-active:hover {
+  background: #33ebff;
+  color: #0d1315;
+}
+
+#markframe-root .mf-gate-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 #markframe-root .mf-gate-label {
   display: flex;
   flex-direction: column;

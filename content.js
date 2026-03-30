@@ -372,6 +372,35 @@
     });
   }
 
+  function gateAuthTabMode() {
+    if (!root) return "sign-in";
+    return root.dataset.mfGateAuthTab === "sign-up" ? "sign-up" : "sign-in";
+  }
+
+  function syncGateAuthTab(mode) {
+    if (!root) return;
+    const isSignUp = mode === "sign-up";
+    root.dataset.mfGateAuthTab = mode;
+    root.querySelectorAll(".mf-gate-tab").forEach((btn) => {
+      const tab = btn.getAttribute("data-gate-tab");
+      const active = tab === "sign-up" ? isSignUp : !isSignUp;
+      btn.classList.toggle("mf-gate-tab-active", active);
+      btn.setAttribute("aria-selected", String(active));
+    });
+    const fields = root.querySelector("#mf-gate-fields");
+    if (fields) {
+      fields.setAttribute("aria-labelledby", isSignUp ? "mf-gate-tab-sign-up" : "mf-gate-tab-sign-in");
+    }
+    const signupOnly = root.querySelector(".mf-gate-signup-only");
+    if (signupOnly) signupOnly.classList.toggle("mf-hidden", !isSignUp);
+    const btnIn = root.querySelector(".mf-gate-btn-signin");
+    const btnUp = root.querySelector(".mf-gate-btn-signup");
+    if (btnIn) btnIn.classList.toggle("mf-hidden", isSignUp);
+    if (btnUp) btnUp.classList.toggle("mf-hidden", !isSignUp);
+    const pass = root.querySelector(".mf-gate-password");
+    if (pass) pass.setAttribute("autocomplete", isSignUp ? "new-password" : "current-password");
+  }
+
   async function submitGateSignIn() {
     if (!root) return;
     const email = (root.querySelector(".mf-gate-email") || {}).value?.trim() || "";
@@ -403,7 +432,20 @@
     if (!root) return;
     const email = (root.querySelector(".mf-gate-email") || {}).value?.trim() || "";
     const password = (root.querySelector(".mf-gate-password") || {}).value || "";
+    const confirm = (root.querySelector(".mf-gate-password-confirm") || {}).value || "";
     setGateStatus("");
+    if (!email || !password) {
+      setGateStatus("Enter email and password.", "err");
+      return;
+    }
+    if (password.length < 6) {
+      setGateStatus("Password must be at least 6 characters.", "err");
+      return;
+    }
+    if (password !== confirm) {
+      setGateStatus("Passwords do not match.", "err");
+      return;
+    }
     setGateFormBusy(true);
     try {
       const r = await sendExtensionMessage({
@@ -443,7 +485,7 @@
       form.classList.add("mf-hidden");
     } else {
       titleEl.textContent = "Sign in to use Notch";
-      msgEl.textContent = "Enter your email and password, or create an account.";
+      msgEl.textContent = "Choose Log in or Sign up, then enter your email and password.";
       form.classList.remove("mf-hidden");
     }
   }
@@ -3731,28 +3773,69 @@
         <p class="mf-gate-title"></p>
         <p class="mf-gate-msg"></p>
         <div class="mf-gate-form mf-hidden">
-          <label class="mf-gate-label"
-            >Email
-            <input
-              type="email"
-              class="mf-gate-input mf-gate-email"
-              autocomplete="username"
-              maxlength="320"
-            />
-          </label>
-          <label class="mf-gate-label"
-            >Password
-            <input
-              type="password"
-              class="mf-gate-input mf-gate-password"
-              autocomplete="current-password"
-              maxlength="200"
-            />
-          </label>
+          <div class="mf-gate-tabs" role="tablist" aria-label="Account">
+            <button
+              type="button"
+              id="mf-gate-tab-sign-in"
+              class="mf-gate-tab mf-gate-tab-active"
+              data-gate-tab="sign-in"
+              role="tab"
+              aria-selected="true"
+              aria-controls="mf-gate-fields"
+            >
+              Log in
+            </button>
+            <button
+              type="button"
+              id="mf-gate-tab-sign-up"
+              class="mf-gate-tab"
+              data-gate-tab="sign-up"
+              role="tab"
+              aria-selected="false"
+              aria-controls="mf-gate-fields"
+            >
+              Sign up
+            </button>
+          </div>
+          <div id="mf-gate-fields" class="mf-gate-fields" role="tabpanel">
+            <label class="mf-gate-label"
+              >Email
+              <input
+                type="email"
+                class="mf-gate-input mf-gate-email"
+                autocomplete="username"
+                maxlength="320"
+              />
+            </label>
+            <label class="mf-gate-label"
+              >Password
+              <input
+                type="password"
+                class="mf-gate-input mf-gate-password"
+                autocomplete="current-password"
+                maxlength="200"
+              />
+            </label>
+            <div class="mf-gate-signup-only mf-hidden">
+              <label class="mf-gate-label"
+                >Confirm password
+                <input
+                  type="password"
+                  class="mf-gate-input mf-gate-password-confirm"
+                  autocomplete="new-password"
+                  maxlength="200"
+                />
+              </label>
+            </div>
+          </div>
           <p class="mf-gate-status" aria-live="polite"></p>
           <div class="mf-gate-actions">
-            <button type="button" class="mf-btn mf-btn-primary" data-action="gate-sign-in">Sign in</button>
-            <button type="button" class="mf-btn" data-action="gate-sign-up">Create account</button>
+            <button type="button" class="mf-btn mf-btn-primary mf-gate-btn-signin" data-action="gate-sign-in">
+              Sign in
+            </button>
+            <button type="button" class="mf-btn mf-btn-primary mf-gate-btn-signup mf-hidden" data-action="gate-sign-up">
+              Create account
+            </button>
           </div>
         </div>
       </div>
@@ -4303,6 +4386,18 @@
       });
     }
 
+    const gateForm = root.querySelector(".mf-gate-form");
+    if (gateForm) {
+      syncGateAuthTab("sign-in");
+      root.querySelectorAll(".mf-gate-tab").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const mode = btn.getAttribute("data-gate-tab") === "sign-up" ? "sign-up" : "sign-in";
+          syncGateAuthTab(mode);
+          setGateStatus("");
+        });
+      });
+    }
+
     const gateSignIn = root.querySelector('[data-action="gate-sign-in"]');
     if (gateSignIn) {
       gateSignIn.addEventListener("click", () => void submitGateSignIn());
@@ -4316,7 +4411,17 @@
       gatePass.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          void submitGateSignIn();
+          if (gateAuthTabMode() === "sign-up") void submitGateSignUp();
+          else void submitGateSignIn();
+        }
+      });
+    }
+    const gatePassConfirm = root.querySelector(".mf-gate-password-confirm");
+    if (gatePassConfirm) {
+      gatePassConfirm.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void submitGateSignUp();
         }
       });
     }
