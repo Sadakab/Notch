@@ -46,7 +46,6 @@
     autoPause: "autoPause",
     floatPanel: "floatPanel",
     timestampFormat: "timestampFormat",
-    defaultReaction: "defaultReaction",
     notifyOnComment: "notifyOnComment",
     notifyOnReply: "notifyOnReply",
     plan: "plan",
@@ -246,6 +245,8 @@
   /** Sync cache for renderThread (display name + avatar URL). */
   let cachedEffectiveDisplayName = "";
   let cachedAuthorAvatarUrl = "";
+  /** `chrome.storage.sync` timestampFormat — drives formatTime() for thread + PDF. */
+  let cachedTimestampFormat = "0:39";
   /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
   let lastTickSignature = "";
   /** At most one delayed reload per storageKey when shared-review binding exists but host row not returned yet. */
@@ -2025,6 +2026,9 @@
     const m = Math.floor((sec / 60) % 60);
     const h = Math.floor(sec / 3600);
     const pad = (n) => String(n).padStart(2, "0");
+    if (cachedTimestampFormat === "00:00:39") {
+      return `${pad(h)}:${pad(m)}:${pad(s)}`;
+    }
     return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
   }
 
@@ -2188,6 +2192,8 @@
     if (!root) return;
     const fileInp = root.querySelector(".mf-settings-avatar-file");
     if (fileInp) fileInp.value = "";
+    const profileFile = root.querySelector(".mf-settings-profile-avatar-file");
+    if (profileFile) profileFile.value = "";
   }
 
   async function openSettingsPanel() {
@@ -2199,6 +2205,7 @@
     await refreshCloudUser(true);
     const email = state.cloudUser?.email?.trim() || "";
     const s = await loadSyncSettings();
+    cachedTimestampFormat = s.timestampFormat;
     const fallbackName = (await loadAuthorOverride()).trim() || email;
     inp.value = s.displayName || fallbackName;
     inp.placeholder = email || "Display name";
@@ -2209,13 +2216,6 @@
     if (posValue) posValue.textContent = posLabel;
     const tsValue = root.querySelector(".mf-settings-timestamp-format-value");
     if (tsValue) tsValue.textContent = s.timestampFormat;
-    const reactionValue = root.querySelector(".mf-settings-default-reaction-value");
-    if (reactionValue) {
-      reactionValue.textContent =
-        s.defaultReaction === "none"
-          ? "None"
-          : s.defaultReaction.charAt(0).toUpperCase() + s.defaultReaction.slice(1);
-    }
     const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
     if (autoPauseCb) autoPauseCb.checked = !!s.autoPause;
     const floatCb = root.querySelector(".mf-settings-float-panel");
@@ -2228,8 +2228,8 @@
     root.querySelectorAll(".mf-settings-pro-disabled").forEach((el) => {
       el.classList.toggle("mf-settings-disabled", !pro);
     });
-    const initials = root.querySelector(".mf-settings-avatar-initials");
-    if (initials) initials.textContent = avatarFallbackLetter(inp.value.trim() || email || "You");
+    const avSrc = await loadStoredAvatar();
+    applySettingsAvatarPreview(avSrc, inp.value.trim() || email || "You");
     const accountEmail = root.querySelector(".mf-settings-account-email");
     if (accountEmail) accountEmail.textContent = email || "Not signed in";
     const planBadge = root.querySelector(".mf-settings-plan-badge");
@@ -2320,11 +2320,11 @@
       return;
     }
     if (target === "timestampFormat") {
-      await saveSettingSync(SYNC_SETTINGS_KEYS.timestampFormat, normalizeTimestampFormat(value));
+      const fmt = normalizeTimestampFormat(value);
+      await saveSettingSync(SYNC_SETTINGS_KEYS.timestampFormat, fmt);
+      cachedTimestampFormat = fmt;
+      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
       return;
-    }
-    if (target === "defaultReaction") {
-      await saveSettingSync(SYNC_SETTINGS_KEYS.defaultReaction, normalizeDefaultReaction(value));
     }
   }
 
@@ -2360,10 +2360,9 @@
     return v === "00:00:39" ? "00:00:39" : "0:39";
   }
 
-  function normalizeDefaultReaction(v) {
-    const s = String(v || "").trim().toLowerCase();
-    if (s === "approve" || s === "flag" || s === "note") return s;
-    return "none";
+  async function refreshTimestampFormatCache() {
+    const got = await chrome.storage.sync.get(SYNC_SETTINGS_KEYS.timestampFormat);
+    cachedTimestampFormat = normalizeTimestampFormat(got[SYNC_SETTINGS_KEYS.timestampFormat]);
   }
 
   function isProUser() {
@@ -2381,7 +2380,6 @@
       autoPause: got[SYNC_SETTINGS_KEYS.autoPause] !== false,
       floatPanel: !!got[SYNC_SETTINGS_KEYS.floatPanel],
       timestampFormat: normalizeTimestampFormat(got[SYNC_SETTINGS_KEYS.timestampFormat]),
-      defaultReaction: normalizeDefaultReaction(got[SYNC_SETTINGS_KEYS.defaultReaction]),
       notifyOnComment: got[SYNC_SETTINGS_KEYS.notifyOnComment] !== false,
       notifyOnReply: got[SYNC_SETTINGS_KEYS.notifyOnReply] !== false,
       plan: String(got[SYNC_SETTINGS_KEYS.plan] || "").trim().toLowerCase() === "pro" ? "pro" : "free",
@@ -3992,15 +3990,20 @@
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Profile</div>
               <div class="mf-settings-profile-row">
-                <span class="mf-settings-avatar-initials" aria-hidden="true">N</span>
+                <input type="file" class="mf-settings-profile-avatar-file" accept="image/*" tabindex="-1" aria-hidden="true" />
+                <button
+                  type="button"
+                  class="mf-settings-avatar-btn"
+                  data-action="pick-profile-avatar"
+                  title="Change profile photo"
+                  aria-label="Change profile photo"
+                >
+                  <img class="mf-settings-avatar-preview mf-hidden" alt="" />
+                  <span class="mf-settings-avatar-preview-fallback" aria-hidden="true">N</span>
+                </button>
                 <input type="text" class="mf-settings-display-name" maxlength="80" autocomplete="nickname" spellcheck="false" />
               </div>
               <input type="text" class="mf-settings-company-name" maxlength="120" placeholder="Company / studio name" spellcheck="false" />
-              <div class="mf-settings-row">
-                <span>Upload logo <span class="mf-pro-badge">Pro</span></span>
-                <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
-                <button type="button" class="mf-settings-ghost-btn" data-action="upload-logo">Choose file</button>
-              </div>
             </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Panel</div>
@@ -4027,15 +4030,6 @@
                   </div>
                 </div>
               </div>
-              <div class="mf-settings-row">
-                <span>Default reaction</span>
-                <div class="mf-settings-dropdown" data-key="defaultReaction">
-                  <button type="button" class="mf-settings-dropdown-btn"><span class="mf-settings-dropdown-value mf-settings-default-reaction-value">None</span><span class="mf-settings-chevron">▾</span></button>
-                  <div class="mf-settings-dropdown-menu">
-                    <button type="button" data-value="none">None</button><button type="button" data-value="approve">Approve</button><button type="button" data-value="flag">Flag</button><button type="button" data-value="note">Note</button>
-                  </div>
-                </div>
-              </div>
             </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading-row"><span class="mf-settings-section-heading">Notifications <span class="mf-pro-badge">Pro</span></span><span class="mf-settings-via-email">via email</span></div>
@@ -4043,22 +4037,16 @@
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone replies to my comment</span><input type="checkbox" class="mf-settings-notify-reply mf-settings-toggle" /></label>
             </section>
             <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">PDF Export <span class="mf-pro-badge">Pro</span></div>
+              <div class="mf-settings-row mf-settings-pro-disabled">
+                <span>Company logo</span>
+                <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
+                <button type="button" class="mf-settings-ghost-btn" data-action="upload-logo">Choose file</button>
+              </div>
+            </section>
+            <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Account</div>
               <div class="mf-settings-account-email"></div>
-              <div class="mf-settings-account-actions">
-                <button type="button" class="mf-settings-ghost-btn" data-action="change-email">Change email</button>
-                <button type="button" class="mf-settings-ghost-btn" data-action="reset-password">Reset password</button>
-              </div>
-              <div class="mf-settings-email-modal mf-hidden" aria-hidden="true">
-                <div class="mf-settings-email-modal-card">
-                  <div class="mf-settings-email-modal-title">Change email</div>
-                  <input type="email" class="mf-settings-email-input" placeholder="name@example.com" />
-                  <div class="mf-settings-email-modal-actions">
-                    <button type="button" class="mf-settings-ghost-btn" data-action="cancel-change-email">Cancel</button>
-                    <button type="button" class="mf-settings-cta-btn" data-action="submit-change-email">Save</button>
-                  </div>
-                </div>
-              </div>
             </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Plan</div>
@@ -4412,8 +4400,8 @@
     const settingsNameInp = root.querySelector(".mf-settings-display-name");
     if (settingsNameInp) {
       settingsNameInp.addEventListener("input", () => {
-        const initials = root.querySelector(".mf-settings-avatar-initials");
-        if (initials) initials.textContent = avatarFallbackLetter(settingsNameInp.value || "You");
+        const fb = root.querySelector(".mf-settings-avatar-preview-fallback");
+        if (fb) fb.textContent = avatarFallbackLetter(settingsNameInp.value || "You");
       });
       settingsNameInp.addEventListener("change", () => void applyDisplayNameSetting());
     }
@@ -4423,6 +4411,28 @@
         void saveSettingSync(SYNC_SETTINGS_KEYS.companyName, companyInp.value.trim())
       );
     }
+    const pickProfileAvatarBtn = root.querySelector('[data-action="pick-profile-avatar"]');
+    const profileAvatarFileInp = root.querySelector(".mf-settings-profile-avatar-file");
+    if (pickProfileAvatarBtn && profileAvatarFileInp) {
+      pickProfileAvatarBtn.addEventListener("click", () => profileAvatarFileInp.click());
+      profileAvatarFileInp.addEventListener("change", () => {
+        const f = profileAvatarFileInp.files && profileAvatarFileInp.files[0];
+        if (!f) return;
+        compressAvatarFile(f)
+          .then(async (dataUrl) => {
+            await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: dataUrl });
+            await refreshAuthorPresentationCache();
+            const nameInp = root.querySelector(".mf-settings-display-name");
+            const email = state.cloudUser?.email?.trim() || "";
+            const label = (nameInp?.value || "").trim() || email || "You";
+            applySettingsAvatarPreview(dataUrl, label);
+            showToast("Profile photo updated.");
+          })
+          .catch((err) => showToast(err.message || "Could not use that image."));
+        profileAvatarFileInp.value = "";
+      });
+    }
+
     const pickAvatarBtn = root.querySelector('[data-action="upload-logo"]');
     const avatarFileInp = root.querySelector(".mf-settings-avatar-file");
     if (pickAvatarBtn && avatarFileInp) {
@@ -4490,45 +4500,6 @@
       });
     }
 
-    const changeEmailBtn = root.querySelector('[data-action="change-email"]');
-    const changeEmailModal = root.querySelector(".mf-settings-email-modal");
-    const changeEmailInput = root.querySelector(".mf-settings-email-input");
-    const cancelChangeEmailBtn = root.querySelector('[data-action="cancel-change-email"]');
-    const submitChangeEmailBtn = root.querySelector('[data-action="submit-change-email"]');
-    if (changeEmailBtn) {
-      changeEmailBtn.addEventListener("click", () => {
-        if (!changeEmailModal) return;
-        changeEmailModal.classList.remove("mf-hidden");
-        changeEmailModal.setAttribute("aria-hidden", "false");
-        if (changeEmailInput) changeEmailInput.value = "";
-        if (changeEmailInput) requestAnimationFrame(() => changeEmailInput.focus());
-      });
-    }
-    if (cancelChangeEmailBtn && changeEmailModal) {
-      cancelChangeEmailBtn.addEventListener("click", () => {
-        changeEmailModal.classList.add("mf-hidden");
-        changeEmailModal.setAttribute("aria-hidden", "true");
-      });
-    }
-    if (submitChangeEmailBtn && changeEmailModal && changeEmailInput) {
-      submitChangeEmailBtn.addEventListener("click", async () => {
-        const email = changeEmailInput.value.trim();
-        if (!email) return;
-        const r = await sendExtensionMessage({ type: "MF_SUPABASE_CHANGE_EMAIL", email });
-        showToast(r?.ok ? "Check your email to confirm the change." : (r?.error || "Could not change email."));
-        if (r?.ok) {
-          changeEmailModal.classList.add("mf-hidden");
-          changeEmailModal.setAttribute("aria-hidden", "true");
-        }
-      });
-    }
-    const resetPasswordBtn = root.querySelector('[data-action="reset-password"]');
-    if (resetPasswordBtn) {
-      resetPasswordBtn.addEventListener("click", async () => {
-        const r = await sendExtensionMessage({ type: "MF_SUPABASE_RESET_PASSWORD" });
-        showToast(r?.ok ? "Password reset email sent." : (r?.error || "Could not send reset email."));
-      });
-    }
     const deleteAccountBtn = root.querySelector('[data-action="delete-account"]');
     if (deleteAccountBtn) {
       deleteAccountBtn.addEventListener("click", async () => {
@@ -5669,7 +5640,7 @@
       state.comments = imported;
       state.collapsedReplyRoots.clear();
       normalizeCommentsShape();
-      await refreshAuthorPresentationCache();
+      await Promise.all([refreshAuthorPresentationCache(), refreshTimestampFormatCache()]);
       renderThread();
       showToast("Imported review from link.");
       const u = new URL(location.href);
@@ -5727,7 +5698,7 @@
 
     root.classList.toggle("mf-collapsed", state.collapsed);
 
-    await refreshAuthorPresentationCache();
+    await Promise.all([refreshAuthorPresentationCache(), refreshTimestampFormatCache()]);
     renderThread();
 
     ensureCanvasOverlay(clip);
@@ -5885,6 +5856,12 @@
       }
       if (changes[SYNC_SETTINGS_KEYS.floatPanel]) {
         applyFloatPanelPref(changes[SYNC_SETTINGS_KEYS.floatPanel].newValue);
+      }
+      if (changes[SYNC_SETTINGS_KEYS.timestampFormat]) {
+        cachedTimestampFormat = normalizeTimestampFormat(
+          changes[SYNC_SETTINGS_KEYS.timestampFormat].newValue
+        );
+        if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
       }
     }
   }
