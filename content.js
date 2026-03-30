@@ -38,6 +38,20 @@
     dataPrefix: "markframe_video_",
     clipPrefix: "markframe_clip_",
   };
+  const SYNC_SETTINGS_KEYS = {
+    displayName: "displayName",
+    companyName: "companyName",
+    logoDataUrl: "logoDataUrl",
+    panelPosition: "panelPosition",
+    autoPause: "autoPause",
+    floatPanel: "floatPanel",
+    timestampFormat: "timestampFormat",
+    defaultReaction: "defaultReaction",
+    notifyOnComment: "notifyOnComment",
+    notifyOnReply: "notifyOnReply",
+    plan: "plan",
+    billingPortalUrl: "billingPortalUrl",
+  };
 
   const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
 
@@ -224,8 +238,11 @@
   let resizeObs = null;
   let urlCheckTimer = null;
   let settingsEscapeHandler = null;
+  let settingsOutsideClickHandler = null;
   let settingsAvatarPendingDataUrl = null;
   let settingsAvatarExplicitClear = false;
+  let settingsMenuOpenKey = "";
+  let panelDragState = null;
   /** Sync cache for renderThread (display name + avatar URL). */
   let cachedEffectiveDisplayName = "";
   let cachedAuthorAvatarUrl = "";
@@ -309,7 +326,11 @@
       }
       cloudAuthCachedUser =
         r.user && (r.user.email || r.user.id)
-          ? { email: r.user.email || "", id: r.user.id || "" }
+          ? {
+              email: r.user.email || "",
+              id: r.user.id || "",
+              plan: String(r.user.plan || "").trim().toLowerCase() === "pro" ? "pro" : "free",
+            }
           : null;
       state.cloudUser = cloudAuthCachedUser;
       cloudAuthCacheValidUntil = now + 45_000;
@@ -2233,29 +2254,51 @@
     if (!overlay || !inp) return;
     if (!overlay.classList.contains("mf-hidden")) return;
     await refreshCloudUser(true);
-    const raw = (await loadAuthorOverride()).trim();
     const email = state.cloudUser?.email?.trim() || "";
-    inp.value = raw || email;
+    const s = await loadSyncSettings();
+    const fallbackName = (await loadAuthorOverride()).trim() || email;
+    inp.value = s.displayName || fallbackName;
     inp.placeholder = email || "Display name";
-    resetSettingsAvatarFormState();
-    const cornerSel = root.querySelector(".mf-settings-panel-corner");
-    if (cornerSel) cornerSel.value = await loadPanelCorner();
-    const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
-    if (autoPauseCb) {
-      const { [STORAGE_KEYS.autoPauseCommentTyping]: ap } = await chrome.storage.local.get(
-        STORAGE_KEYS.autoPauseCommentTyping
-      );
-      autoPauseCb.checked = normalizeAutoPauseCommentTyping(ap);
+    const company = root.querySelector(".mf-settings-company-name");
+    if (company) company.value = s.companyName;
+    const posLabel = panelCornerToLabel(s.panelCorner);
+    const posValue = root.querySelector(".mf-settings-panel-position-value");
+    if (posValue) posValue.textContent = posLabel;
+    const tsValue = root.querySelector(".mf-settings-timestamp-format-value");
+    if (tsValue) tsValue.textContent = s.timestampFormat;
+    const reactionValue = root.querySelector(".mf-settings-default-reaction-value");
+    if (reactionValue) {
+      reactionValue.textContent =
+        s.defaultReaction === "none"
+          ? "None"
+          : s.defaultReaction.charAt(0).toUpperCase() + s.defaultReaction.slice(1);
     }
-    const urlInp = root.querySelector(".mf-settings-avatar-url");
-    if (urlInp) urlInp.value = "";
-    const storedAvatar = await loadStoredAvatar();
-    if (urlInp && storedAvatar.startsWith("https://")) urlInp.value = storedAvatar;
-    const previewLabel = inp.value.trim() || email || "You";
-    applySettingsAvatarPreview(storedAvatar || null, previewLabel);
+    const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
+    if (autoPauseCb) autoPauseCb.checked = !!s.autoPause;
+    const floatCb = root.querySelector(".mf-settings-float-panel");
+    if (floatCb) floatCb.checked = !!s.floatPanel;
+    const notifyComment = root.querySelector(".mf-settings-notify-comment");
+    const notifyReply = root.querySelector(".mf-settings-notify-reply");
+    const pro = isProUser();
+    if (notifyComment) notifyComment.checked = pro ? !!s.notifyOnComment : false;
+    if (notifyReply) notifyReply.checked = pro ? !!s.notifyOnReply : false;
+    root.querySelectorAll(".mf-settings-pro-disabled").forEach((el) => {
+      el.classList.toggle("mf-settings-disabled", !pro);
+    });
+    const initials = root.querySelector(".mf-settings-avatar-initials");
+    if (initials) initials.textContent = avatarFallbackLetter(inp.value.trim() || email || "You");
+    const accountEmail = root.querySelector(".mf-settings-account-email");
+    if (accountEmail) accountEmail.textContent = email || "Not signed in";
+    const planBadge = root.querySelector(".mf-settings-plan-badge");
+    if (planBadge) planBadge.textContent = pro ? "Pro" : "Free";
+    const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
+    const billingBtn = root.querySelector('[data-action="manage-billing"]');
+    if (upgradeBtn) upgradeBtn.classList.toggle("mf-hidden", pro);
+    if (billingBtn) billingBtn.classList.toggle("mf-hidden", !pro);
     overlay.classList.remove("mf-hidden");
     overlay.setAttribute("aria-hidden", "false");
     root.classList.add("mf-settings-open");
+    settingsMenuOpenKey = "";
     settingsEscapeHandler = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -2263,7 +2306,15 @@
         closeSettingsPanel();
       }
     };
+    settingsOutsideClickHandler = (e) => {
+      if (!root) return;
+      const menu = e.target instanceof Element ? e.target.closest(".mf-settings-dropdown") : null;
+      if (!menu) {
+        root.querySelectorAll(".mf-settings-dropdown.mf-open").forEach((d) => d.classList.remove("mf-open"));
+      }
+    };
     document.addEventListener("keydown", settingsEscapeHandler, true);
+    document.addEventListener("click", settingsOutsideClickHandler, true);
     requestAnimationFrame(() => inp.focus());
   }
 
@@ -2279,50 +2330,59 @@
       document.removeEventListener("keydown", settingsEscapeHandler, true);
       settingsEscapeHandler = null;
     }
+    if (settingsOutsideClickHandler) {
+      document.removeEventListener("click", settingsOutsideClickHandler, true);
+      settingsOutsideClickHandler = null;
+    }
+    root.querySelectorAll(".mf-settings-dropdown.mf-open").forEach((d) => d.classList.remove("mf-open"));
   }
 
-  async function saveSettingsPanel() {
+  async function saveSettingSync(key, value) {
+    await chrome.storage.sync.set({ [key]: value });
+  }
+
+  async function applyDisplayNameSetting() {
     if (!root) return;
+    await refreshCloudUser(false);
     const inp = root.querySelector(".mf-settings-display-name");
     if (!inp) return;
-    await refreshCloudUser(false);
     const v = inp.value.trim();
     const email = state.cloudUser?.email?.trim() || "";
     let override = v;
     if (!v || (email && v === email)) override = "";
-    await saveAuthorOverride(override);
-
-    if (settingsAvatarExplicitClear) {
-      await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: "" });
-    } else if (settingsAvatarPendingDataUrl) {
-      await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: settingsAvatarPendingDataUrl });
-    } else {
-      const urlInp = root.querySelector(".mf-settings-avatar-url");
-      const u = (urlInp && urlInp.value.trim()) || "";
-      if (u.startsWith("https://")) {
-        await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: u });
-      }
-    }
-
-    const cornerSel = root.querySelector(".mf-settings-panel-corner");
-    if (cornerSel) {
-      const c = normalizePanelCorner(cornerSel.value);
-      await chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: c });
-      applyPanelCorner(c);
-    }
-
-    const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
-    if (autoPauseCb) {
-      await chrome.storage.local.set({
-        [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseCb.checked,
-      });
-      applyAutoPauseCommentTypingPref(autoPauseCb.checked);
-    }
-
+    await Promise.all([
+      saveSettingSync(SYNC_SETTINGS_KEYS.displayName, v),
+      saveAuthorOverride(override),
+    ]);
     await refreshAuthorPresentationCache();
-    if (root.dataset.mfView === "watch") renderThread();
-    showToast("Settings saved.");
-    closeSettingsPanel();
+  }
+
+  async function handleSettingsDropdownPick(buttonEl) {
+    if (!root || !(buttonEl instanceof HTMLElement)) return;
+    const row = buttonEl.closest(".mf-settings-dropdown");
+    if (!row) return;
+    const value = String(buttonEl.getAttribute("data-value") || "");
+    const target = String(row.getAttribute("data-key") || "");
+    const label = String(buttonEl.textContent || value).trim();
+    const valueEl = row.querySelector(".mf-settings-dropdown-value");
+    if (valueEl) valueEl.textContent = label;
+    row.classList.remove("mf-open");
+    if (target === "panelPosition") {
+      const corner = normalizePanelPosition(value);
+      await Promise.all([
+        saveSettingSync(SYNC_SETTINGS_KEYS.panelPosition, corner),
+        chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: corner }),
+      ]);
+      applyPanelCorner(corner);
+      return;
+    }
+    if (target === "timestampFormat") {
+      await saveSettingSync(SYNC_SETTINGS_KEYS.timestampFormat, normalizeTimestampFormat(value));
+      return;
+    }
+    if (target === "defaultReaction") {
+      await saveSettingSync(SYNC_SETTINGS_KEYS.defaultReaction, normalizeDefaultReaction(value));
+    }
   }
 
   async function loadSidebarVisible() {
@@ -2337,11 +2397,61 @@
     return c === "tl" || c === "tr" || c === "bl" || c === "br" ? c : "tr";
   }
 
+  function normalizePanelPosition(pos) {
+    const p = String(pos || "").trim().toLowerCase();
+    if (p === "top left") return "tl";
+    if (p === "top right") return "tr";
+    if (p === "bottom left") return "bl";
+    if (p === "bottom right") return "br";
+    return normalizePanelCorner(p);
+  }
+
+  function panelCornerToLabel(corner) {
+    if (corner === "tl") return "Top left";
+    if (corner === "tr") return "Top right";
+    if (corner === "bl") return "Bottom left";
+    return "Bottom right";
+  }
+
+  function normalizeTimestampFormat(v) {
+    return v === "00:00:39" ? "00:00:39" : "0:39";
+  }
+
+  function normalizeDefaultReaction(v) {
+    const s = String(v || "").trim().toLowerCase();
+    if (s === "approve" || s === "flag" || s === "note") return s;
+    return "none";
+  }
+
+  function isProUser() {
+    const plan = String(state.cloudUser?.plan || "").trim().toLowerCase();
+    return plan === "pro";
+  }
+
+  async function loadSyncSettings() {
+    const got = await chrome.storage.sync.get(Object.values(SYNC_SETTINGS_KEYS));
+    return {
+      displayName: String(got[SYNC_SETTINGS_KEYS.displayName] || "").trim(),
+      companyName: String(got[SYNC_SETTINGS_KEYS.companyName] || "").trim(),
+      logoDataUrl: typeof got[SYNC_SETTINGS_KEYS.logoDataUrl] === "string" ? got[SYNC_SETTINGS_KEYS.logoDataUrl] : "",
+      panelCorner: normalizePanelPosition(got[SYNC_SETTINGS_KEYS.panelPosition]),
+      autoPause: got[SYNC_SETTINGS_KEYS.autoPause] !== false,
+      floatPanel: !!got[SYNC_SETTINGS_KEYS.floatPanel],
+      timestampFormat: normalizeTimestampFormat(got[SYNC_SETTINGS_KEYS.timestampFormat]),
+      defaultReaction: normalizeDefaultReaction(got[SYNC_SETTINGS_KEYS.defaultReaction]),
+      notifyOnComment: got[SYNC_SETTINGS_KEYS.notifyOnComment] !== false,
+      notifyOnReply: got[SYNC_SETTINGS_KEYS.notifyOnReply] !== false,
+      plan: String(got[SYNC_SETTINGS_KEYS.plan] || "").trim().toLowerCase() === "pro" ? "pro" : "free",
+      billingPortalUrl: String(got[SYNC_SETTINGS_KEYS.billingPortalUrl] || "").trim(),
+    };
+  }
+
   async function loadPanelCorner() {
-    const { [STORAGE_KEYS.panelCorner]: c } = await chrome.storage.local.get(
-      STORAGE_KEYS.panelCorner
-    );
-    return normalizePanelCorner(c);
+    const sync = await chrome.storage.sync.get(SYNC_SETTINGS_KEYS.panelPosition);
+    const fromSync = normalizePanelPosition(sync[SYNC_SETTINGS_KEYS.panelPosition]);
+    if (fromSync) return fromSync;
+    const local = await chrome.storage.local.get(STORAGE_KEYS.panelCorner);
+    return normalizePanelCorner(local[STORAGE_KEYS.panelCorner]);
   }
 
   function applyPanelCorner(corner) {
@@ -2359,6 +2469,18 @@
     autoPauseWhenTypingComments = normalizeAutoPauseCommentTyping(v);
   }
 
+  function applyFloatPanelPref(v) {
+    if (!root) return;
+    root.dataset.mfFloating = v ? "1" : "";
+    if (!v) {
+      panelDragState = null;
+      root.style.left = "";
+      root.style.top = "";
+      root.style.right = "";
+      root.style.bottom = "";
+    }
+  }
+
   function getVideoElementForCommentPause() {
     const clip = resolveClipContext();
     if (clip) {
@@ -2369,14 +2491,26 @@
   }
 
   async function applySidebarLayoutFromStorage() {
-    const got = await chrome.storage.local.get([
-      STORAGE_KEYS.sidebarVisible,
-      STORAGE_KEYS.panelCorner,
-      STORAGE_KEYS.autoPauseCommentTyping,
+    const [gotLocal, gotSync] = await Promise.all([
+      chrome.storage.local.get([
+        STORAGE_KEYS.sidebarVisible,
+        STORAGE_KEYS.panelCorner,
+        STORAGE_KEYS.autoPauseCommentTyping,
+      ]),
+      chrome.storage.sync.get([
+        SYNC_SETTINGS_KEYS.panelPosition,
+        SYNC_SETTINGS_KEYS.autoPause,
+        SYNC_SETTINGS_KEYS.floatPanel,
+      ]),
     ]);
-    applySidebarVisibility(got[STORAGE_KEYS.sidebarVisible] !== false);
-    applyPanelCorner(got[STORAGE_KEYS.panelCorner]);
-    applyAutoPauseCommentTypingPref(got[STORAGE_KEYS.autoPauseCommentTyping]);
+    applySidebarVisibility(gotLocal[STORAGE_KEYS.sidebarVisible] !== false);
+    applyPanelCorner(normalizePanelPosition(gotSync[SYNC_SETTINGS_KEYS.panelPosition] || gotLocal[STORAGE_KEYS.panelCorner]));
+    applyAutoPauseCommentTypingPref(
+      gotSync[SYNC_SETTINGS_KEYS.autoPause] != null
+        ? gotSync[SYNC_SETTINGS_KEYS.autoPause]
+        : gotLocal[STORAGE_KEYS.autoPauseCommentTyping]
+    );
+    applyFloatPanelPref(!!gotSync[SYNC_SETTINGS_KEYS.floatPanel]);
   }
 
   async function setSidebarVisible(visible) {
@@ -3949,58 +4083,86 @@
             </button>
           </div>
           <div class="mf-settings-body">
-            <label class="mf-settings-label"
-              >Display name
-              <input
-                type="text"
-                class="mf-settings-display-name"
-                maxlength="80"
-                autocomplete="nickname"
-                spellcheck="false"
-              />
-            </label>
-            <div class="mf-settings-sign-out-row mf-hidden">
-              <button type="button" class="mf-btn" data-action="sign-out">Sign out</button>
-            </div>
-            <label class="mf-settings-label mf-settings-label-tight"
-              >Panel corner
-              <select class="mf-settings-panel-corner" aria-label="Panel corner">
-                <option value="tr">Top right</option>
-                <option value="tl">Top left</option>
-                <option value="br">Bottom right</option>
-                <option value="bl">Bottom left</option>
-              </select>
-            </label>
-            <label class="mf-settings-toggle-row">
-              <input type="checkbox" class="mf-settings-auto-pause-comments" />
-              <span class="mf-settings-toggle-text">Auto pause when typing comments</span>
-            </label>
-            <div class="mf-settings-avatar-section">
-              <span class="mf-settings-section-title">Avatar</span>
-              <div class="mf-settings-avatar-row">
-                <div class="mf-settings-avatar-preview-wrap">
-                  <img class="mf-settings-avatar-preview mf-hidden" alt="" width="40" height="40" />
-                  <span class="mf-settings-avatar-preview-fallback" aria-hidden="true"></span>
-                </div>
-                <div class="mf-settings-avatar-buttons">
-                  <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
-                  <button type="button" class="mf-btn" data-action="pick-avatar">Choose image…</button>
-                  <button type="button" class="mf-btn" data-action="clear-avatar">Remove</button>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">Profile</div>
+              <div class="mf-settings-profile-row">
+                <span class="mf-settings-avatar-initials" aria-hidden="true">N</span>
+                <input type="text" class="mf-settings-display-name" maxlength="80" autocomplete="nickname" spellcheck="false" />
+              </div>
+              <input type="text" class="mf-settings-company-name" maxlength="120" placeholder="Company / studio name" spellcheck="false" />
+              <div class="mf-settings-row">
+                <span>Upload logo <span class="mf-pro-badge">Pro</span></span>
+                <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
+                <button type="button" class="mf-settings-ghost-btn" data-action="upload-logo">Choose file</button>
+              </div>
+            </section>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">Panel</div>
+              <div class="mf-settings-row">
+                <span>Position</span>
+                <div class="mf-settings-dropdown" data-key="panelPosition">
+                  <button type="button" class="mf-settings-dropdown-btn"><span class="mf-settings-dropdown-value mf-settings-panel-position-value">Bottom right</span><span class="mf-settings-chevron">▾</span></button>
+                  <div class="mf-settings-dropdown-menu">
+                    <button type="button" data-value="br">Bottom right</button><button type="button" data-value="bl">Bottom left</button><button type="button" data-value="tr">Top right</button><button type="button" data-value="tl">Top left</button>
+                  </div>
                 </div>
               </div>
-              <label class="mf-settings-label mf-settings-label-tight"
-                >Or image URL (https)
-                <input
-                  type="url"
-                  class="mf-settings-avatar-url"
-                  maxlength="2000"
-                  placeholder="https://…"
-                  spellcheck="false"
-                />
-              </label>
-            </div>
-            <div class="mf-settings-actions">
-              <button type="button" class="mf-btn mf-btn-primary" data-action="save-settings">Save</button>
+              <label class="mf-settings-row"><span>Auto-pause when typing</span><input type="checkbox" class="mf-settings-auto-pause-comments mf-settings-toggle" /></label>
+              <label class="mf-settings-row"><span>Float panel</span><input type="checkbox" class="mf-settings-float-panel mf-settings-toggle" /></label>
+            </section>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">Comments</div>
+              <div class="mf-settings-row">
+                <span>Timestamp format</span>
+                <div class="mf-settings-dropdown" data-key="timestampFormat">
+                  <button type="button" class="mf-settings-dropdown-btn"><span class="mf-settings-dropdown-value mf-settings-timestamp-format-value">0:39</span><span class="mf-settings-chevron">▾</span></button>
+                  <div class="mf-settings-dropdown-menu">
+                    <button type="button" data-value="0:39">0:39</button><button type="button" data-value="00:00:39">00:00:39</button>
+                  </div>
+                </div>
+              </div>
+              <div class="mf-settings-row">
+                <span>Default reaction</span>
+                <div class="mf-settings-dropdown" data-key="defaultReaction">
+                  <button type="button" class="mf-settings-dropdown-btn"><span class="mf-settings-dropdown-value mf-settings-default-reaction-value">None</span><span class="mf-settings-chevron">▾</span></button>
+                  <div class="mf-settings-dropdown-menu">
+                    <button type="button" data-value="none">None</button><button type="button" data-value="approve">Approve</button><button type="button" data-value="flag">Flag</button><button type="button" data-value="note">Note</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading-row"><span class="mf-settings-section-heading">Notifications <span class="mf-pro-badge">Pro</span></span><span class="mf-settings-via-email">via email</span></div>
+              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone comments on my review</span><input type="checkbox" class="mf-settings-notify-comment mf-settings-toggle" /></label>
+              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone replies to my comment</span><input type="checkbox" class="mf-settings-notify-reply mf-settings-toggle" /></label>
+            </section>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">Account</div>
+              <div class="mf-settings-account-email"></div>
+              <div class="mf-settings-account-actions">
+                <button type="button" class="mf-settings-ghost-btn" data-action="change-email">Change email</button>
+                <button type="button" class="mf-settings-ghost-btn" data-action="reset-password">Reset password</button>
+              </div>
+              <div class="mf-settings-email-modal mf-hidden" aria-hidden="true">
+                <div class="mf-settings-email-modal-card">
+                  <div class="mf-settings-email-modal-title">Change email</div>
+                  <input type="email" class="mf-settings-email-input" placeholder="name@example.com" />
+                  <div class="mf-settings-email-modal-actions">
+                    <button type="button" class="mf-settings-ghost-btn" data-action="cancel-change-email">Cancel</button>
+                    <button type="button" class="mf-settings-cta-btn" data-action="submit-change-email">Save</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="mf-settings-section">
+              <div class="mf-settings-section-heading">Plan</div>
+              <div class="mf-settings-row"><span>Current plan</span><span class="mf-settings-plan-badge">Free</span></div>
+              <button type="button" class="mf-settings-cta-btn" data-action="upgrade-pro">Upgrade to Pro</button>
+              <button type="button" class="mf-settings-ghost-btn mf-hidden" data-action="manage-billing">Manage billing</button>
+            </section>
+            <div class="mf-settings-footer-row">
+              <button type="button" class="mf-settings-link-btn" data-action="sign-out">Sign out</button>
+              <button type="button" class="mf-settings-link-btn mf-settings-link-danger" data-action="delete-account">Delete account</button>
             </div>
           </div>
         </div>
@@ -4302,15 +4464,39 @@
         void refreshWatchClipFromSupabase();
       }
     });
+    const headerEl = root.querySelector(".mf-header");
+    if (headerEl) {
+      headerEl.addEventListener("mousedown", (e) => {
+        if (!root || root.dataset.mfFloating !== "1") return;
+        const target = e.target instanceof Element ? e.target : null;
+        if (target && target.closest("button,input,textarea,select,a")) return;
+        const rect = root.getBoundingClientRect();
+        panelDragState = {
+          pointerX: e.clientX,
+          pointerY: e.clientY,
+          left: rect.left,
+          top: rect.top,
+        };
+        e.preventDefault();
+      });
+      document.addEventListener("mousemove", (e) => {
+        if (!root || !panelDragState || root.dataset.mfFloating !== "1") return;
+        const dx = e.clientX - panelDragState.pointerX;
+        const dy = e.clientY - panelDragState.pointerY;
+        root.style.left = Math.max(4, panelDragState.left + dx) + "px";
+        root.style.top = Math.max(4, panelDragState.top + dy) + "px";
+        root.style.right = "auto";
+        root.style.bottom = "auto";
+      });
+      document.addEventListener("mouseup", () => {
+        panelDragState = null;
+      });
+    }
 
     root.querySelector('[data-action="open-settings"]').addEventListener("click", () => void openSettingsPanel());
     root.querySelectorAll('[data-action="close-settings"]').forEach((b) => {
       b.addEventListener("click", () => closeSettingsPanel());
     });
-    const saveSettingsBtn = root.querySelector('[data-action="save-settings"]');
-    if (saveSettingsBtn) {
-      saveSettingsBtn.addEventListener("click", () => void saveSettingsPanel());
-    }
     const settingsOverlay = root.querySelector(".mf-settings-overlay");
     if (settingsOverlay) {
       settingsOverlay.addEventListener("click", (e) => {
@@ -4319,17 +4505,20 @@
     }
     const settingsNameInp = root.querySelector(".mf-settings-display-name");
     if (settingsNameInp) {
-      settingsNameInp.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          void saveSettingsPanel();
-        }
+      settingsNameInp.addEventListener("input", () => {
+        const initials = root.querySelector(".mf-settings-avatar-initials");
+        if (initials) initials.textContent = avatarFallbackLetter(settingsNameInp.value || "You");
       });
+      settingsNameInp.addEventListener("change", () => void applyDisplayNameSetting());
     }
-
-    const pickAvatarBtn = root.querySelector('[data-action="pick-avatar"]');
+    const companyInp = root.querySelector(".mf-settings-company-name");
+    if (companyInp) {
+      companyInp.addEventListener("change", () =>
+        void saveSettingSync(SYNC_SETTINGS_KEYS.companyName, companyInp.value.trim())
+      );
+    }
+    const pickAvatarBtn = root.querySelector('[data-action="upload-logo"]');
     const avatarFileInp = root.querySelector(".mf-settings-avatar-file");
-    const clearAvatarBtn = root.querySelector('[data-action="clear-avatar"]');
     if (pickAvatarBtn && avatarFileInp) {
       pickAvatarBtn.addEventListener("click", () => avatarFileInp.click());
       avatarFileInp.addEventListener("change", () => {
@@ -4337,52 +4526,122 @@
         if (!f) return;
         compressAvatarFile(f)
           .then((dataUrl) => {
-            settingsAvatarPendingDataUrl = dataUrl;
-            settingsAvatarExplicitClear = false;
-            const nameInp = root.querySelector(".mf-settings-display-name");
-            const email = state.cloudUser?.email?.trim() || "";
-            const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
-            applySettingsAvatarPreview(dataUrl, previewLabel);
-            const urlInp = root.querySelector(".mf-settings-avatar-url");
-            if (urlInp) urlInp.value = "";
+            return saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, dataUrl);
           })
+          .then(() => showToast("Logo saved."))
           .catch((err) => showToast(err.message || "Could not use that image."));
         avatarFileInp.value = "";
       });
     }
-    if (clearAvatarBtn) {
-      clearAvatarBtn.addEventListener("click", () => {
-        settingsAvatarExplicitClear = true;
-        settingsAvatarPendingDataUrl = null;
-        const urlInp = root.querySelector(".mf-settings-avatar-url");
-        if (urlInp) urlInp.value = "";
-        const nameInp = root.querySelector(".mf-settings-display-name");
-        const email = state.cloudUser?.email?.trim() || "";
-        const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
-        applySettingsAvatarPreview(null, previewLabel);
+
+    root.querySelectorAll(".mf-settings-dropdown-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const parent = btn.closest(".mf-settings-dropdown");
+        if (!parent) return;
+        const opening = !parent.classList.contains("mf-open");
+        root.querySelectorAll(".mf-settings-dropdown.mf-open").forEach((el) => {
+          if (el !== parent) el.classList.remove("mf-open");
+        });
+        parent.classList.toggle("mf-open", opening);
+      });
+    });
+    root.querySelectorAll(".mf-settings-dropdown-menu button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        void handleSettingsDropdownPick(btn);
+      });
+    });
+
+    const autoPauseToggle = root.querySelector(".mf-settings-auto-pause-comments");
+    if (autoPauseToggle) {
+      autoPauseToggle.addEventListener("change", () => {
+        void Promise.all([
+          saveSettingSync(SYNC_SETTINGS_KEYS.autoPause, !!autoPauseToggle.checked),
+          chrome.storage.local.set({ [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseToggle.checked }),
+        ]);
+        applyAutoPauseCommentTypingPref(autoPauseToggle.checked);
       });
     }
-    const avatarUrlInp = root.querySelector(".mf-settings-avatar-url");
-    if (avatarUrlInp) {
-      avatarUrlInp.addEventListener("input", () => {
-        settingsAvatarExplicitClear = false;
-        settingsAvatarPendingDataUrl = null;
-        const u = avatarUrlInp.value.trim();
-        const nameInp = root.querySelector(".mf-settings-display-name");
-        const email = state.cloudUser?.email?.trim() || "";
-        const previewLabel = (nameInp && nameInp.value.trim()) || email || "You";
-        if (u.startsWith("https://")) {
-          applySettingsAvatarPreview(u, previewLabel);
-        } else if (!u) {
-          void loadStoredAvatar().then((s) => {
-            const nm = root.querySelector(".mf-settings-display-name");
-            const em = state.cloudUser?.email?.trim() || "";
-            const pl = (nm && nm.value.trim()) || em || "You";
-            applySettingsAvatarPreview(s || null, pl);
-          });
-        } else {
-          applySettingsAvatarPreview(null, previewLabel);
+    const floatToggle = root.querySelector(".mf-settings-float-panel");
+    if (floatToggle) {
+      floatToggle.addEventListener("change", () => {
+        void saveSettingSync(SYNC_SETTINGS_KEYS.floatPanel, !!floatToggle.checked);
+        applyFloatPanelPref(floatToggle.checked);
+      });
+    }
+    const notifyComment = root.querySelector(".mf-settings-notify-comment");
+    if (notifyComment) {
+      notifyComment.addEventListener("change", () => {
+        if (!isProUser()) return;
+        void saveSettingSync(SYNC_SETTINGS_KEYS.notifyOnComment, !!notifyComment.checked);
+      });
+    }
+    const notifyReply = root.querySelector(".mf-settings-notify-reply");
+    if (notifyReply) {
+      notifyReply.addEventListener("change", () => {
+        if (!isProUser()) return;
+        void saveSettingSync(SYNC_SETTINGS_KEYS.notifyOnReply, !!notifyReply.checked);
+      });
+    }
+
+    const changeEmailBtn = root.querySelector('[data-action="change-email"]');
+    const changeEmailModal = root.querySelector(".mf-settings-email-modal");
+    const changeEmailInput = root.querySelector(".mf-settings-email-input");
+    const cancelChangeEmailBtn = root.querySelector('[data-action="cancel-change-email"]');
+    const submitChangeEmailBtn = root.querySelector('[data-action="submit-change-email"]');
+    if (changeEmailBtn) {
+      changeEmailBtn.addEventListener("click", () => {
+        if (!changeEmailModal) return;
+        changeEmailModal.classList.remove("mf-hidden");
+        changeEmailModal.setAttribute("aria-hidden", "false");
+        if (changeEmailInput) changeEmailInput.value = "";
+        if (changeEmailInput) requestAnimationFrame(() => changeEmailInput.focus());
+      });
+    }
+    if (cancelChangeEmailBtn && changeEmailModal) {
+      cancelChangeEmailBtn.addEventListener("click", () => {
+        changeEmailModal.classList.add("mf-hidden");
+        changeEmailModal.setAttribute("aria-hidden", "true");
+      });
+    }
+    if (submitChangeEmailBtn && changeEmailModal && changeEmailInput) {
+      submitChangeEmailBtn.addEventListener("click", async () => {
+        const email = changeEmailInput.value.trim();
+        if (!email) return;
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_CHANGE_EMAIL", email });
+        showToast(r?.ok ? "Check your email to confirm the change." : (r?.error || "Could not change email."));
+        if (r?.ok) {
+          changeEmailModal.classList.add("mf-hidden");
+          changeEmailModal.setAttribute("aria-hidden", "true");
         }
+      });
+    }
+    const resetPasswordBtn = root.querySelector('[data-action="reset-password"]');
+    if (resetPasswordBtn) {
+      resetPasswordBtn.addEventListener("click", async () => {
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_RESET_PASSWORD" });
+        showToast(r?.ok ? "Password reset email sent." : (r?.error || "Could not send reset email."));
+      });
+    }
+    const deleteAccountBtn = root.querySelector('[data-action="delete-account"]');
+    if (deleteAccountBtn) {
+      deleteAccountBtn.addEventListener("click", async () => {
+        if (!window.confirm("Delete your account and cloud data? This cannot be undone.")) return;
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_DELETE_USER" });
+        showToast(r?.ok ? "Account deleted." : (r?.error || "Could not delete account."));
+        if (r?.ok) void tick();
+      });
+    }
+    const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
+    if (upgradeBtn) {
+      upgradeBtn.addEventListener("click", () => window.open("https://notch.video/pricing", "_blank", "noopener"));
+    }
+    const manageBillingBtn = root.querySelector('[data-action="manage-billing"]');
+    if (manageBillingBtn) {
+      manageBillingBtn.addEventListener("click", async () => {
+        const s = await loadSyncSettings();
+        const url = s.billingPortalUrl || "https://notch.video/billing";
+        window.open(url, "_blank", "noopener");
       });
     }
 
@@ -4435,6 +4694,7 @@
           cloudAuthCacheValidUntil = 0;
           lastTickSignature = "";
           await refreshCloudUser(true);
+          closeSettingsPanel();
           showToast("Signed out.");
           void tick();
         } catch (e) {
@@ -5698,37 +5958,50 @@
   }
 
   function storageOnChanged(changes, area) {
-    if (area !== "local") return;
-    if (changes[STORAGE_KEYS.sidebarVisible]) {
-      applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
+    if (area === "local") {
+      if (changes[STORAGE_KEYS.sidebarVisible]) {
+        applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
+      }
+      if (changes[STORAGE_KEYS.panelCorner]) {
+        applyPanelCorner(changes[STORAGE_KEYS.panelCorner].newValue);
+      }
+      if (changes[STORAGE_KEYS.autoPauseCommentTyping]) {
+        applyAutoPauseCommentTypingPref(changes[STORAGE_KEYS.autoPauseCommentTyping].newValue);
+      }
+      if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
+        void refreshAuthorPresentationCache()
+          .then(() => {
+            if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+          })
+          .catch(() => {});
+      }
+      if (
+        changes[STORAGE_KEYS.authState] ||
+        changes[SUPABASE_AUTH_STORAGE_KEY] ||
+        changes[SUPABASE_AUTH_STORAGE_KEY + "-user"]
+      ) {
+        cloudAuthCacheValidUntil = 0;
+        lastTickSignature = "";
+        void refreshCloudUser(true).then(() => void tick());
+      }
+      const touched = Object.keys(changes).some(
+        (k) => k.startsWith(STORAGE_KEYS.clipPrefix) || k.startsWith(STORAGE_KEYS.dataPrefix)
+      );
+      if (touched && root && root.dataset.mfView === "dashboard" && root.dataset.mfLocked !== "1") {
+        renderDashboard();
+      }
+      return;
     }
-    if (changes[STORAGE_KEYS.panelCorner]) {
-      applyPanelCorner(changes[STORAGE_KEYS.panelCorner].newValue);
-    }
-    if (changes[STORAGE_KEYS.autoPauseCommentTyping]) {
-      applyAutoPauseCommentTypingPref(changes[STORAGE_KEYS.autoPauseCommentTyping].newValue);
-    }
-    if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
-      void refreshAuthorPresentationCache()
-        .then(() => {
-          if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
-        })
-        .catch(() => {});
-    }
-    if (
-      changes[STORAGE_KEYS.authState] ||
-      changes[SUPABASE_AUTH_STORAGE_KEY] ||
-      changes[SUPABASE_AUTH_STORAGE_KEY + "-user"]
-    ) {
-      cloudAuthCacheValidUntil = 0;
-      lastTickSignature = "";
-      void refreshCloudUser(true).then(() => void tick());
-    }
-    const touched = Object.keys(changes).some(
-      (k) => k.startsWith(STORAGE_KEYS.clipPrefix) || k.startsWith(STORAGE_KEYS.dataPrefix)
-    );
-    if (touched && root && root.dataset.mfView === "dashboard" && root.dataset.mfLocked !== "1") {
-      renderDashboard();
+    if (area === "sync") {
+      if (changes[SYNC_SETTINGS_KEYS.panelPosition]) {
+        applyPanelCorner(changes[SYNC_SETTINGS_KEYS.panelPosition].newValue);
+      }
+      if (changes[SYNC_SETTINGS_KEYS.autoPause]) {
+        applyAutoPauseCommentTypingPref(changes[SYNC_SETTINGS_KEYS.autoPause].newValue);
+      }
+      if (changes[SYNC_SETTINGS_KEYS.floatPanel]) {
+        applyFloatPanelPref(changes[SYNC_SETTINGS_KEYS.floatPanel].newValue);
+      }
     }
   }
 

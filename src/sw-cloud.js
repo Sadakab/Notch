@@ -546,9 +546,12 @@ export function handleRuntimeMessage(msg, sendResponse) {
         return;
       }
       const u = session?.user;
+      const rawPlan =
+        u?.app_metadata?.plan || u?.user_metadata?.plan || u?.app_metadata?.tier || u?.user_metadata?.tier;
+      const plan = String(rawPlan || "").trim().toLowerCase() === "pro" ? "pro" : "free";
       sendResponse({
         configured: true,
-        user: u ? { id: u.id, email: u.email } : null,
+        user: u ? { id: u.id, email: u.email, plan } : null,
       });
     });
     return true;
@@ -564,6 +567,82 @@ export function handleRuntimeMessage(msg, sendResponse) {
       invalidateSupabaseClient();
       await syncAuthMarkerFromChromeStorage();
       sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_CHANGE_EMAIL") {
+    const client = getSupabase();
+    const email = String(msg.email || "").trim();
+    if (!client || !email) {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    void client.auth.updateUser({ email }).then(({ error }) => {
+      if (error) {
+        sendResponse({ ok: false, error: error.message || "Could not change email." });
+        return;
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_RESET_PASSWORD") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured" });
+      return false;
+    }
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      const email = session?.user?.email ? String(session.user.email).trim() : "";
+      if (sessErr || !email) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      const { error } = await client.auth.resetPasswordForEmail(email);
+      if (error) {
+        sendResponse({ ok: false, error: error.message || "Could not send reset email." });
+        return;
+      }
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_DELETE_USER") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured" });
+      return false;
+    }
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      const accessToken = session?.access_token ? String(session.access_token) : "";
+      if (sessErr || !accessToken) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      try {
+        const resp = await fetch(String(SUPABASE_URL).replace(/\/+$/, "") + "/auth/v1/user", {
+          method: "DELETE",
+          headers: {
+            apikey: SUPABASE_ANON_KEY,
+            Authorization: "Bearer " + accessToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ should_soft_delete: false }),
+        });
+        if (!resp.ok) {
+          sendResponse({ ok: false, error: "Delete account failed." });
+          return;
+        }
+        await client.auth.signOut();
+        invalidateSupabaseClient();
+        await syncAuthMarkerFromChromeStorage();
+        sendResponse({ ok: true });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      }
     });
     return true;
   }
