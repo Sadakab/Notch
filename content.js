@@ -315,6 +315,7 @@
     const now = Date.now();
     if (!force && now < cloudAuthCacheValidUntil) {
       state.cloudUser = cloudAuthCachedUser;
+      refreshProGatedToolbar();
       return;
     }
     try {
@@ -323,23 +324,24 @@
         cloudAuthCachedUser = null;
         state.cloudUser = null;
         cloudAuthCacheValidUntil = 0;
-        return;
+      } else {
+        cloudAuthCachedUser =
+          r.user && (r.user.email || r.user.id)
+            ? {
+                email: r.user.email || "",
+                id: r.user.id || "",
+                plan: String(r.user.plan || "").trim().toLowerCase() === "pro" ? "pro" : "free",
+              }
+            : null;
+        state.cloudUser = cloudAuthCachedUser;
+        cloudAuthCacheValidUntil = now + 45_000;
       }
-      cloudAuthCachedUser =
-        r.user && (r.user.email || r.user.id)
-          ? {
-              email: r.user.email || "",
-              id: r.user.id || "",
-              plan: String(r.user.plan || "").trim().toLowerCase() === "pro" ? "pro" : "free",
-            }
-          : null;
-      state.cloudUser = cloudAuthCachedUser;
-      cloudAuthCacheValidUntil = now + 45_000;
     } catch {
       cloudAuthCachedUser = null;
       state.cloudUser = null;
       cloudAuthCacheValidUntil = 0;
     }
+    refreshProGatedToolbar();
   }
 
   async function getSupabaseConfigured() {
@@ -2225,9 +2227,7 @@
     const pro = isProUser();
     if (notifyComment) notifyComment.checked = pro ? !!s.notifyOnComment : false;
     if (notifyReply) notifyReply.checked = pro ? !!s.notifyOnReply : false;
-    root.querySelectorAll(".mf-settings-pro-disabled").forEach((el) => {
-      el.classList.toggle("mf-settings-disabled", !pro);
-    });
+    refreshProGatedToolbar();
     const avSrc = await loadStoredAvatar();
     applySettingsAvatarPreview(avSrc, inp.value.trim() || email || "You");
     const accountEmail = root.querySelector(".mf-settings-account-email");
@@ -2368,6 +2368,21 @@
   function isProUser() {
     const plan = String(state.cloudUser?.plan || "").trim().toLowerCase();
     return plan === "pro";
+  }
+
+  function applyProOnlyUi() {
+    if (!root) return;
+    const pro = isProUser();
+    root.querySelectorAll(".mf-settings-pro-disabled").forEach((el) => {
+      el.classList.toggle("mf-settings-disabled", !pro);
+    });
+  }
+
+  function refreshProGatedToolbar() {
+    if (!root) return;
+    applyProOnlyUi();
+    updateCopyReviewLinkButtonState();
+    updateExportPdfButtonState();
   }
 
   async function loadSyncSettings() {
@@ -3757,13 +3772,32 @@
     const copyBtn = root.querySelector('[data-action="copy-link"]');
     if (!copyBtn) return;
     const hasComments = Array.isArray(state.comments) && state.comments.length > 0;
-    copyBtn.disabled = !hasComments;
-    copyBtn.title = hasComments ? "Copy review link" : "Needs at least 1 comment first";
+    const pro = isProUser();
+    if (pro) {
+      copyBtn.disabled = !hasComments;
+      copyBtn.title = hasComments ? "Copy review link" : "Needs at least 1 comment first";
+    } else {
+      copyBtn.disabled = false;
+      copyBtn.title =
+        "Pro — Copy a shareable link to this review on notch.video. Upgrade to unlock.";
+    }
+  }
+
+  function updateExportPdfButtonState() {
+    if (!root) return;
+    const btn = root.querySelector('[data-action="export-pdf"]');
+    if (!btn) return;
+    const pro = isProUser();
+    const baseLabel = "Export PDF";
+    btn.title = pro
+      ? baseLabel
+      : "Pro — Download a PDF report with comments and video frames. Upgrade to unlock.";
+    btn.setAttribute("aria-label", pro ? baseLabel : "Export PDF (Pro only — upgrade to unlock)");
   }
 
   function renderThread() {
     if (!root) return;
-    updateCopyReviewLinkButtonState();
+    refreshProGatedToolbar();
     const thread = root.querySelector(".mf-thread");
     if (!thread) return;
     thread.innerHTML = "";
@@ -3910,55 +3944,42 @@
               <input type="color" class="mf-color" data-action="color" value="#00E5FF" aria-label="Stroke color" />
               <button type="button" class="mf-btn mf-btn-primary" data-action="save-draw">Save drawing</button>
             </div>
-            <button type="button" class="mf-btn" data-action="copy-link">Copy review link</button>
-            <button type="button" class="mf-btn mf-export-pdf-btn" data-action="export-pdf" title="Export PDF" aria-label="Export PDF">
+            <button type="button" class="mf-btn mf-toolbar-copy-link-btn mf-settings-pro-disabled mf-pro-gate-toolbar-btn" data-action="copy-link"><span class="mf-toolbar-copy-link-label">Copy review link</span><span class="mf-pro-badge">Pro</span></button>
+            <button type="button" class="mf-btn mf-export-pdf-btn mf-settings-pro-disabled mf-pro-gate-toolbar-btn" data-action="export-pdf" title="Export PDF" aria-label="Export PDF">
               <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-file-down" aria-hidden="true">
                 <path d="M14 2v4a2 2 0 0 0 2 2h4" />
                 <path d="M12 18v-6" />
                 <path d="m9 15 3 3 3-3" />
                 <path d="M4 12V4a2 2 0 0 1 2-2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2" />
               </svg>
+              <span class="mf-pro-badge">Pro</span>
             </button>
-            <div class="mf-screengrab-wrap">
-              <button
-                type="button"
-                class="mf-btn mf-screengrab-hover-label"
-                title="Screengrab — hover for download or copy"
-                aria-label="Screengrab"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-camera" aria-hidden="true">
-                  <path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z" />
-                  <circle cx="12" cy="13" r="3" />
-                </svg>
-              </button>
-              <div class="mf-screengrab-flyout" role="group" aria-label="Screengrab options">
-                <button
-                  type="button"
-                  class="mf-btn mf-screengrab-flyout-btn"
-                  data-action="screengrab-download"
-                  title="Download PNG"
-                  aria-label="Download PNG"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-download" aria-hidden="true">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" x2="12" y1="15" y2="3" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  class="mf-btn mf-screengrab-flyout-btn"
-                  data-action="screengrab-copy"
-                  title="Copy image to clipboard"
-                  aria-label="Copy image to clipboard"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-clipboard" aria-hidden="true">
-                    <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
-                    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
-                  </svg>
-                </button>
-              </div>
-            </div>
+            <button
+              type="button"
+              class="mf-btn mf-screengrab-download-btn"
+              data-action="screengrab-download"
+              title="Download screengrab (PNG)"
+              aria-label="Download screengrab"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-image-down" aria-hidden="true">
+                <path d="M10.3 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v10l-3.1-3.1a2 2 0 0 0-2.814.014L6 21" />
+                <path d="m14 19 3 3v-5.5" />
+                <path d="m17 22 3-3" />
+                <circle cx="9" cy="9" r="2" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              class="mf-btn mf-screengrab-copy-btn"
+              data-action="screengrab-copy"
+              title="Copy screengrab to clipboard"
+              aria-label="Copy screengrab to clipboard"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-clipboard" aria-hidden="true">
+                <rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+              </svg>
+            </button>
           </div>
           <div class="mf-thread"></div>
           <div class="mf-footer">
@@ -4265,77 +4286,6 @@
     appendSection("Shared with me", shared, true);
   }
 
-  function wireScreengrabFlyoutPortal(root) {
-    const wrap = root.querySelector(".mf-screengrab-wrap");
-    const trigger = root.querySelector(".mf-screengrab-hover-label");
-    const flyout = root.querySelector(".mf-screengrab-flyout");
-    if (!wrap || !trigger || !flyout) return;
-
-    document.body.appendChild(flyout);
-    flyout.classList.add("mf-screengrab-flyout--portaled");
-
-    let hideTimer = null;
-    const gapPx = 6;
-    const hideDelayMs = 140;
-
-    function positionFlyout() {
-      const r = trigger.getBoundingClientRect();
-      const top = Math.round(r.bottom + gapPx);
-      const left = Math.round(r.left);
-      const minW = Math.round(r.width);
-      flyout.style.top = `${top}px`;
-      flyout.style.left = `${left}px`;
-      flyout.style.minWidth = `${minW}px`;
-      requestAnimationFrame(() => {
-        const fr = flyout.getBoundingClientRect();
-        const vw = window.innerWidth;
-        const pad = 8;
-        let adjLeft = left;
-        if (fr.right > vw - pad) adjLeft = Math.max(pad, Math.round(vw - fr.width - pad));
-        if (adjLeft < pad) adjLeft = pad;
-        if (adjLeft !== left) flyout.style.left = `${adjLeft}px`;
-      });
-    }
-
-    function openFlyout() {
-      if (hideTimer) {
-        clearTimeout(hideTimer);
-        hideTimer = null;
-      }
-      flyout.classList.add("mf-screengrab-flyout-open");
-      positionFlyout();
-    }
-
-    function closeFlyout() {
-      flyout.classList.remove("mf-screengrab-flyout-open");
-    }
-
-    function scheduleClose() {
-      if (hideTimer) clearTimeout(hideTimer);
-      hideTimer = setTimeout(() => {
-        closeFlyout();
-        hideTimer = null;
-      }, hideDelayMs);
-    }
-
-    wrap.addEventListener("mouseenter", openFlyout);
-    flyout.addEventListener("mouseenter", () => {
-      if (hideTimer) {
-        clearTimeout(hideTimer);
-        hideTimer = null;
-      }
-    });
-    wrap.addEventListener("mouseleave", scheduleClose);
-    flyout.addEventListener("mouseleave", scheduleClose);
-
-    function onScrollOrResize() {
-      if (!flyout.classList.contains("mf-screengrab-flyout-open")) return;
-      positionFlyout();
-    }
-    window.addEventListener("resize", onScrollOrResize);
-    window.addEventListener("scroll", onScrollOrResize, true);
-  }
-
   function wireSidebar() {
     root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
       state.dashboardForced = true;
@@ -4588,7 +4538,6 @@
     root.querySelector('[data-action="screengrab-copy"]').addEventListener("click", () => {
       void copyCurrentVideoFrameToClipboard();
     });
-    wireScreengrabFlyoutPortal(root);
 
     const commentInp = root.querySelector(".mf-comment-input");
     commentInp.addEventListener("focus", () => {
@@ -5059,6 +5008,10 @@
   }
 
   async function generateCommentsPdf() {
+    if (!isProUser()) {
+      showToast("Upgrade to Pro to export PDF reports.");
+      return;
+    }
     const clip = resolveClipContext();
     if (!clip) {
       showToast("No video context.");
@@ -5406,16 +5359,13 @@
   /**
    * Tab screenshots are composited: anything painted over the crop rect (other extensions, OS UI in
    * practice not included) appears in the grab. True decoded frame-only pixels require drawing from an
-   * HTMLVideoElement when the browser allows it. Here we only unpaint layers this extension injects so
-   * Notch itself does not occlude Drive's player for the few frames we capture.
+   * HTMLVideoElement when the browser allows it. Here we hide the Notch panel briefly so it does not
+   * occlude Drive's player for the few frames we capture.
    */
   async function suppressExtensionUIPaintDuringCapture(asyncWork) {
     const nodes = [];
     const markFrame = document.getElementById("markframe-root");
     if (markFrame?.isConnected) nodes.push(markFrame);
-    document.body?.querySelectorAll(".mf-screengrab-flyout.mf-screengrab-flyout--portaled").forEach((n) => {
-      if (n.isConnected) nodes.push(n);
-    });
     for (const n of nodes) {
       n.style.setProperty("visibility", "hidden", "important");
     }
@@ -5562,6 +5512,10 @@
   }
 
   async function copyReviewLink() {
+    if (!isProUser()) {
+      showToast("Upgrade to Pro to copy review links.");
+      return;
+    }
     const clip = resolveClipContext();
     if (!clip) return;
     if (!isCloudActive()) {
@@ -5581,6 +5535,7 @@
       if (!r?.ok || !r.userId || !r.platform || r.clipId == null || String(r.clipId) === "") {
         const err = r?.error || "";
         if (err === "not_authenticated") showToast("Sign in to copy a review link.");
+        else if (err === "pro_required") showToast("Upgrade to Pro to copy review links.");
         else showToast("Could not prepare review link.");
         return;
       }

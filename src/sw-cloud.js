@@ -23,6 +23,16 @@ function notchSwLog(msg, detail) {
   }
 }
 
+function planFromSupabaseUser(u) {
+  if (!u) return "free";
+  const raw =
+    u.app_metadata?.plan ||
+    u.user_metadata?.plan ||
+    u.app_metadata?.tier ||
+    u.user_metadata?.tier;
+  return String(raw || "").trim().toLowerCase() === "pro" ? "pro" : "free";
+}
+
 function dropboxHostnameOk(h) {
   return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
 }
@@ -589,9 +599,7 @@ export function handleRuntimeMessage(msg, sendResponse) {
         return;
       }
       const u = session?.user;
-      const rawPlan =
-        u?.app_metadata?.plan || u?.user_metadata?.plan || u?.app_metadata?.tier || u?.user_metadata?.tier;
-      const plan = String(rawPlan || "").trim().toLowerCase() === "pro" ? "pro" : "free";
+      const plan = planFromSupabaseUser(u);
       sendResponse({
         configured: true,
         user: u ? { id: u.id, email: u.email, plan } : null,
@@ -1050,6 +1058,10 @@ export function handleRuntimeMessage(msg, sendResponse) {
       const user = session?.user;
       if (sessErr || !user?.id) {
         sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      if (planFromSupabaseUser(user) !== "pro") {
+        sendResponse({ ok: false, error: "pro_required" });
         return;
       }
       const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
