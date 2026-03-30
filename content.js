@@ -2381,6 +2381,7 @@
   function refreshProGatedToolbar() {
     if (!root) return;
     applyProOnlyUi();
+    root.classList.toggle("mf-user-pro", isProUser());
     updateCopyReviewLinkButtonState();
     updateExportPdfButtonState();
   }
@@ -3787,12 +3788,19 @@
     if (!root) return;
     const btn = root.querySelector('[data-action="export-pdf"]');
     if (!btn) return;
+    const hasComments = Array.isArray(state.comments) && state.comments.length > 0;
     const pro = isProUser();
     const baseLabel = "Export PDF";
-    btn.title = pro
-      ? baseLabel
-      : "Pro — Download a PDF report with comments and video frames. Upgrade to unlock.";
-    btn.setAttribute("aria-label", pro ? baseLabel : "Export PDF (Pro only — upgrade to unlock)");
+    if (pro) {
+      btn.disabled = !hasComments;
+      btn.title = hasComments ? baseLabel : "Needs at least 1 comment first";
+      btn.setAttribute("aria-label", hasComments ? baseLabel : "Export PDF — needs at least 1 comment first");
+    } else {
+      btn.disabled = false;
+      btn.title =
+        "Pro — Download a PDF report with comments and video frames. Upgrade to unlock.";
+      btn.setAttribute("aria-label", "Export PDF (Pro only — upgrade to unlock)");
+    }
   }
 
   function renderThread() {
@@ -4528,9 +4536,13 @@
         copyReviewLink();
       });
     }
-    root.querySelector('[data-action="export-pdf"]').addEventListener("click", () => {
-      void generateCommentsPdf();
-    });
+    const exportPdfBtn = root.querySelector('[data-action="export-pdf"]');
+    if (exportPdfBtn) {
+      exportPdfBtn.addEventListener("click", () => {
+        if (exportPdfBtn.disabled) return;
+        void generateCommentsPdf();
+      });
+    }
 
     root.querySelector('[data-action="screengrab-download"]').addEventListener("click", () => {
       void downloadCurrentVideoFrame();
@@ -5316,7 +5328,7 @@
           void media.play();
         } catch (_) {}
       }
-      if (exportBtn) exportBtn.disabled = false;
+      updateExportPdfButtonState();
     }
   }
 

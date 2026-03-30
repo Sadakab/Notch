@@ -603,6 +603,10 @@
   flex-shrink: 0;
   opacity: 1;
 }
+/* Pro subscribers already see plan in settings; hide upsell tags on features. */
+#markframe-root.mf-user-pro .mf-pro-badge {
+  display: none !important;
+}
 #markframe-root .mf-settings-account-email {
   color: rgba(255, 255, 255, 0.45);
   margin-bottom: 8px;
