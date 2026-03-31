@@ -3,7 +3,11 @@ import { isClientSafeSupabaseKey } from "./supabase-client-key.js";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./supabase-config.js";
 
 const AUTH_STORAGE_KEY = "sb-notch-auth";
-const AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
+const AUTH_CONFIRM_URL =
+  window.location.hostname === "localhost"
+    ? "http://localhost:3000/auth/confirm.html"
+    : "https://notch.video/auth/confirm.html";
+const MAGIC_LINK_COOLDOWN_SECONDS = 60;
 
 function createChromeStorageAdapter() {
   return {
@@ -33,6 +37,8 @@ function main() {
   const magicLinkBtn = document.getElementById("nf-send-magic-link");
   const signOutBtn = document.getElementById("nf-sign-out");
   const configWarn = document.getElementById("nf-config-warn");
+  let magicLinkCooldownUntil = 0;
+  let magicLinkCooldownTimer = null;
 
   if (!SUPABASE_ANON_KEY || !SUPABASE_URL || !isClientSafeSupabaseKey(SUPABASE_ANON_KEY)) {
     configWarn.hidden = false;
@@ -57,7 +63,35 @@ function main() {
   function setSignedOutBusy(busy) {
     emailEl.disabled = !!busy;
     googleBtn.disabled = !!busy;
-    magicLinkBtn.disabled = !!busy;
+    magicLinkBtn.disabled = !!busy || magicLinkCooldownUntil > Date.now();
+  }
+
+  function clearMagicLinkCooldownTimer() {
+    if (magicLinkCooldownTimer) {
+      window.clearInterval(magicLinkCooldownTimer);
+      magicLinkCooldownTimer = null;
+    }
+  }
+
+  function updateMagicLinkButtonLabel() {
+    const remainingMs = magicLinkCooldownUntil - Date.now();
+    if (remainingMs <= 0) {
+      magicLinkBtn.textContent = "Send magic link";
+      magicLinkBtn.disabled = false;
+      clearMagicLinkCooldownTimer();
+      return;
+    }
+
+    const remainingSeconds = Math.ceil(remainingMs / 1000);
+    magicLinkBtn.textContent = `Send magic link (${remainingSeconds}s)`;
+    magicLinkBtn.disabled = true;
+  }
+
+  function startMagicLinkCooldown() {
+    magicLinkCooldownUntil = Date.now() + MAGIC_LINK_COOLDOWN_SECONDS * 1000;
+    updateMagicLinkButtonLabel();
+    clearMagicLinkCooldownTimer();
+    magicLinkCooldownTimer = window.setInterval(updateMagicLinkButtonLabel, 1000);
   }
 
   async function refreshUi() {
@@ -68,7 +102,7 @@ function main() {
     if (signedOutWrap) signedOutWrap.hidden = signedIn;
     emailEl.disabled = signedIn;
     googleBtn.disabled = signedIn;
-    magicLinkBtn.disabled = signedIn;
+    magicLinkBtn.disabled = signedIn || magicLinkCooldownUntil > Date.now();
     signOutBtn.hidden = !signedIn;
     if (signedIn) {
       showStatus(statusEl, "Signed in as " + (session.user.email || "user") + ". You can close this tab.", "ok");
@@ -113,6 +147,7 @@ function main() {
     const { error } = await supabase.auth.signInWithOtp({
       email,
       options: {
+        shouldCreateUser: true,
         emailRedirectTo: AUTH_CONFIRM_URL,
       },
     });
@@ -122,6 +157,7 @@ function main() {
       return;
     }
     showStatus(statusEl, "Check your email for a login link", "ok");
+    startMagicLinkCooldown();
     setSignedOutBusy(false);
   });
 

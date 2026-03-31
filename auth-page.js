@@ -17409,7 +17409,8 @@ ${suffix}`;
       init_supabase_client_key();
       init_supabase_config();
       var AUTH_STORAGE_KEY = "sb-notch-auth";
-      var AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
+      var AUTH_CONFIRM_URL = window.location.hostname === "localhost" ? "http://localhost:3000/auth/confirm.html" : "https://notch.video/auth/confirm.html";
+      var MAGIC_LINK_COOLDOWN_SECONDS = 60;
       function createChromeStorageAdapter() {
         return {
           getItem: async (key) => {
@@ -17436,6 +17437,8 @@ ${suffix}`;
         const magicLinkBtn = document.getElementById("nf-send-magic-link");
         const signOutBtn = document.getElementById("nf-sign-out");
         const configWarn = document.getElementById("nf-config-warn");
+        let magicLinkCooldownUntil = 0;
+        let magicLinkCooldownTimer = null;
         if (!SUPABASE_ANON_KEY || !SUPABASE_URL || !isClientSafeSupabaseKey(SUPABASE_ANON_KEY)) {
           configWarn.hidden = false;
           showStatus(
@@ -17457,7 +17460,31 @@ ${suffix}`;
         function setSignedOutBusy(busy) {
           emailEl.disabled = !!busy;
           googleBtn.disabled = !!busy;
-          magicLinkBtn.disabled = !!busy;
+          magicLinkBtn.disabled = !!busy || magicLinkCooldownUntil > Date.now();
+        }
+        function clearMagicLinkCooldownTimer() {
+          if (magicLinkCooldownTimer) {
+            window.clearInterval(magicLinkCooldownTimer);
+            magicLinkCooldownTimer = null;
+          }
+        }
+        function updateMagicLinkButtonLabel() {
+          const remainingMs = magicLinkCooldownUntil - Date.now();
+          if (remainingMs <= 0) {
+            magicLinkBtn.textContent = "Send magic link";
+            magicLinkBtn.disabled = false;
+            clearMagicLinkCooldownTimer();
+            return;
+          }
+          const remainingSeconds = Math.ceil(remainingMs / 1e3);
+          magicLinkBtn.textContent = `Send magic link (${remainingSeconds}s)`;
+          magicLinkBtn.disabled = true;
+        }
+        function startMagicLinkCooldown() {
+          magicLinkCooldownUntil = Date.now() + MAGIC_LINK_COOLDOWN_SECONDS * 1e3;
+          updateMagicLinkButtonLabel();
+          clearMagicLinkCooldownTimer();
+          magicLinkCooldownTimer = window.setInterval(updateMagicLinkButtonLabel, 1e3);
         }
         async function refreshUi() {
           const {
@@ -17467,7 +17494,7 @@ ${suffix}`;
           if (signedOutWrap) signedOutWrap.hidden = signedIn;
           emailEl.disabled = signedIn;
           googleBtn.disabled = signedIn;
-          magicLinkBtn.disabled = signedIn;
+          magicLinkBtn.disabled = signedIn || magicLinkCooldownUntil > Date.now();
           signOutBtn.hidden = !signedIn;
           if (signedIn) {
             showStatus(statusEl, "Signed in as " + (session.user.email || "user") + ". You can close this tab.", "ok");
@@ -17510,6 +17537,7 @@ ${suffix}`;
           const { error } = await supabase.auth.signInWithOtp({
             email,
             options: {
+              shouldCreateUser: true,
               emailRedirectTo: AUTH_CONFIRM_URL
             }
           });
@@ -17519,6 +17547,7 @@ ${suffix}`;
             return;
           }
           showStatus(statusEl, "Check your email for a login link", "ok");
+          startMagicLinkCooldown();
           setSignedOutBusy(false);
         });
         signOutBtn.addEventListener("click", async () => {
