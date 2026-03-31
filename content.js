@@ -242,6 +242,8 @@
   let settingsAvatarExplicitClear = false;
   let settingsMenuOpenKey = "";
   let panelDragState = null;
+  let proUpgradePollTimer = null;
+  let proUpgradePollDeadline = 0;
   /** Sync cache for renderThread (display name + avatar URL). */
   let cachedEffectiveDisplayName = "";
   let cachedAuthorAvatarUrl = "";
@@ -342,6 +344,87 @@
       cloudAuthCacheValidUntil = 0;
     }
     refreshProGatedToolbar();
+  }
+
+  function setUpgradeStatusMessage(text) {
+    if (!root) return;
+    const panel = root.querySelector(".mf-settings-section .mf-settings-upgrade-status");
+    if (!panel) return;
+    panel.textContent = text || "";
+    panel.classList.toggle("mf-hidden", !text);
+  }
+
+  function stopProUpgradePolling() {
+    if (proUpgradePollTimer) {
+      clearInterval(proUpgradePollTimer);
+      proUpgradePollTimer = null;
+    }
+    proUpgradePollDeadline = 0;
+  }
+
+  async function pollForProUpgradePlan() {
+    stopProUpgradePolling();
+    proUpgradePollDeadline = Date.now() + 2 * 60 * 1000;
+    proUpgradePollTimer = setInterval(async () => {
+      if (Date.now() >= proUpgradePollDeadline) {
+        stopProUpgradePolling();
+        return;
+      }
+      try {
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
+        const plan = String(r?.user?.plan || "").trim().toLowerCase();
+        if (plan !== "pro") return;
+        await refreshCloudUser(true);
+        await hydrateSettingsUi();
+        refreshProGatedToolbar();
+        setUpgradeStatusMessage("");
+        stopProUpgradePolling();
+      } catch {
+        // Keep polling until deadline; transient network/auth failures should not stop upgrade detection.
+      }
+    }, 3000);
+  }
+
+  async function startUpgradeCheckoutFlow() {
+    setUpgradeStatusMessage("");
+    let storageSession = null;
+    try {
+      const authBlob = await chrome.storage.sync.get("sb-notch-auth");
+      const raw = authBlob?.["sb-notch-auth"];
+      if (typeof raw === "string") {
+        storageSession = JSON.parse(raw);
+      } else if (raw && typeof raw === "object") {
+        storageSession = raw;
+      }
+    } catch {
+      storageSession = null;
+    }
+    const userId = String(storageSession?.user?.id || "").trim();
+    const email = String(storageSession?.user?.email || "").trim();
+    if (!userId || !email) {
+      setUpgradeStatusMessage("Please sign in first.");
+      return;
+    }
+    try {
+      const resp = await fetch("https://notch.video/.netlify/functions/create-checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, email }),
+      });
+      if (!resp.ok) {
+        throw new Error(String(resp.status || "checkout_failed"));
+      }
+      const data = await resp.json();
+      const url = String(data?.url || "").trim();
+      if (!url) throw new Error("missing_checkout_url");
+      const opened = await sendExtensionMessage({ type: "MF_OPEN_TAB", url });
+      if (!opened?.ok) {
+        throw new Error(String(opened?.error || "open_tab_failed"));
+      }
+      void pollForProUpgradePlan();
+    } catch {
+      setUpgradeStatusMessage("Something went wrong. Please try again.");
+    }
   }
 
   async function getSupabaseConfigured() {
@@ -2287,6 +2370,7 @@
   async function applyDisplayNameSetting() {
     if (!root) return;
     await refreshCloudUser(false);
+    const previousDisplayName = cachedEffectiveDisplayName || (await effectiveDisplayName());
     const inp = root.querySelector(".mf-settings-display-name");
     if (!inp) return;
     const v = inp.value.trim();
@@ -2298,6 +2382,8 @@
       saveAuthorOverride(override),
     ]);
     await refreshAuthorPresentationCache();
+    await relabelOwnCommentsInActiveClip(previousDisplayName);
+    if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
   }
 
   async function handleSettingsDropdownPick(buttonEl) {
@@ -2522,6 +2608,9 @@
         c.complete = c.reaction === "approve";
       }
       delete c.reaction;
+      const authorId = normalizeAuthorId(c.authorId);
+      if (authorId) c.authorId = authorId;
+      else delete c.authorId;
       const av = normalizeCommentAvatarUrl(c.avatarUrl);
       if (av) c.avatarUrl = av;
       else delete c.avatarUrl;
@@ -2530,6 +2619,78 @@
 
   function normalizeCommentsShape() {
     normalizeCommentListShape(state.comments);
+  }
+
+  function normalizeAuthorId(v) {
+    if (typeof v !== "string") return "";
+    return v.trim();
+  }
+
+  function currentCloudUserId() {
+    return state.cloudUser?.id && String(state.cloudUser.id).trim();
+  }
+
+  function isOwnComment(comment) {
+    const uid = currentCloudUserId();
+    const aid = normalizeAuthorId(comment?.authorId);
+    if (uid && aid && normalizeUuidForCompare(uid) === normalizeUuidForCompare(aid)) return true;
+    const author = String(comment?.author || "").trim();
+    return !!author && author === cachedEffectiveDisplayName;
+  }
+
+  function displayNameForComment(comment) {
+    if (isOwnComment(comment) && cachedEffectiveDisplayName) return cachedEffectiveDisplayName;
+    return comment?.author || "You";
+  }
+
+  function applyOwnIdentityToLoadedComments() {
+    const uid = currentCloudUserId();
+    if (!uid || !Array.isArray(state.comments) || state.comments.length === 0) return;
+    for (const c of state.comments) {
+      if (normalizeAuthorId(c?.authorId)) continue;
+      if (String(c?.author || "").trim() === cachedEffectiveDisplayName) {
+        c.authorId = uid;
+      }
+    }
+  }
+
+  async function relabelOwnCommentsInActiveClip(previousDisplayName) {
+    const prevName = String(previousDisplayName || "").trim();
+    const nextName = String(cachedEffectiveDisplayName || "").trim();
+    const uid = currentCloudUserId();
+    if (!Array.isArray(state.comments) || state.comments.length === 0) return;
+    let changed = false;
+    const nextAvatar = normalizeCommentAvatarUrl(cachedAuthorAvatarUrl);
+    for (const c of state.comments) {
+      const aid = normalizeAuthorId(c?.authorId);
+      const byId =
+        !!uid && !!aid && normalizeUuidForCompare(uid) === normalizeUuidForCompare(aid);
+      const byPrevName = !aid && !!prevName && String(c?.author || "").trim() === prevName;
+      if (!byId && !byPrevName) continue;
+      if (uid && aid !== uid) {
+        c.authorId = uid;
+        changed = true;
+      }
+      if (nextName && c.author !== nextName) {
+        c.author = nextName;
+        changed = true;
+      }
+      if (nextAvatar) {
+        if (c.avatarUrl !== nextAvatar) {
+          c.avatarUrl = nextAvatar;
+          changed = true;
+        }
+      } else if (c.avatarUrl) {
+        delete c.avatarUrl;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    normalizeCommentsShape();
+    const clip = resolveClipContext();
+    if (clip) {
+      await saveClipData(clip);
+    }
   }
 
   function coerceIncomingComments(raw) {
@@ -2694,6 +2855,7 @@
             { key }
           );
         }
+        applyOwnIdentityToLoadedComments();
         normalizeCommentsShape();
         await mirrorCloudRecordToLocalCache(clip, r.record);
         sharedReviewCloudReloadOnce.delete(key);
@@ -2731,6 +2893,7 @@
     });
     if (list) {
       state.comments = list;
+      applyOwnIdentityToLoadedComments();
       normalizeCommentsShape();
     } else {
       state.comments = [];
@@ -3481,11 +3644,9 @@
   function createCommentAvatarEl(comment) {
     const holder = document.createElement("div");
     holder.className = "mf-comment-avatar";
-    const authorName = comment?.author;
-    const label = authorName || "You";
+    const label = displayNameForComment(comment);
     const commentAvatar = normalizeCommentAvatarUrl(comment?.avatarUrl);
-    const ownAvatar =
-      cachedAuthorAvatarUrl && label === cachedEffectiveDisplayName ? cachedAuthorAvatarUrl : "";
+    const ownAvatar = cachedAuthorAvatarUrl && isOwnComment(comment) ? cachedAuthorAvatarUrl : "";
     const avatarToShow = commentAvatar || ownAvatar;
     const showImg = !!avatarToShow;
     if (showImg) {
@@ -3538,6 +3699,7 @@
       ts,
       text: trimmed,
       author,
+      authorId: currentCloudUserId() || "",
       avatarUrl: normalizeCommentAvatarUrl(cachedAuthorAvatarUrl),
       createdAt: Date.now(),
     };
@@ -3684,7 +3846,7 @@
     nameRow.className = "mf-comment-name-row";
     const auth = document.createElement("span");
     auth.className = "mf-author";
-    auth.textContent = c.author || "You";
+    auth.textContent = displayNameForComment(c);
     nameRow.appendChild(auth);
     const createdAt =
       typeof c.createdAt === "number" && Number.isFinite(c.createdAt) ? c.createdAt : null;
@@ -4082,6 +4244,7 @@
               <div class="mf-settings-row"><span>Current plan</span><span class="mf-settings-plan-badge">Free</span></div>
               <button type="button" class="mf-settings-cta-btn" data-action="upgrade-pro">Upgrade to Pro</button>
               <button type="button" class="mf-settings-ghost-btn mf-hidden" data-action="manage-billing">Manage billing</button>
+              <div class="mf-settings-upgrade-status mf-hidden" aria-live="polite"></div>
             </section>
             <div class="mf-settings-footer-row">
               <button type="button" class="mf-settings-link-btn" data-action="sign-out">Sign out</button>
@@ -4154,8 +4317,21 @@
     meta.appendChild(c);
     card.appendChild(thumb);
     card.appendChild(meta);
-    card.addEventListener("click", () => {
+    card.addEventListener("click", async () => {
       state.dashboardForced = false;
+      if (sharedWithMe) {
+        const ownerId = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
+        if (ownerId) {
+          await setCollabHostForRedeem(item.platform, item.clipId, ownerId);
+          await patchNotchSharedReviewStorage({
+            uid: ownerId,
+            platform: item.platform,
+            clip: item.clipId,
+            needsDbJoin: !isCloudActive(),
+            receivedAt: Date.now(),
+          });
+        }
+      }
       const cur = resolveClipContext();
       let sameClip = cur && cur.platform === item.platform && cur.clipId === item.clipId;
       if (
@@ -4376,14 +4552,19 @@
       profileAvatarFileInp.addEventListener("change", () => {
         const f = profileAvatarFileInp.files && profileAvatarFileInp.files[0];
         if (!f) return;
+        const previousDisplayName = cachedEffectiveDisplayName;
         compressAvatarFile(f)
           .then(async (dataUrl) => {
             await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: dataUrl });
             await refreshAuthorPresentationCache();
+            await relabelOwnCommentsInActiveClip(previousDisplayName);
             const nameInp = root.querySelector(".mf-settings-display-name");
             const email = state.cloudUser?.email?.trim() || "";
             const label = (nameInp?.value || "").trim() || email || "You";
             applySettingsAvatarPreview(dataUrl, label);
+            if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") {
+              renderThread();
+            }
             showToast("Profile photo updated.");
           })
           .catch((err) => showToast(err.message || "Could not use that image."));
@@ -4469,7 +4650,9 @@
     }
     const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
     if (upgradeBtn) {
-      upgradeBtn.addEventListener("click", () => window.open("https://notch.video/pricing", "_blank", "noopener"));
+      upgradeBtn.addEventListener("click", () => {
+        void startUpgradeCheckoutFlow();
+      });
     }
     const manageBillingBtn = root.querySelector('[data-action="manage-billing"]');
     if (manageBillingBtn) {
@@ -5196,7 +5379,7 @@
           const replyW = maxTextW - 24;
           let replyLines = 0;
           for (const r of reps) {
-            const replyBlock = `${String(r.author || "You")}: ${((r.text || "").trim() || "(no text)")}`;
+            const replyBlock = `${String(displayNameForComment(r))}: ${((r.text || "").trim() || "(no text)")}`;
             replyLines += doc.splitTextToSize(replyBlock, replyW).length;
           }
           replySectionH = 16 + replyLines * PDF_COMMENT_GAP.line + reps.length * 4 + 8;
@@ -5258,7 +5441,7 @@
 
         doc.setFontSize(14);
         doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-        doc.text(String(c.author || "You"), margin, y);
+        doc.text(String(displayNameForComment(c)), margin, y);
         y += authorBlock;
         doc.setFont(face, "normal");
         doc.setFontSize(13);
@@ -5303,7 +5486,7 @@
           doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
           const replyW = maxTextW - 24;
           for (const r of reps) {
-            const replyBlock = `${String(r.author || "You")}: ${((r.text || "").trim() || "(no text)")}`;
+            const replyBlock = `${String(displayNameForComment(r))}: ${((r.text || "").trim() || "(no text)")}`;
             for (const line of doc.splitTextToSize(replyBlock, replyW)) {
               doc.text(line, margin + 18, y);
               y += PDF_COMMENT_GAP.line;

@@ -17890,6 +17890,59 @@ function handleRuntimeMessage(msg, sendResponse) {
     });
     return true;
   }
+  if (msg?.type === "MF_SUPABASE_GET_USER") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, configured: false, user: null });
+      return false;
+    }
+    void client.auth.getUser().then(async ({ data, error }) => {
+      if (error) {
+        sendResponse({
+          ok: false,
+          configured: true,
+          user: null,
+          error: String(error?.message ?? error ?? "")
+        });
+        return;
+      }
+      const user = data?.user ?? null;
+      const plan = planFromSupabaseUser(user);
+      try {
+        const { session } = await getSessionSafe(client);
+        const accessToken = String(session?.access_token || "");
+        const refreshToken = String(session?.refresh_token || "");
+        if (user && accessToken && refreshToken) {
+          await client.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken
+          });
+        }
+      } catch {
+      }
+      sendResponse({
+        ok: true,
+        configured: true,
+        user: user ? { id: user.id, email: user.email, plan } : null
+      });
+    }).catch((e) => {
+      sendResponse({ ok: false, configured: true, user: null, error: String(e?.message || e) });
+    });
+    return true;
+  }
+  if (msg?.type === "MF_OPEN_TAB") {
+    const url = String(msg?.url || "").trim();
+    if (!url) {
+      sendResponse({ ok: false, error: "invalid_url" });
+      return false;
+    }
+    void chrome.tabs.create({ url, active: true }).then(() => {
+      sendResponse({ ok: true });
+    }).catch((e) => {
+      sendResponse({ ok: false, error: String(e?.message || e) });
+    });
+    return true;
+  }
   if (msg?.type === "MF_SUPABASE_SIGN_OUT") {
     const client = getSupabase();
     if (!client) {
@@ -18486,10 +18539,12 @@ var require_sw_main = __commonJS({
       "MF_AUTH_MAGIC_LINK",
       "MF_AUTH_CHANGED",
       "MF_SUPABASE_SESSION",
+      "MF_SUPABASE_GET_USER",
       "MF_SUPABASE_SIGN_OUT",
       "MF_SUPABASE_CHANGE_EMAIL",
       "MF_SUPABASE_RESET_PASSWORD",
       "MF_SUPABASE_DELETE_USER",
+      "MF_OPEN_TAB",
       "MF_CLOUD_LOAD_CLIP",
       "MF_CLOUD_SAVE_CLIP",
       "MF_CLOUD_LIST_CLIPS",

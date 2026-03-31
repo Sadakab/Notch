@@ -677,6 +677,12 @@
 #markframe-root .mf-settings-link-danger {
   color: rgba(255, 120, 120, 0.85);
 }
+#markframe-root .mf-settings-upgrade-status {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.58);
+}
 #markframe-root .mf-settings-disabled {
   opacity: 0.45;
   pointer-events: none;
