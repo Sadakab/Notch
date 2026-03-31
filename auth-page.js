@@ -17413,14 +17413,14 @@ ${suffix}`;
       function createChromeStorageAdapter() {
         return {
           getItem: async (key) => {
-            const o = await chrome.storage.sync.get(key);
+            const o = await chrome.storage.local.get(key);
             return o[key] ?? null;
           },
           setItem: async (key, value) => {
-            await chrome.storage.sync.set({ [key]: value });
+            await chrome.storage.local.set({ [key]: value });
           },
           removeItem: async (key) => {
-            await chrome.storage.sync.remove(key);
+            await chrome.storage.local.remove(key);
           }
         };
       }

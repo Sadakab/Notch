@@ -444,6 +444,7 @@
 #markframe-root .mf-settings-company-name,
 #markframe-root .mf-settings-display-name,
 #markframe-root .mf-settings-ghost-btn,
+#markframe-root .mf-settings-company-logo-btn,
 #markframe-root .mf-settings-cta-btn {
   height: 34px;
   border-radius: 7px;
@@ -645,6 +646,23 @@
 #markframe-root .mf-settings-ghost-btn {
   padding: 0 10px;
   cursor: pointer;
+}
+#markframe-root .mf-settings-company-logo-btn {
+  width: 68px;
+  height: 68px;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+#markframe-root .mf-settings-company-logo-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.22);
 }
 #markframe-root .mf-settings-cta-btn {
   width: 100%;

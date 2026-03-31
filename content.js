@@ -333,6 +333,7 @@
                 email: r.user.email || "",
                 id: r.user.id || "",
                 plan: String(r.user.plan || "").trim().toLowerCase() === "pro" ? "pro" : "free",
+                companyLogoDataUrl: normalizeCommentAvatarUrl(r.user.companyLogoDataUrl),
               }
             : null;
         state.cloudUser = cloudAuthCachedUser;
@@ -389,7 +390,7 @@
     setUpgradeStatusMessage("");
     let storageSession = null;
     try {
-      const authBlob = await chrome.storage.sync.get("sb-notch-auth");
+      const authBlob = await chrome.storage.local.get("sb-notch-auth");
       const raw = authBlob?.["sb-notch-auth"];
       if (typeof raw === "string") {
         storageSession = JSON.parse(raw);
@@ -2179,8 +2180,10 @@
 
   /** Keep under Chrome storage per-item limits (~8KB JSON). */
   const AVATAR_DATA_URL_MAX_LEN = 7000;
+  /** Logo is cloud-backed; allow larger payload for sharper rendering. */
+  const COMPANY_LOGO_DATA_URL_MAX_LEN = 48000;
 
-  function compressAvatarFile(file) {
+  function compressImageFile(file, opts) {
     return new Promise((resolve, reject) => {
       if (!file || !file.type.startsWith("image/")) {
         reject(new Error("Choose an image file."));
@@ -2190,7 +2193,7 @@
       r.onload = () => {
         const img = new Image();
         img.onload = () => {
-          const maxPx = 72;
+          const maxPx = Math.max(1, Number(opts?.maxPx) || 72);
           const w = img.naturalWidth;
           const h = img.naturalHeight;
           const scale = Math.min(1, maxPx / Math.max(w, h, 1));
@@ -2205,13 +2208,17 @@
             return;
           }
           ctx.drawImage(img, 0, 0, cw, ch);
-          let q = 0.82;
-          let data = canvas.toDataURL("image/jpeg", q);
-          while (data.length > AVATAR_DATA_URL_MAX_LEN && q > 0.28) {
-            q -= 0.08;
-            data = canvas.toDataURL("image/jpeg", q);
+          const mimeType = typeof opts?.mimeType === "string" ? opts.mimeType : "image/jpeg";
+          const maxLen = Math.max(1000, Number(opts?.maxLen) || AVATAR_DATA_URL_MAX_LEN);
+          let q = Math.max(0.01, Math.min(1, Number(opts?.initialQuality) || 0.82));
+          const minQuality = Math.max(0.01, Math.min(1, Number(opts?.minQuality) || 0.28));
+          const qualityStep = Math.max(0.01, Math.min(0.5, Number(opts?.qualityStep) || 0.08));
+          let data = canvas.toDataURL(mimeType, q);
+          while (data.length > maxLen && q > minQuality) {
+            q -= qualityStep;
+            data = canvas.toDataURL(mimeType, q);
           }
-          if (data.length > AVATAR_DATA_URL_MAX_LEN) {
+          if (data.length > maxLen) {
             reject(new Error("Image is still too large after resizing. Try a smaller photo or use a URL."));
             return;
           }
@@ -2222,6 +2229,29 @@
       };
       r.onerror = () => reject(new Error("Could not read file."));
       r.readAsDataURL(file);
+    });
+  }
+
+  function compressAvatarFile(file) {
+    return compressImageFile(file, {
+      maxPx: 72,
+      maxLen: AVATAR_DATA_URL_MAX_LEN,
+      mimeType: "image/jpeg",
+      initialQuality: 0.82,
+      minQuality: 0.28,
+      qualityStep: 0.08,
+    });
+  }
+
+  function compressCompanyLogoFile(file) {
+    return compressImageFile(file, {
+      // Keep enough detail for larger settings preview and PDF usage.
+      maxPx: 320,
+      maxLen: COMPANY_LOGO_DATA_URL_MAX_LEN,
+      mimeType: "image/webp",
+      initialQuality: 0.92,
+      minQuality: 0.6,
+      qualityStep: 0.05,
     });
   }
 
@@ -2271,6 +2301,67 @@
     }
   }
 
+  function applySettingsCompanyLogoPreview(src) {
+    if (!root) return;
+    const btn = root.querySelector(".mf-settings-company-logo-btn");
+    const img = root.querySelector(".mf-settings-company-logo-preview");
+    if (!img || !btn) return;
+    const applyCompanyLogoButtonSize = (aspectRatio) => {
+      const clampedAspect = Math.max(0.6, Math.min(2.2, Number(aspectRatio) || 1));
+      const baseHeight = 68; // 2x original 34px control
+      const width = Math.max(52, Math.min(136, Math.round(baseHeight * clampedAspect)));
+      btn.style.width = width + "px";
+      btn.style.height = baseHeight + "px";
+    };
+    const normalized = normalizeCommentAvatarUrl(src);
+    if (!normalized) {
+      img.classList.add("mf-hidden");
+      img.removeAttribute("src");
+      applyCompanyLogoButtonSize(1);
+      return;
+    }
+    img.classList.remove("mf-hidden");
+    img.onload = () => {
+      const w = Number(img.naturalWidth) || 1;
+      const h = Number(img.naturalHeight) || 1;
+      applyCompanyLogoButtonSize(w / h);
+    };
+    img.onerror = () => applyCompanyLogoButtonSize(1);
+    img.src = normalized;
+    if (img.complete && img.naturalWidth > 0) {
+      applyCompanyLogoButtonSize(img.naturalWidth / Math.max(1, img.naturalHeight));
+    }
+  }
+
+  async function loadCloudCompanyLogo() {
+    if (!state.cloudUser?.id) return "";
+    try {
+      const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
+      return normalizeCommentAvatarUrl(r?.user?.companyLogoDataUrl);
+    } catch {
+      return "";
+    }
+  }
+
+  async function saveCompanyLogoSetting(dataUrl) {
+    const normalized = normalizeCommentAvatarUrl(dataUrl);
+    if (!normalized) throw new Error("Could not use that image.");
+    if (state.cloudUser?.id) {
+      const cloudSaved = await sendExtensionMessage({
+        type: "MF_SUPABASE_SET_COMPANY_LOGO",
+        logoDataUrl: normalized,
+      });
+      if (!cloudSaved?.ok) {
+        throw new Error(cloudSaved?.error || "Could not sync logo to cloud.");
+      }
+    }
+    try {
+      await saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, normalized);
+    } catch {
+      // Best-effort cache only; Supabase is the source of truth for logos.
+    }
+  }
+
   function resetSettingsAvatarFormState() {
     settingsAvatarPendingDataUrl = null;
     settingsAvatarExplicitClear = false;
@@ -2290,6 +2381,14 @@
     await refreshCloudUser(true);
     const email = state.cloudUser?.email?.trim() || "";
     const s = await loadSyncSettings();
+    const cloudLogo = await loadCloudCompanyLogo();
+    if (cloudLogo && cloudLogo !== s.logoDataUrl) {
+      s.logoDataUrl = cloudLogo;
+      try {
+        await saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, cloudLogo);
+      } catch {
+      }
+    }
     cachedTimestampFormat = s.timestampFormat;
     const fallbackName = (await loadAuthorOverride()).trim() || email;
     inp.value = s.displayName || fallbackName;
@@ -2317,6 +2416,7 @@
     if (accountEmail) accountEmail.textContent = email || "Not signed in";
     const planBadge = root.querySelector(".mf-settings-plan-badge");
     if (planBadge) planBadge.textContent = pro ? "Pro" : "Free";
+    applySettingsCompanyLogoPreview(s.logoDataUrl);
     const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
     const billingBtn = root.querySelector('[data-action="manage-billing"]');
     if (upgradeBtn) upgradeBtn.classList.toggle("mf-hidden", pro);
@@ -4232,7 +4332,9 @@
               <div class="mf-settings-row mf-settings-pro-disabled">
                 <span>Company logo</span>
                 <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
-                <button type="button" class="mf-settings-ghost-btn" data-action="upload-logo">Choose file</button>
+                <button type="button" class="mf-settings-company-logo-btn" data-action="upload-logo" aria-label="Upload company logo">
+                  <img class="mf-settings-company-logo-preview mf-hidden" alt="Company logo preview" />
+                </button>
               </div>
             </section>
             <section class="mf-settings-section">
@@ -4579,10 +4681,10 @@
       avatarFileInp.addEventListener("change", () => {
         const f = avatarFileInp.files && avatarFileInp.files[0];
         if (!f) return;
-        compressAvatarFile(f)
-          .then((dataUrl) => {
-            return saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, dataUrl);
-          })
+        compressCompanyLogoFile(f)
+          .then((dataUrl) => saveCompanyLogoSetting(dataUrl))
+          .then(() => loadSyncSettings())
+          .then((s) => applySettingsCompanyLogoPreview(s.logoDataUrl))
           .then(() => showToast("Logo saved."))
           .catch((err) => showToast(err.message || "Could not use that image."));
         avatarFileInp.value = "";

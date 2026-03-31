@@ -17416,6 +17416,15 @@ function planFromSupabaseUser(u) {
   const raw = u.app_metadata?.plan || u.user_metadata?.plan || u.app_metadata?.tier || u.user_metadata?.tier;
   return String(raw || "").trim().toLowerCase() === "pro" ? "pro" : "free";
 }
+function companyLogoFromSupabaseUser(u) {
+  if (!u) return "";
+  const raw = typeof u.user_metadata?.company_logo_data_url === "string" ? u.user_metadata.company_logo_data_url : "";
+  const s = raw.trim();
+  if (!s) return "";
+  if (s.startsWith("data:image/")) return s;
+  if (s.startsWith("https://")) return s;
+  return "";
+}
 function dropboxHostnameOk(h) {
   return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
 }
@@ -17530,14 +17539,14 @@ function clipStorageKey(platform, clipId) {
 function createChromeStorageAdapter() {
   return {
     getItem: async (key) => {
-      const o = await chrome.storage.sync.get(key);
+      const o = await chrome.storage.local.get(key);
       return o[key] ?? null;
     },
     setItem: async (key, value) => {
-      await chrome.storage.sync.set({ [key]: value });
+      await chrome.storage.local.set({ [key]: value });
     },
     removeItem: async (key) => {
-      await chrome.storage.sync.remove(key);
+      await chrome.storage.local.remove(key);
     }
   };
 }
@@ -17546,7 +17555,7 @@ function invalidateSupabaseClient() {
 }
 async function syncAuthMarkerFromChromeStorage() {
   const userKey = `${AUTH_STORAGE_KEY}-user`;
-  const data = await chrome.storage.sync.get([AUTH_STORAGE_KEY, userKey]);
+  const data = await chrome.storage.local.get([AUTH_STORAGE_KEY, userKey]);
   const main = data[AUTH_STORAGE_KEY];
   if (main == null || main === "") {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
@@ -17623,10 +17632,10 @@ async function syncAuthStateMarker(session) {
   }
 }
 async function clearStoredSupabaseSession() {
-  const all = await chrome.storage.sync.get(null);
+  const all = await chrome.storage.local.get(null);
   const keys = Object.keys(all).filter((k) => k === AUTH_STORAGE_KEY || k.startsWith(`${AUTH_STORAGE_KEY}-`));
   if (keys.length) {
-    await chrome.storage.sync.remove(keys);
+    await chrome.storage.local.remove(keys);
   }
   await chrome.storage.local.remove(AUTH_STATE_KEY);
 }
@@ -17923,10 +17932,40 @@ function handleRuntimeMessage(msg, sendResponse) {
       sendResponse({
         ok: true,
         configured: true,
-        user: user ? { id: user.id, email: user.email, plan } : null
+        user: user ? { id: user.id, email: user.email, plan, companyLogoDataUrl: companyLogoFromSupabaseUser(user) } : null
       });
     }).catch((e) => {
       sendResponse({ ok: false, configured: true, user: null, error: String(e?.message || e) });
+    });
+    return true;
+  }
+  if (msg?.type === "MF_SUPABASE_SET_COMPANY_LOGO") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured" });
+      return false;
+    }
+    const rawLogo = typeof msg.logoDataUrl === "string" ? msg.logoDataUrl.trim() : "";
+    const nextLogo = rawLogo && (rawLogo.startsWith("data:image/") || rawLogo.startsWith("https://")) ? rawLogo : "";
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      const currentMeta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+      const data = { ...currentMeta, company_logo_data_url: nextLogo || null };
+      const { data: updated, error } = await client.auth.updateUser({ data });
+      if (error) {
+        sendResponse({ ok: false, error: error.message || "save_failed" });
+        return;
+      }
+      sendResponse({
+        ok: true,
+        logoDataUrl: companyLogoFromSupabaseUser(updated?.user ?? user)
+      });
+    }).catch((e) => {
+      sendResponse({ ok: false, error: String(e?.message || e) });
     });
     return true;
   }
@@ -18540,6 +18579,7 @@ var require_sw_main = __commonJS({
       "MF_AUTH_CHANGED",
       "MF_SUPABASE_SESSION",
       "MF_SUPABASE_GET_USER",
+      "MF_SUPABASE_SET_COMPANY_LOGO",
       "MF_SUPABASE_SIGN_OUT",
       "MF_SUPABASE_CHANGE_EMAIL",
       "MF_SUPABASE_RESET_PASSWORD",
@@ -18684,6 +18724,10 @@ var require_sw_main = __commonJS({
         sendResponse({ ok: false, error: "Cloud handler failed." });
         return;
       }
+      if (t === "MF_SUPABASE_SET_COMPANY_LOGO") {
+        sendResponse({ ok: false, error: "Cloud handler failed." });
+        return;
+      }
       if (t === "MF_SUPABASE_DELETE_USER") {
         sendResponse({ ok: false, error: "Cloud handler failed." });
         return;
@@ -18724,7 +18768,7 @@ var require_sw_main = __commonJS({
     void restoreAuthMarker();
     var SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "sync") return;
+      if (area !== "local") return;
       const touched = Object.prototype.hasOwnProperty.call(changes, SUPABASE_AUTH_STORAGE_KEY) || Object.prototype.hasOwnProperty.call(changes, `${SUPABASE_AUTH_STORAGE_KEY}-user`);
       if (!touched) return;
       invalidateSupabaseClient();

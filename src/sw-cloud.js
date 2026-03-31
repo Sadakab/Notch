@@ -206,14 +206,14 @@ function clipStorageKey(platform, clipId) {
 function createChromeStorageAdapter() {
   return {
     getItem: async (key) => {
-      const o = await chrome.storage.sync.get(key);
+      const o = await chrome.storage.local.get(key);
       return o[key] ?? null;
     },
     setItem: async (key, value) => {
-      await chrome.storage.sync.set({ [key]: value });
+      await chrome.storage.local.set({ [key]: value });
     },
     removeItem: async (key) => {
-      await chrome.storage.sync.remove(key);
+      await chrome.storage.local.remove(key);
     },
   };
 }
@@ -232,7 +232,7 @@ export function invalidateSupabaseClient() {
  */
 export async function syncAuthMarkerFromChromeStorage() {
   const userKey = `${AUTH_STORAGE_KEY}-user`;
-  const data = await chrome.storage.sync.get([AUTH_STORAGE_KEY, userKey]);
+  const data = await chrome.storage.local.get([AUTH_STORAGE_KEY, userKey]);
   const main = data[AUTH_STORAGE_KEY];
   if (main == null || main === "") {
     await chrome.storage.local.remove(AUTH_STATE_KEY);
@@ -315,10 +315,10 @@ async function syncAuthStateMarker(session) {
 }
 
 async function clearStoredSupabaseSession() {
-  const all = await chrome.storage.sync.get(null);
+  const all = await chrome.storage.local.get(null);
   const keys = Object.keys(all).filter((k) => k === AUTH_STORAGE_KEY || k.startsWith(`${AUTH_STORAGE_KEY}-`));
   if (keys.length) {
-    await chrome.storage.sync.remove(keys);
+    await chrome.storage.local.remove(keys);
   }
   await chrome.storage.local.remove(AUTH_STATE_KEY);
 }

@@ -219,7 +219,7 @@ void restoreAuthMarker();
 const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== "sync") return;
+  if (area !== "local") return;
   const touched =
     Object.prototype.hasOwnProperty.call(changes, SUPABASE_AUTH_STORAGE_KEY) ||
     Object.prototype.hasOwnProperty.call(changes, `${SUPABASE_AUTH_STORAGE_KEY}-user`);
