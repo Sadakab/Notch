@@ -183,20 +183,28 @@
 
   async function updateWatchHeaderSub(clip) {
     if (!root) return;
-    const sub = root.querySelector(".mf-header-sub");
+    const headerSub = root.querySelector(".mf-header-sub");
+    if (headerSub) headerSub.textContent = "";
+    const sub = root.querySelector(".mf-watch-review-owner");
     if (!sub || root.dataset.mfView !== "watch") return;
-    const h = await readCollabHostUserIdForClip(clip);
-    if (!h || !String(h).trim()) {
-      sub.textContent = "";
+    const ownerEmail = String(state.reviewOwnerEmail || "").trim();
+    const myEmail = String(state.cloudUser?.email || "").trim();
+    if (ownerEmail) {
+      const isOwner =
+        !!myEmail && myEmail.localeCompare(ownerEmail, undefined, { sensitivity: "accent" }) === 0;
+      sub.textContent = isOwner ? "Review owned by you" : "Review owned by " + ownerEmail;
       return;
     }
-    await refreshCloudUser(false);
     const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
-    if (myId && normalizeUuidForCompare(h) === normalizeUuidForCompare(myId)) {
+    if (!myId || !clip) {
       sub.textContent = "";
       return;
     }
-    sub.textContent = "Shared review";
+    const hostBinding = await readCollabHostUserIdForClip(clip);
+    const isOwnSession =
+      !hostBinding ||
+      normalizeUuidForCompare(hostBinding) === normalizeUuidForCompare(myId);
+    sub.textContent = isOwnSession ? "Review owned by you" : "";
   }
 
   function parseClipStorageKey(key) {
@@ -280,6 +288,8 @@
     dashboardForced: false,
     /** When non-null, clip library reads/writes go to Supabase ({ email }). */
     cloudUser: null,
+    /** Current review owner email from cloud row source-of-truth. */
+    reviewOwnerEmail: "",
   };
 
   let cloudAuthCacheValidUntil = 0;
@@ -2904,6 +2914,7 @@
   async function loadClipData(clip) {
     state.replyTargetId = null;
     state.collapsedReplyRoots.clear();
+    state.reviewOwnerEmail = "";
     await refreshCloudUser(false);
     const key = clip.storageKey;
     const hostBindingRaw = await readCollabHostUserIdForClip(clip);
@@ -3029,6 +3040,7 @@
         }
         applyOwnIdentityToLoadedComments();
         normalizeCommentsShape();
+        state.reviewOwnerEmail = String(r.record.reviewOwnerEmail || "").trim();
         await mirrorCloudRecordToLocalCache(clip, r.record);
         sharedReviewCloudReloadOnce.delete(key);
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
@@ -4279,6 +4291,7 @@
         <div class="mf-watch-pane">
           <div class="mf-watch-video-title-wrap">
             <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
+            <span class="mf-watch-review-owner" role="status" aria-live="polite"></span>
           </div>
           <div class="mf-toolbar">
             <div class="mf-toolbar-draw${FEATURE_DRAWING ? "" : " mf-hidden"}">
@@ -4651,9 +4664,13 @@
       void tick();
     });
 
-    root.querySelector('[data-action="go-watch-panel"]').addEventListener("click", () => {
+    root.querySelector('[data-action="go-watch-panel"]').addEventListener("click", async () => {
       state.dashboardForced = false;
       setDrawModeUi(false);
+      const clip = resolveClipContext();
+      if (clip) {
+        await clearCollabHostForClip(clip);
+      }
       void tick();
     });
 

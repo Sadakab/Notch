@@ -17563,6 +17563,28 @@ async function loadClipReviewRow(client, platform, clipId, clipOwnerUserId) {
   const r = await client.from("clip_reviews").select("*").eq("platform", platform).eq("user_id", clipOwnerUserId).eq("clip_id", clipId).maybeSingle();
   return { data: r.data ?? null, error: r.error };
 }
+async function loadReviewOwnerEmail(client, hostUserId, platform, clipId) {
+  if (!hostUserId || !platform || !clipId) return null;
+  try {
+    const { data, error } = await client.rpc("review_owner_email_for_clip", {
+      p_host_user_id: hostUserId,
+      p_platform: platform,
+      p_clip_id: clipId
+    });
+    if (error) {
+      notchSwLog("review_owner_email_for_clip rpc failed", {
+        code: error.code,
+        message: error.message
+      });
+      return null;
+    }
+    const email = typeof data === "string" ? data.trim() : "";
+    return email || null;
+  } catch (e) {
+    notchSwLog("review_owner_email_for_clip threw", String(e?.message || e));
+    return null;
+  }
+}
 function clipStorageKey(platform, clipId) {
   return "markframe_clip_" + platform + "_" + encodeURIComponent(clipId);
 }
@@ -17744,7 +17766,8 @@ function rowToPayload(row) {
     title: row.title ?? null,
     thumbnailUrl: row.thumbnail_url ?? null,
     platform: row.platform,
-    clipId: row.clip_id
+    clipId: row.clip_id,
+    reviewOwnerUserId: row.user_id ?? null
   };
 }
 function defaultThumbForPlatform(platform, clipId) {
@@ -18118,7 +18141,13 @@ function handleRuntimeMessage(msg, sendResponse) {
           dbPlatform: data?.platform ?? null,
           commentsType: cc
         });
-        const record = data ? rowToPayload(data) : null;
+        let record = data ? rowToPayload(data) : null;
+        if (record && record.reviewOwnerUserId) {
+          const ownerEmail = await loadReviewOwnerEmail(client, record.reviewOwnerUserId, platform, data.clip_id);
+          if (ownerEmail) {
+            record = { ...record, reviewOwnerEmail: ownerEmail };
+          }
+        }
         notchSwLog("MF_CLOUD_LOAD_CLIP payload", {
           recordNull: record == null,
           payloadCommentCount: record?.comments?.length ?? "n/a"

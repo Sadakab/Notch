@@ -781,6 +781,20 @@
   text-align: left;
 }
 
+#markframe-root .mf-watch-review-owner {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 400;
+  color: var(--mf-text-muted);
+  text-transform: none;
+}
+
+#markframe-root .mf-watch-review-owner:empty {
+  display: none;
+}
+
 #markframe-root .mf-dashboard-pane {
   flex: 1;
   min-height: 0;
