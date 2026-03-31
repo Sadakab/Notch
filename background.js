@@ -18622,6 +18622,41 @@ var require_sw_main = __commonJS({
         return false;
       }
     }
+    var GLOBAL_NOTCH_STATE_KEYS = {
+      isVisible: "isVisible",
+      activePanelView: "activePanelView"
+    };
+    function normalizeGlobalNotchState(raw) {
+      const isVisible = raw?.isVisible !== false;
+      const activePanelView = raw?.activePanelView === "settings" ? "settings" : "main";
+      return { isVisible, activePanelView };
+    }
+    async function getGlobalNotchState() {
+      const got = await chrome.storage.local.get([
+        GLOBAL_NOTCH_STATE_KEYS.isVisible,
+        GLOBAL_NOTCH_STATE_KEYS.activePanelView
+      ]);
+      return normalizeGlobalNotchState(got);
+    }
+    async function setGlobalNotchStatePatch(patch) {
+      const current = await getGlobalNotchState();
+      const next = normalizeGlobalNotchState({ ...current, ...patch });
+      await chrome.storage.local.set({
+        [GLOBAL_NOTCH_STATE_KEYS.isVisible]: next.isVisible,
+        [GLOBAL_NOTCH_STATE_KEYS.activePanelView]: next.activePanelView
+      });
+      return next;
+    }
+    async function broadcastNotchStateUpdate(state) {
+      const tabs = await chrome.tabs.query({});
+      await Promise.all(
+        tabs.map((tab) => {
+          if (!tab?.id) return Promise.resolve();
+          return chrome.tabs.sendMessage(tab.id, { type: "NOTCH_STATE_UPDATE", state }).catch(() => {
+          });
+        })
+      );
+    }
     var NOTCH_SHARED_REVIEW_STORAGE_KEY = "notch_shared_review";
     function buildWatchUrlForSharedReview(platform, clipIdRaw) {
       if (clipIdRaw == null) return "";
@@ -18789,7 +18824,11 @@ var require_sw_main = __commonJS({
     });
     chrome.action.onClicked.addListener((tab) => {
       if (!tab?.id || !isInjectableUrl(tab.url)) return;
-      chrome.tabs.sendMessage(tab.id, { type: "TOGGLE_SIDEBAR" }).catch(() => {
+      void (async () => {
+        const current = await getGlobalNotchState();
+        const next = await setGlobalNotchStatePatch({ isVisible: !current.isVisible });
+        await broadcastNotchStateUpdate(next);
+      })().catch(() => {
       });
     });
     chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
@@ -18848,6 +18887,18 @@ var require_sw_main = __commonJS({
       return true;
     });
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg?.type === "NOTCH_SET_GLOBAL_STATE") {
+        void (async () => {
+          try {
+            const next = await setGlobalNotchStatePatch(msg.patch || {});
+            await broadcastNotchStateUpdate(next);
+            sendResponse({ ok: true, state: next });
+          } catch (e) {
+            sendResponse({ ok: false, error: String(e?.message || e) });
+          }
+        })();
+        return true;
+      }
       if (msg?.type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {
         const watchUrl = "https://vimeo.com/" + encodeURIComponent(String(msg.clipId));
         const api = "https://vimeo.com/api/oembed.json?url=" + encodeURIComponent(watchUrl) + "&width=640";

@@ -35,6 +35,10 @@
     dataPrefix: "markframe_video_",
     clipPrefix: "markframe_clip_",
   };
+  const GLOBAL_STATE_KEYS = {
+    isVisible: "isVisible",
+    activePanelView: "activePanelView",
+  };
   const PREFS_STORAGE_KEY = "notch_prefs";
   const PREFERENCE_DEFAULTS = {
     displayName: "",
@@ -238,6 +242,8 @@
   let settingsAvatarPendingDataUrl = null;
   let settingsAvatarExplicitClear = false;
   let settingsMenuOpenKey = "";
+  let hasSupportedClipOnPage = false;
+  let globalPanelState = { isVisible: true, activePanelView: "main" };
   let panelDragState = null;
   let proUpgradePollTimer = null;
   let proUpgradePollDeadline = 0;
@@ -2433,7 +2439,20 @@
     if (profileFile) profileFile.value = "";
   }
 
-  async function openSettingsPanel() {
+  function normalizeActivePanelView(v) {
+    return v === "settings" ? "settings" : "main";
+  }
+
+  async function requestGlobalStatePatch(patch) {
+    try {
+      await sendExtensionMessage({ type: "NOTCH_SET_GLOBAL_STATE", patch });
+    } catch (_) {
+      // Ignore if background is unavailable; storage listener will eventually reconcile.
+    }
+  }
+
+  async function openSettingsPanel(options) {
+    const persistGlobal = options?.persistGlobal === true;
     if (!root) return;
     const overlay = root.querySelector(".mf-settings-overlay");
     const inp = root.querySelector(".mf-settings-display-name");
@@ -2494,7 +2513,7 @@
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
-        closeSettingsPanel();
+        closeSettingsPanel({ persistGlobal: true });
       }
     };
     settingsOutsideClickHandler = (e) => {
@@ -2507,9 +2526,14 @@
     document.addEventListener("keydown", settingsEscapeHandler, true);
     document.addEventListener("click", settingsOutsideClickHandler, true);
     requestAnimationFrame(() => inp.focus());
+    if (persistGlobal) {
+      globalPanelState.activePanelView = "settings";
+      await requestGlobalStatePatch({ activePanelView: "settings" });
+    }
   }
 
-  function closeSettingsPanel() {
+  async function closeSettingsPanel(options) {
+    const persistGlobal = options?.persistGlobal === true;
     if (!root) return;
     const overlay = root.querySelector(".mf-settings-overlay");
     if (overlay) {
@@ -2526,6 +2550,10 @@
       settingsOutsideClickHandler = null;
     }
     root.querySelectorAll(".mf-settings-dropdown.mf-open").forEach((d) => d.classList.remove("mf-open"));
+    if (persistGlobal) {
+      globalPanelState.activePanelView = "main";
+      await requestGlobalStatePatch({ activePanelView: "main" });
+    }
   }
 
   async function applyDisplayNameSetting() {
@@ -2573,11 +2601,19 @@
     }
   }
 
-  async function loadSidebarVisible() {
-    const { [STORAGE_KEYS.sidebarVisible]: v } = await chrome.storage.local.get(
-      STORAGE_KEYS.sidebarVisible
-    );
-    return v !== false;
+  async function loadGlobalPanelState() {
+    const got = await chrome.storage.local.get([
+      GLOBAL_STATE_KEYS.isVisible,
+      GLOBAL_STATE_KEYS.activePanelView,
+      STORAGE_KEYS.sidebarVisible,
+    ]);
+    const visibleFromLegacy = got[STORAGE_KEYS.sidebarVisible];
+    const visible =
+      typeof got[GLOBAL_STATE_KEYS.isVisible] === "boolean"
+        ? got[GLOBAL_STATE_KEYS.isVisible]
+        : visibleFromLegacy !== false;
+    const view = normalizeActivePanelView(got[GLOBAL_STATE_KEYS.activePanelView]);
+    return { isVisible: !!visible, activePanelView: view };
   }
 
   /** @param {unknown} c */
@@ -2677,22 +2713,26 @@
   }
 
   async function applySidebarLayoutFromStorage() {
-    const [gotLocal, prefs] = await Promise.all([
-      chrome.storage.local.get([
-        STORAGE_KEYS.sidebarVisible,
-        STORAGE_KEYS.panelCorner,
-        STORAGE_KEYS.autoPauseCommentTyping,
-      ]),
+    const [gotLocal, prefs, shared] = await Promise.all([
+      chrome.storage.local.get([STORAGE_KEYS.panelCorner, STORAGE_KEYS.autoPauseCommentTyping]),
       loadCachedPreferences(),
+      loadGlobalPanelState(),
     ]);
-    applySidebarVisibility(gotLocal[STORAGE_KEYS.sidebarVisible] !== false);
+    globalPanelState = shared;
+    applySidebarVisibility(shared.isVisible);
+    if (shared.activePanelView === "settings") {
+      await openSettingsPanel({ persistGlobal: false });
+    } else {
+      await closeSettingsPanel({ persistGlobal: false });
+    }
     applyPanelCorner(normalizePanelPosition(prefs.panelPosition || gotLocal[STORAGE_KEYS.panelCorner]));
     applyAutoPauseCommentTypingPref(prefs.autoPause);
     applyFloatPanelPref(!!prefs.floatPanel);
   }
 
-  async function setSidebarVisible(visible) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.sidebarVisible]: !!visible });
+  async function setGlobalVisibility(visible) {
+    globalPanelState.isVisible = !!visible;
+    await requestGlobalStatePatch({ isVisible: !!visible });
     applySidebarVisibility(visible);
   }
 
@@ -2711,14 +2751,15 @@
   }
 
   function applySidebarVisibility(visible) {
+    const effectiveVisible = !!visible && hasSupportedClipOnPage;
     const prevHidden = root ? root.classList.contains("mf-hidden") : true;
-    if (root) root.classList.toggle("mf-hidden", !visible);
+    if (root) root.classList.toggle("mf-hidden", !effectiveVisible);
     if (!FEATURE_DRAWING) {
       if (canvasHost) canvasHost.style.visibility = "hidden";
     } else if (canvasHost && !state.drawMode) {
-      canvasHost.style.visibility = visible ? "visible" : "hidden";
+      canvasHost.style.visibility = effectiveVisible ? "visible" : "hidden";
     }
-    if (visible && prevHidden) {
+    if (effectiveVisible && prevHidden) {
       void refreshWatchClipFromSupabase();
     }
   }
@@ -4658,14 +4699,16 @@
       });
     }
 
-    root.querySelector('[data-action="open-settings"]').addEventListener("click", () => void openSettingsPanel());
+    root.querySelector('[data-action="open-settings"]').addEventListener("click", () =>
+      void openSettingsPanel({ persistGlobal: true })
+    );
     root.querySelectorAll('[data-action="close-settings"]').forEach((b) => {
-      b.addEventListener("click", () => closeSettingsPanel());
+      b.addEventListener("click", () => void closeSettingsPanel({ persistGlobal: true }));
     });
     const settingsOverlay = root.querySelector(".mf-settings-overlay");
     if (settingsOverlay) {
       settingsOverlay.addEventListener("click", (e) => {
-        if (e.target === settingsOverlay) closeSettingsPanel();
+        if (e.target === settingsOverlay) void closeSettingsPanel({ persistGlobal: true });
       });
     }
     const settingsNameInp = root.querySelector(".mf-settings-display-name");
@@ -4836,7 +4879,7 @@
           cloudAuthCacheValidUntil = 0;
           lastTickSignature = "";
           await refreshCloudUser(true);
-          closeSettingsPanel();
+          await closeSettingsPanel({ persistGlobal: true });
           showToast("Signed out.");
           void tick();
         } catch (e) {
@@ -6110,8 +6153,21 @@
 
   function storageOnChanged(changes, area) {
     if (area === "local") {
-      if (changes[STORAGE_KEYS.sidebarVisible]) {
-        applySidebarVisibility(changes[STORAGE_KEYS.sidebarVisible].newValue !== false);
+      if (changes[GLOBAL_STATE_KEYS.isVisible]) {
+        globalPanelState.isVisible = changes[GLOBAL_STATE_KEYS.isVisible].newValue !== false;
+        applySidebarVisibility(globalPanelState.isVisible);
+      } else if (changes[STORAGE_KEYS.sidebarVisible] && !changes[GLOBAL_STATE_KEYS.isVisible]) {
+        globalPanelState.isVisible = changes[STORAGE_KEYS.sidebarVisible].newValue !== false;
+        applySidebarVisibility(globalPanelState.isVisible);
+      }
+      if (changes[GLOBAL_STATE_KEYS.activePanelView]) {
+        const nextView = normalizeActivePanelView(changes[GLOBAL_STATE_KEYS.activePanelView].newValue);
+        globalPanelState.activePanelView = nextView;
+        if (nextView === "settings") {
+          void openSettingsPanel({ persistGlobal: false });
+        } else {
+          void closeSettingsPanel({ persistGlobal: false });
+        }
       }
       if (changes[STORAGE_KEYS.panelCorner]) {
         applyPanelCorner(changes[STORAGE_KEYS.panelCorner].newValue);
@@ -6170,6 +6226,7 @@
   async function tickInner() {
     const href = location.href;
     const clip = resolveClipContext();
+    hasSupportedClipOnPage = !!clip;
 
     await refreshCloudUser(false);
     let supabaseConfigured = false;
@@ -6289,10 +6346,26 @@
 
   chrome.runtime.onMessage.addListener((msg, _e, sendResponse) => {
     if (msg && msg.type === "TOGGLE_SIDEBAR") {
-      loadSidebarVisible().then((v) => {
-        setSidebarVisible(!v).then(() => sendResponse({ ok: true, sidebarVisible: !v }));
+      loadGlobalPanelState().then((s) => {
+        const next = !s.isVisible;
+        setGlobalVisibility(next).then(() => sendResponse({ ok: true, sidebarVisible: next }));
       });
       return true;
+    }
+    if (msg && msg.type === "NOTCH_STATE_UPDATE" && msg.state) {
+      const incoming = {
+        isVisible: msg.state.isVisible !== false,
+        activePanelView: normalizeActivePanelView(msg.state.activePanelView),
+      };
+      globalPanelState = incoming;
+      applySidebarVisibility(incoming.isVisible);
+      if (incoming.activePanelView === "settings") {
+        void openSettingsPanel({ persistGlobal: false });
+      } else {
+        void closeSettingsPanel({ persistGlobal: false });
+      }
+      sendResponse({ ok: true });
+      return false;
     }
     if (msg && msg.action === "open-shared-review") {
       void handleOpenSharedReview(msg)
