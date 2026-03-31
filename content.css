@@ -610,7 +610,70 @@
 }
 #markframe-root .mf-settings-account-email {
   color: rgba(255, 255, 255, 0.45);
+}
+#markframe-root .mf-settings-account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 8px;
+}
+#markframe-root .mf-settings-inline-link {
+  border: 0;
+  background: transparent;
+  color: #00e5ff;
+  padding: 0;
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+#markframe-root .mf-settings-inline-link:disabled {
+  color: rgba(255, 255, 255, 0.35);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+#markframe-root .mf-settings-change-email-form {
+  margin-top: 2px;
+}
+#markframe-root .mf-settings-change-email-input {
+  width: 100%;
+  height: 34px;
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.82);
+  padding: 8px 10px;
+}
+#markframe-root .mf-settings-change-email-input:focus {
+  outline: none;
+  border-color: rgba(0, 229, 255, 0.6);
+}
+#markframe-root .mf-settings-change-email-status {
+  min-height: 1.4em;
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+}
+#markframe-root .mf-settings-change-email-status-err {
+  color: #f08080;
+}
+#markframe-root .mf-settings-change-email-status-ok {
+  color: #7dffb3;
+}
+#markframe-root .mf-settings-change-email-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#markframe-root .mf-settings-change-email-actions .mf-settings-cta-btn {
+  flex: 1;
+}
+#markframe-root .mf-settings-change-email-notice {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #7dffb3;
 }
 #markframe-root .mf-settings-account-actions { gap: 8px; }
 #markframe-root .mf-settings-email-modal {

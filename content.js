@@ -250,6 +250,8 @@
   let settingsAvatarPendingDataUrl = null;
   let settingsAvatarExplicitClear = false;
   let settingsMenuOpenKey = "";
+  let settingsChangeEmailCooldownUntil = 0;
+  let settingsChangeEmailCooldownTimer = null;
   let hasSupportedClipOnPage = false;
   let globalPanelState = { isVisible: true, activePanelView: "main" };
   let panelDragState = null;
@@ -2508,6 +2510,23 @@
     applySettingsAvatarPreview(avSrc, inp.value.trim() || email || "You");
     const accountEmail = root.querySelector(".mf-settings-account-email");
     if (accountEmail) accountEmail.textContent = email || "Not signed in";
+    const changeEmailBtn = root.querySelector('[data-action="open-change-email"]');
+    if (changeEmailBtn) changeEmailBtn.disabled = !email;
+    const changeEmailForm = root.querySelector(".mf-settings-change-email-form");
+    if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
+    const changeEmailInput = root.querySelector(".mf-settings-change-email-input");
+    if (changeEmailInput) changeEmailInput.value = "";
+    const changeEmailStatus = root.querySelector(".mf-settings-change-email-status");
+    if (changeEmailStatus) {
+      changeEmailStatus.textContent = "";
+      changeEmailStatus.className = "mf-settings-change-email-status";
+    }
+    const changeEmailNotice = root.querySelector(".mf-settings-change-email-notice");
+    if (changeEmailNotice) {
+      changeEmailNotice.textContent = "";
+      changeEmailNotice.classList.add("mf-hidden");
+    }
+    updateSettingsChangeEmailButton();
     const planBadge = root.querySelector(".mf-settings-plan-badge");
     if (planBadge) planBadge.textContent = pro ? "PRO" : "Free";
     applySettingsCompanyLogoPreview(s.logoDataUrl || "");
@@ -2564,6 +2583,38 @@
       globalPanelState.activePanelView = "main";
       await requestGlobalStatePatch({ activePanelView: "main" });
     }
+  }
+
+  function clearSettingsChangeEmailCooldownTimer() {
+    if (settingsChangeEmailCooldownTimer) {
+      window.clearInterval(settingsChangeEmailCooldownTimer);
+      settingsChangeEmailCooldownTimer = null;
+    }
+  }
+
+  function updateSettingsChangeEmailButton() {
+    if (!root) return;
+    const changeBtn = root.querySelector('[data-action="open-change-email"]');
+    if (!(changeBtn instanceof HTMLButtonElement)) return;
+    const baseLabel = "Change";
+    const remainingMs = settingsChangeEmailCooldownUntil - Date.now();
+    if (remainingMs <= 0) {
+      changeBtn.textContent = baseLabel;
+      const email = state.cloudUser?.email?.trim() || "";
+      changeBtn.disabled = !email;
+      clearSettingsChangeEmailCooldownTimer();
+      return;
+    }
+    const remainingSeconds = Math.ceil(remainingMs / 1000);
+    changeBtn.textContent = `${baseLabel} (${remainingSeconds}s)`;
+    changeBtn.disabled = true;
+  }
+
+  function startSettingsChangeEmailCooldown() {
+    settingsChangeEmailCooldownUntil = Date.now() + 60 * 1000;
+    updateSettingsChangeEmailButton();
+    clearSettingsChangeEmailCooldownTimer();
+    settingsChangeEmailCooldownTimer = window.setInterval(updateSettingsChangeEmailButton, 1000);
   }
 
   async function applyDisplayNameSetting() {
@@ -4424,7 +4475,19 @@
             </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Account</div>
-              <div class="mf-settings-account-email"></div>
+              <div class="mf-settings-account-row">
+                <span class="mf-settings-account-email"></span>
+                <button type="button" class="mf-settings-inline-link" data-action="open-change-email">Change</button>
+              </div>
+              <div class="mf-settings-change-email-form mf-hidden">
+                <input type="email" class="mf-settings-change-email-input" autocomplete="email" maxlength="320" placeholder="New email address" />
+                <div class="mf-settings-change-email-status" aria-live="polite"></div>
+                <div class="mf-settings-change-email-actions">
+                  <button type="button" class="mf-settings-cta-btn" data-action="submit-change-email">Send confirmation</button>
+                  <button type="button" class="mf-settings-inline-link" data-action="cancel-change-email">Cancel</button>
+                </div>
+              </div>
+              <div class="mf-settings-change-email-notice mf-hidden" aria-live="polite"></div>
             </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Plan</div>
@@ -4852,6 +4915,84 @@
         const r = await sendExtensionMessage({ type: "MF_SUPABASE_DELETE_USER" });
         showToast(r?.ok ? "Account deleted." : (r?.error || "Could not delete account."));
         if (r?.ok) void tick();
+      });
+    }
+    const openChangeEmailBtn = root.querySelector('[data-action="open-change-email"]');
+    const cancelChangeEmailBtn = root.querySelector('[data-action="cancel-change-email"]');
+    const submitChangeEmailBtn = root.querySelector('[data-action="submit-change-email"]');
+    const changeEmailForm = root.querySelector(".mf-settings-change-email-form");
+    const changeEmailInput = root.querySelector(".mf-settings-change-email-input");
+    const changeEmailStatus = root.querySelector(".mf-settings-change-email-status");
+    const changeEmailNotice = root.querySelector(".mf-settings-change-email-notice");
+    const setChangeEmailStatus = (text, kind) => {
+      if (!changeEmailStatus) return;
+      changeEmailStatus.textContent = text || "";
+      changeEmailStatus.className =
+        "mf-settings-change-email-status" +
+        (kind === "err" ? " mf-settings-change-email-status-err" : "") +
+        (kind === "ok" ? " mf-settings-change-email-status-ok" : "");
+    };
+    if (openChangeEmailBtn) {
+      openChangeEmailBtn.addEventListener("click", () => {
+        if (!root || !changeEmailForm) return;
+        changeEmailForm.classList.remove("mf-hidden");
+        if (changeEmailNotice) changeEmailNotice.classList.add("mf-hidden");
+        setChangeEmailStatus("", "");
+        if (changeEmailInput) {
+          changeEmailInput.value = "";
+          requestAnimationFrame(() => changeEmailInput.focus());
+        }
+      });
+    }
+    if (cancelChangeEmailBtn) {
+      cancelChangeEmailBtn.addEventListener("click", () => {
+        if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
+        if (changeEmailInput) changeEmailInput.value = "";
+        setChangeEmailStatus("", "");
+      });
+    }
+    const submitChangeEmail = async () => {
+      if (!(submitChangeEmailBtn instanceof HTMLButtonElement)) return;
+      const newEmail = String(changeEmailInput?.value || "").trim();
+      if (!newEmail) {
+        setChangeEmailStatus("Enter a new email address.", "err");
+        return;
+      }
+      const currentEmail = String(state.cloudUser?.email || "").trim();
+      if (currentEmail && newEmail.toLowerCase() === currentEmail.toLowerCase()) {
+        setChangeEmailStatus("Use a different email address.", "err");
+        return;
+      }
+      submitChangeEmailBtn.disabled = true;
+      setChangeEmailStatus("", "");
+      try {
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_CHANGE_EMAIL", email: newEmail });
+        if (!r?.ok) {
+          setChangeEmailStatus(r?.error || "Could not send confirmation email.", "err");
+          return;
+        }
+        if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
+        if (changeEmailInput) changeEmailInput.value = "";
+        if (changeEmailNotice) {
+          changeEmailNotice.textContent = "Check your new inbox for a confirmation link";
+          changeEmailNotice.classList.remove("mf-hidden");
+        }
+        startSettingsChangeEmailCooldown();
+      } catch (e) {
+        setChangeEmailStatus(String(e?.message || e || "Could not send confirmation email."), "err");
+      } finally {
+        submitChangeEmailBtn.disabled = false;
+      }
+    };
+    if (submitChangeEmailBtn) {
+      submitChangeEmailBtn.addEventListener("click", () => void submitChangeEmail());
+    }
+    if (changeEmailInput) {
+      changeEmailInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void submitChangeEmail();
+        }
       });
     }
     const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
