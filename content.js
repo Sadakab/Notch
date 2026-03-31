@@ -24,9 +24,6 @@
   const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
   const STORAGE_KEYS = {
-    author: "markframe_author",
-    /** Data URL (small JPEG) or https:// image URL for comment avatars. */
-    avatar: "markframe_avatar",
     sidebarVisible: "markframe_sidebar_visible",
     /** Panel corner: "tl" | "tr" | "bl" | "br" (physical viewport corners). */
     panelCorner: "markframe_panel_corner",
@@ -38,18 +35,18 @@
     dataPrefix: "markframe_video_",
     clipPrefix: "markframe_clip_",
   };
-  const SYNC_SETTINGS_KEYS = {
-    displayName: "displayName",
-    companyName: "companyName",
-    logoDataUrl: "logoDataUrl",
-    panelPosition: "panelPosition",
-    autoPause: "autoPause",
-    floatPanel: "floatPanel",
-    timestampFormat: "timestampFormat",
-    notifyOnComment: "notifyOnComment",
-    notifyOnReply: "notifyOnReply",
-    plan: "plan",
-    billingPortalUrl: "billingPortalUrl",
+  const PREFS_STORAGE_KEY = "notch_prefs";
+  const PREFERENCE_DEFAULTS = {
+    displayName: "",
+    companyName: "",
+    avatar: null,
+    logoDataUrl: null,
+    panelPosition: "bottom-right",
+    autoPause: true,
+    floatPanel: false,
+    timestampFormat: "short",
+    notifyOnComment: true,
+    notifyOnReply: true,
   };
 
   const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
@@ -247,7 +244,7 @@
   /** Sync cache for renderThread (display name + avatar URL). */
   let cachedEffectiveDisplayName = "";
   let cachedAuthorAvatarUrl = "";
-  /** `chrome.storage.sync` timestampFormat — drives formatTime() for thread + PDF. */
+  /** Cached timestamp format — drives formatTime() for thread + PDF. */
   let cachedTimestampFormat = "0:39";
   /** Skip redundant init when DOM mutations fire but URL / clip / panel mode are unchanged (avoids panel flicker). */
   let lastTickSignature = "";
@@ -281,6 +278,91 @@
 
   let cloudAuthCacheValidUntil = 0;
   let cloudAuthCachedUser = null;
+  let cachedPreferences = { ...PREFERENCE_DEFAULTS };
+
+  function currentCloudUserId() {
+    return state.cloudUser?.id && String(state.cloudUser.id).trim();
+  }
+
+  function normalizePanelPositionValue(v) {
+    const p = String(v || "").trim().toLowerCase();
+    if (p === "top left" || p === "tl" || p === "top-left") return "top-left";
+    if (p === "top right" || p === "tr" || p === "top-right") return "top-right";
+    if (p === "bottom left" || p === "bl" || p === "bottom-left") return "bottom-left";
+    return "bottom-right";
+  }
+
+  function normalizeTimestampFormatValue(v) {
+    const raw = String(v || "").trim();
+    if (raw === "00:00:39" || raw.toLowerCase() === "long") return "long";
+    return "short";
+  }
+
+  function normalizePreferences(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const avatarRaw = src.avatar;
+    const logoRaw = src.logoDataUrl;
+    return {
+      displayName: String(src.displayName || "").trim(),
+      companyName: String(src.companyName || "").trim(),
+      avatar:
+        typeof avatarRaw === "string" && normalizeCommentAvatarUrl(avatarRaw)
+          ? normalizeCommentAvatarUrl(avatarRaw)
+          : null,
+      logoDataUrl:
+        typeof logoRaw === "string" && normalizeCommentAvatarUrl(logoRaw)
+          ? normalizeCommentAvatarUrl(logoRaw)
+          : null,
+      panelPosition: normalizePanelPositionValue(src.panelPosition),
+      autoPause: src.autoPause !== false,
+      floatPanel: !!src.floatPanel,
+      timestampFormat: normalizeTimestampFormatValue(src.timestampFormat),
+      notifyOnComment: src.notifyOnComment !== false,
+      notifyOnReply: src.notifyOnReply !== false,
+    };
+  }
+
+  async function loadCachedPreferences() {
+    const got = await chrome.storage.local.get(PREFS_STORAGE_KEY);
+    const prefs = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...(got[PREFS_STORAGE_KEY] || {}) });
+    cachedPreferences = prefs;
+    return prefs;
+  }
+
+  async function saveCachedPreferences(nextPrefs) {
+    const normalized = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...(nextPrefs || {}) });
+    cachedPreferences = normalized;
+    await chrome.storage.local.set({ [PREFS_STORAGE_KEY]: normalized });
+    return normalized;
+  }
+
+  async function updateCachedPreferences(patch) {
+    const current = await loadCachedPreferences();
+    return saveCachedPreferences({ ...current, ...(patch || {}) });
+  }
+
+  function queueSupabasePreferenceSync(nextPrefs) {
+    if (!state.cloudUser?.id) return;
+    void sendExtensionMessage({ type: "MF_SUPABASE_SET_PREFERENCES", preferences: nextPrefs }).catch(() => {});
+  }
+
+  async function refreshPreferencesFromSupabase() {
+    if (!state.cloudUser?.id) return loadCachedPreferences();
+    try {
+      const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
+      const incoming = normalizePreferences(r?.user?.preferences || {});
+      const merged = { ...PREFERENCE_DEFAULTS, ...incoming };
+      const current = await loadCachedPreferences();
+      if (JSON.stringify(current) !== JSON.stringify(merged)) {
+        await saveCachedPreferences(merged);
+      } else {
+        cachedPreferences = merged;
+      }
+      return merged;
+    } catch {
+      return loadCachedPreferences();
+    }
+  }
 
   /** After extension reload/update, old content scripts lose the messaging port — avoid unhandled rejections everywhere. */
   function isExtensionContextInvalidated(what) {
@@ -2147,14 +2229,14 @@
     await chrome.storage.local.remove(localClipCacheKeys(clip));
   }
 
-  /** Stored display-name override; empty string means use account email or "You". */
   async function loadAuthorOverride() {
-    const { [STORAGE_KEYS.author]: name } = await chrome.storage.local.get(STORAGE_KEYS.author);
-    return typeof name === "string" ? name : "";
+    const prefs = await loadCachedPreferences();
+    return String(prefs.displayName || "").trim();
   }
 
   async function saveAuthorOverride(override) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.author]: override });
+    const next = await updateCachedPreferences({ displayName: String(override || "").trim() });
+    queueSupabasePreferenceSync(next);
   }
 
   async function effectiveDisplayName() {
@@ -2169,12 +2251,13 @@
   async function refreshAuthorPresentationCache() {
     await refreshCloudUser(false);
     cachedEffectiveDisplayName = await effectiveDisplayName();
-    const { [STORAGE_KEYS.avatar]: av } = await chrome.storage.local.get(STORAGE_KEYS.avatar);
-    cachedAuthorAvatarUrl = typeof av === "string" && av.trim() ? av.trim() : "";
+    const prefs = await loadCachedPreferences();
+    cachedAuthorAvatarUrl = typeof prefs.avatar === "string" && prefs.avatar.trim() ? prefs.avatar.trim() : "";
   }
 
   async function loadStoredAvatar() {
-    const { [STORAGE_KEYS.avatar]: v } = await chrome.storage.local.get(STORAGE_KEYS.avatar);
+    const prefs = await loadCachedPreferences();
+    const v = prefs.avatar;
     return typeof v === "string" && v.trim() ? v.trim() : "";
   }
 
@@ -2333,33 +2416,11 @@
     }
   }
 
-  async function loadCloudCompanyLogo() {
-    if (!state.cloudUser?.id) return "";
-    try {
-      const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
-      return normalizeCommentAvatarUrl(r?.user?.companyLogoDataUrl);
-    } catch {
-      return "";
-    }
-  }
-
   async function saveCompanyLogoSetting(dataUrl) {
     const normalized = normalizeCommentAvatarUrl(dataUrl);
     if (!normalized) throw new Error("Could not use that image.");
-    if (state.cloudUser?.id) {
-      const cloudSaved = await sendExtensionMessage({
-        type: "MF_SUPABASE_SET_COMPANY_LOGO",
-        logoDataUrl: normalized,
-      });
-      if (!cloudSaved?.ok) {
-        throw new Error(cloudSaved?.error || "Could not sync logo to cloud.");
-      }
-    }
-    try {
-      await saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, normalized);
-    } catch {
-      // Best-effort cache only; Supabase is the source of truth for logos.
-    }
+    const next = await updateCachedPreferences({ logoDataUrl: normalized });
+    queueSupabasePreferenceSync(next);
   }
 
   function resetSettingsAvatarFormState() {
@@ -2380,26 +2441,30 @@
     if (!overlay.classList.contains("mf-hidden")) return;
     await refreshCloudUser(true);
     const email = state.cloudUser?.email?.trim() || "";
-    const s = await loadSyncSettings();
-    const cloudLogo = await loadCloudCompanyLogo();
-    if (cloudLogo && cloudLogo !== s.logoDataUrl) {
-      s.logoDataUrl = cloudLogo;
-      try {
-        await saveSettingSync(SYNC_SETTINGS_KEYS.logoDataUrl, cloudLogo);
-      } catch {
+    const s = await loadCachedPreferences();
+    void refreshPreferencesFromSupabase().then((fresh) => {
+      if (!root || root.dataset.mfLocked === "1") return;
+      cachedTimestampFormat = fresh.timestampFormat === "long" ? "00:00:39" : "0:39";
+      const currentEmail = state.cloudUser?.email?.trim() || "";
+      const nameInp = root.querySelector(".mf-settings-display-name");
+      if (nameInp && !document.activeElement?.isSameNode(nameInp)) {
+        nameInp.value = fresh.displayName || currentEmail;
       }
-    }
-    cachedTimestampFormat = s.timestampFormat;
-    const fallbackName = (await loadAuthorOverride()).trim() || email;
-    inp.value = s.displayName || fallbackName;
+      const company = root.querySelector(".mf-settings-company-name");
+      if (company) company.value = fresh.companyName;
+      applySettingsCompanyLogoPreview(fresh.logoDataUrl || "");
+    });
+    cachedTimestampFormat = s.timestampFormat === "long" ? "00:00:39" : "0:39";
+    const fallbackName = s.displayName || email;
+    inp.value = fallbackName;
     inp.placeholder = email || "Display name";
     const company = root.querySelector(".mf-settings-company-name");
     if (company) company.value = s.companyName;
-    const posLabel = panelCornerToLabel(s.panelCorner);
+    const posLabel = panelCornerToLabel(normalizePanelPosition(s.panelPosition));
     const posValue = root.querySelector(".mf-settings-panel-position-value");
     if (posValue) posValue.textContent = posLabel;
     const tsValue = root.querySelector(".mf-settings-timestamp-format-value");
-    if (tsValue) tsValue.textContent = s.timestampFormat;
+    if (tsValue) tsValue.textContent = s.timestampFormat === "long" ? "00:00:39" : "0:39";
     const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
     if (autoPauseCb) autoPauseCb.checked = !!s.autoPause;
     const floatCb = root.querySelector(".mf-settings-float-panel");
@@ -2416,7 +2481,7 @@
     if (accountEmail) accountEmail.textContent = email || "Not signed in";
     const planBadge = root.querySelector(".mf-settings-plan-badge");
     if (planBadge) planBadge.textContent = pro ? "PRO" : "Free";
-    applySettingsCompanyLogoPreview(s.logoDataUrl);
+    applySettingsCompanyLogoPreview(s.logoDataUrl || "");
     const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
     const billingBtn = root.querySelector('[data-action="manage-billing"]');
     if (upgradeBtn) upgradeBtn.classList.toggle("mf-hidden", pro);
@@ -2463,10 +2528,6 @@
     root.querySelectorAll(".mf-settings-dropdown.mf-open").forEach((d) => d.classList.remove("mf-open"));
   }
 
-  async function saveSettingSync(key, value) {
-    await chrome.storage.sync.set({ [key]: value });
-  }
-
   async function applyDisplayNameSetting() {
     if (!root) return;
     await refreshCloudUser(false);
@@ -2477,10 +2538,7 @@
     const email = state.cloudUser?.email?.trim() || "";
     let override = v;
     if (!v || (email && v === email)) override = "";
-    await Promise.all([
-      saveSettingSync(SYNC_SETTINGS_KEYS.displayName, v),
-      saveAuthorOverride(override),
-    ]);
+    await saveAuthorOverride(override);
     await refreshAuthorPresentationCache();
     await relabelOwnCommentsInActiveClip(previousDisplayName);
     if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
@@ -2497,18 +2555,19 @@
     if (valueEl) valueEl.textContent = label;
     row.classList.remove("mf-open");
     if (target === "panelPosition") {
-      const corner = normalizePanelPosition(value);
-      await Promise.all([
-        saveSettingSync(SYNC_SETTINGS_KEYS.panelPosition, corner),
-        chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: corner }),
-      ]);
+      const panelPosition = normalizePanelPositionValue(value);
+      const corner = normalizePanelPosition(panelPosition);
+      const next = await updateCachedPreferences({ panelPosition });
+      queueSupabasePreferenceSync(next);
+      await chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: corner });
       applyPanelCorner(corner);
       return;
     }
     if (target === "timestampFormat") {
-      const fmt = normalizeTimestampFormat(value);
-      await saveSettingSync(SYNC_SETTINGS_KEYS.timestampFormat, fmt);
-      cachedTimestampFormat = fmt;
+      const fmt = normalizeTimestampFormat(value) === "00:00:39" ? "long" : "short";
+      const next = await updateCachedPreferences({ timestampFormat: fmt });
+      queueSupabasePreferenceSync(next);
+      cachedTimestampFormat = fmt === "long" ? "00:00:39" : "0:39";
       if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
       return;
     }
@@ -2528,10 +2587,10 @@
 
   function normalizePanelPosition(pos) {
     const p = String(pos || "").trim().toLowerCase();
-    if (p === "top left") return "tl";
-    if (p === "top right") return "tr";
-    if (p === "bottom left") return "bl";
-    if (p === "bottom right") return "br";
+    if (p === "top left" || p === "top-left") return "tl";
+    if (p === "top right" || p === "top-right") return "tr";
+    if (p === "bottom left" || p === "bottom-left") return "bl";
+    if (p === "bottom right" || p === "bottom-right") return "br";
     return normalizePanelCorner(p);
   }
 
@@ -2543,12 +2602,13 @@
   }
 
   function normalizeTimestampFormat(v) {
-    return v === "00:00:39" ? "00:00:39" : "0:39";
+    const s = String(v || "").trim().toLowerCase();
+    return v === "00:00:39" || s === "long" ? "00:00:39" : "0:39";
   }
 
   async function refreshTimestampFormatCache() {
-    const got = await chrome.storage.sync.get(SYNC_SETTINGS_KEYS.timestampFormat);
-    cachedTimestampFormat = normalizeTimestampFormat(got[SYNC_SETTINGS_KEYS.timestampFormat]);
+    const prefs = await loadCachedPreferences();
+    cachedTimestampFormat = prefs.timestampFormat === "long" ? "00:00:39" : "0:39";
   }
 
   function isProUser() {
@@ -2572,27 +2632,10 @@
     updateExportPdfButtonState();
   }
 
-  async function loadSyncSettings() {
-    const got = await chrome.storage.sync.get(Object.values(SYNC_SETTINGS_KEYS));
-    return {
-      displayName: String(got[SYNC_SETTINGS_KEYS.displayName] || "").trim(),
-      companyName: String(got[SYNC_SETTINGS_KEYS.companyName] || "").trim(),
-      logoDataUrl: typeof got[SYNC_SETTINGS_KEYS.logoDataUrl] === "string" ? got[SYNC_SETTINGS_KEYS.logoDataUrl] : "",
-      panelCorner: normalizePanelPosition(got[SYNC_SETTINGS_KEYS.panelPosition]),
-      autoPause: got[SYNC_SETTINGS_KEYS.autoPause] !== false,
-      floatPanel: !!got[SYNC_SETTINGS_KEYS.floatPanel],
-      timestampFormat: normalizeTimestampFormat(got[SYNC_SETTINGS_KEYS.timestampFormat]),
-      notifyOnComment: got[SYNC_SETTINGS_KEYS.notifyOnComment] !== false,
-      notifyOnReply: got[SYNC_SETTINGS_KEYS.notifyOnReply] !== false,
-      plan: String(got[SYNC_SETTINGS_KEYS.plan] || "").trim().toLowerCase() === "pro" ? "pro" : "free",
-      billingPortalUrl: String(got[SYNC_SETTINGS_KEYS.billingPortalUrl] || "").trim(),
-    };
-  }
-
   async function loadPanelCorner() {
-    const sync = await chrome.storage.sync.get(SYNC_SETTINGS_KEYS.panelPosition);
-    const fromSync = normalizePanelPosition(sync[SYNC_SETTINGS_KEYS.panelPosition]);
-    if (fromSync) return fromSync;
+    const prefs = await loadCachedPreferences();
+    const fromPrefs = normalizePanelPosition(prefs.panelPosition);
+    if (fromPrefs) return fromPrefs;
     const local = await chrome.storage.local.get(STORAGE_KEYS.panelCorner);
     return normalizePanelCorner(local[STORAGE_KEYS.panelCorner]);
   }
@@ -2634,26 +2677,18 @@
   }
 
   async function applySidebarLayoutFromStorage() {
-    const [gotLocal, gotSync] = await Promise.all([
+    const [gotLocal, prefs] = await Promise.all([
       chrome.storage.local.get([
         STORAGE_KEYS.sidebarVisible,
         STORAGE_KEYS.panelCorner,
         STORAGE_KEYS.autoPauseCommentTyping,
       ]),
-      chrome.storage.sync.get([
-        SYNC_SETTINGS_KEYS.panelPosition,
-        SYNC_SETTINGS_KEYS.autoPause,
-        SYNC_SETTINGS_KEYS.floatPanel,
-      ]),
+      loadCachedPreferences(),
     ]);
     applySidebarVisibility(gotLocal[STORAGE_KEYS.sidebarVisible] !== false);
-    applyPanelCorner(normalizePanelPosition(gotSync[SYNC_SETTINGS_KEYS.panelPosition] || gotLocal[STORAGE_KEYS.panelCorner]));
-    applyAutoPauseCommentTypingPref(
-      gotSync[SYNC_SETTINGS_KEYS.autoPause] != null
-        ? gotSync[SYNC_SETTINGS_KEYS.autoPause]
-        : gotLocal[STORAGE_KEYS.autoPauseCommentTyping]
-    );
-    applyFloatPanelPref(!!gotSync[SYNC_SETTINGS_KEYS.floatPanel]);
+    applyPanelCorner(normalizePanelPosition(prefs.panelPosition || gotLocal[STORAGE_KEYS.panelCorner]));
+    applyAutoPauseCommentTypingPref(prefs.autoPause);
+    applyFloatPanelPref(!!prefs.floatPanel);
   }
 
   async function setSidebarVisible(visible) {
@@ -2724,10 +2759,6 @@
   function normalizeAuthorId(v) {
     if (typeof v !== "string") return "";
     return v.trim();
-  }
-
-  function currentCloudUserId() {
-    return state.cloudUser?.id && String(state.cloudUser.id).trim();
   }
 
   function isOwnComment(comment) {
@@ -4647,9 +4678,11 @@
     }
     const companyInp = root.querySelector(".mf-settings-company-name");
     if (companyInp) {
-      companyInp.addEventListener("change", () =>
-        void saveSettingSync(SYNC_SETTINGS_KEYS.companyName, companyInp.value.trim())
-      );
+      companyInp.addEventListener("change", () => {
+        void updateCachedPreferences({ companyName: companyInp.value.trim() }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
+      });
     }
     const pickProfileAvatarBtn = root.querySelector('[data-action="pick-profile-avatar"]');
     const profileAvatarFileInp = root.querySelector(".mf-settings-profile-avatar-file");
@@ -4661,7 +4694,8 @@
         const previousDisplayName = cachedEffectiveDisplayName;
         compressAvatarFile(f)
           .then(async (dataUrl) => {
-            await chrome.storage.local.set({ [STORAGE_KEYS.avatar]: dataUrl });
+            const next = await updateCachedPreferences({ avatar: dataUrl });
+            queueSupabasePreferenceSync(next);
             await refreshAuthorPresentationCache();
             await relabelOwnCommentsInActiveClip(previousDisplayName);
             const nameInp = root.querySelector(".mf-settings-display-name");
@@ -4687,8 +4721,8 @@
         if (!f) return;
         compressCompanyLogoFile(f)
           .then((dataUrl) => saveCompanyLogoSetting(dataUrl))
-          .then(() => loadSyncSettings())
-          .then((s) => applySettingsCompanyLogoPreview(s.logoDataUrl))
+          .then(() => loadCachedPreferences())
+          .then((s) => applySettingsCompanyLogoPreview(s.logoDataUrl || ""))
           .then(() => showToast("Logo saved."))
           .catch((err) => showToast(err.message || "Could not use that image."));
         avatarFileInp.value = "";
@@ -4716,17 +4750,19 @@
     const autoPauseToggle = root.querySelector(".mf-settings-auto-pause-comments");
     if (autoPauseToggle) {
       autoPauseToggle.addEventListener("change", () => {
-        void Promise.all([
-          saveSettingSync(SYNC_SETTINGS_KEYS.autoPause, !!autoPauseToggle.checked),
-          chrome.storage.local.set({ [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseToggle.checked }),
-        ]);
+        void updateCachedPreferences({ autoPause: !!autoPauseToggle.checked }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
+        void chrome.storage.local.set({ [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseToggle.checked });
         applyAutoPauseCommentTypingPref(autoPauseToggle.checked);
       });
     }
     const floatToggle = root.querySelector(".mf-settings-float-panel");
     if (floatToggle) {
       floatToggle.addEventListener("change", () => {
-        void saveSettingSync(SYNC_SETTINGS_KEYS.floatPanel, !!floatToggle.checked);
+        void updateCachedPreferences({ floatPanel: !!floatToggle.checked }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
         applyFloatPanelPref(floatToggle.checked);
       });
     }
@@ -4734,14 +4770,18 @@
     if (notifyComment) {
       notifyComment.addEventListener("change", () => {
         if (!isProUser()) return;
-        void saveSettingSync(SYNC_SETTINGS_KEYS.notifyOnComment, !!notifyComment.checked);
+        void updateCachedPreferences({ notifyOnComment: !!notifyComment.checked }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
       });
     }
     const notifyReply = root.querySelector(".mf-settings-notify-reply");
     if (notifyReply) {
       notifyReply.addEventListener("change", () => {
         if (!isProUser()) return;
-        void saveSettingSync(SYNC_SETTINGS_KEYS.notifyOnReply, !!notifyReply.checked);
+        void updateCachedPreferences({ notifyOnReply: !!notifyReply.checked }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
       });
     }
 
@@ -4763,8 +4803,8 @@
     const manageBillingBtn = root.querySelector('[data-action="manage-billing"]');
     if (manageBillingBtn) {
       manageBillingBtn.addEventListener("click", async () => {
-        const s = await loadSyncSettings();
-        const url = s.billingPortalUrl || "https://notch.video/billing";
+        const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
+        const url = String(r?.user?.billingPortalUrl || "").trim() || "https://notch.video/billing";
         window.open(url, "_blank", "noopener");
       });
     }
@@ -6079,7 +6119,15 @@
       if (changes[STORAGE_KEYS.autoPauseCommentTyping]) {
         applyAutoPauseCommentTypingPref(changes[STORAGE_KEYS.autoPauseCommentTyping].newValue);
       }
-      if (changes[STORAGE_KEYS.avatar] || changes[STORAGE_KEYS.author]) {
+      if (changes[PREFS_STORAGE_KEY]) {
+        const next = normalizePreferences(changes[PREFS_STORAGE_KEY].newValue || {});
+        cachedPreferences = next;
+        applyPanelCorner(normalizePanelPosition(next.panelPosition));
+        applyAutoPauseCommentTypingPref(next.autoPause);
+        applyFloatPanelPref(!!next.floatPanel);
+        cachedTimestampFormat = next.timestampFormat === "long" ? "00:00:39" : "0:39";
+      }
+      if (changes[PREFS_STORAGE_KEY]) {
         void refreshAuthorPresentationCache()
           .then(() => {
             if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
@@ -6093,7 +6141,12 @@
       ) {
         cloudAuthCacheValidUntil = 0;
         lastTickSignature = "";
-        void refreshCloudUser(true).then(() => void tick());
+        void refreshCloudUser(true).then(async () => {
+          await refreshPreferencesFromSupabase();
+          await refreshTimestampFormatCache();
+          await refreshAuthorPresentationCache();
+          await tick();
+        });
       }
       const touched = Object.keys(changes).some(
         (k) => k.startsWith(STORAGE_KEYS.clipPrefix) || k.startsWith(STORAGE_KEYS.dataPrefix)
@@ -6102,23 +6155,6 @@
         renderDashboard();
       }
       return;
-    }
-    if (area === "sync") {
-      if (changes[SYNC_SETTINGS_KEYS.panelPosition]) {
-        applyPanelCorner(changes[SYNC_SETTINGS_KEYS.panelPosition].newValue);
-      }
-      if (changes[SYNC_SETTINGS_KEYS.autoPause]) {
-        applyAutoPauseCommentTypingPref(changes[SYNC_SETTINGS_KEYS.autoPause].newValue);
-      }
-      if (changes[SYNC_SETTINGS_KEYS.floatPanel]) {
-        applyFloatPanelPref(changes[SYNC_SETTINGS_KEYS.floatPanel].newValue);
-      }
-      if (changes[SYNC_SETTINGS_KEYS.timestampFormat]) {
-        cachedTimestampFormat = normalizeTimestampFormat(
-          changes[SYNC_SETTINGS_KEYS.timestampFormat].newValue
-        );
-        if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
-      }
     }
   }
 
@@ -6273,6 +6309,12 @@
   mo.observe(document.documentElement, { childList: true, subtree: true });
 
   chrome.storage.onChanged.addListener(storageOnChanged);
+
+  void loadCachedPreferences()
+    .then(() => refreshTimestampFormatCache())
+    .then(() => refreshAuthorPresentationCache())
+    .then(() => refreshPreferencesFromSupabase())
+    .catch(() => {});
 
   let compactLayoutResizeTid = null;
   window.addEventListener("resize", () => {

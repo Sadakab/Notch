@@ -17416,14 +17416,44 @@ function planFromSupabaseUser(u) {
   const raw = u.app_metadata?.plan || u.user_metadata?.plan || u.app_metadata?.tier || u.user_metadata?.tier;
   return String(raw || "").trim().toLowerCase() === "pro" ? "pro" : "free";
 }
-function companyLogoFromSupabaseUser(u) {
-  if (!u) return "";
-  const raw = typeof u.user_metadata?.company_logo_data_url === "string" ? u.user_metadata.company_logo_data_url : "";
-  const s = raw.trim();
-  if (!s) return "";
-  if (s.startsWith("data:image/")) return s;
-  if (s.startsWith("https://")) return s;
-  return "";
+function normalizePanelPositionValue(v) {
+  const p = String(v || "").trim().toLowerCase();
+  if (p === "top-left" || p === "top left" || p === "tl") return "top-left";
+  if (p === "top-right" || p === "top right" || p === "tr") return "top-right";
+  if (p === "bottom-left" || p === "bottom left" || p === "bl") return "bottom-left";
+  return "bottom-right";
+}
+function normalizeTimestampFormatValue(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "long" || s === "00:00:39" ? "long" : "short";
+}
+function normalizePreferences(input) {
+  const src = input && typeof input === "object" ? input : {};
+  const avatarRaw = src.avatar;
+  const logoRaw = src.logoDataUrl;
+  const avatar = typeof avatarRaw === "string" && (avatarRaw.startsWith("data:image/") || avatarRaw.startsWith("https://")) ? avatarRaw : null;
+  const logo = typeof logoRaw === "string" && (logoRaw.startsWith("data:image/") || logoRaw.startsWith("https://")) ? logoRaw : null;
+  return {
+    displayName: String(src.displayName || "").trim(),
+    companyName: String(src.companyName || "").trim(),
+    avatar,
+    logoDataUrl: logo,
+    panelPosition: normalizePanelPositionValue(src.panelPosition),
+    autoPause: src.autoPause !== false,
+    floatPanel: !!src.floatPanel,
+    timestampFormat: normalizeTimestampFormatValue(src.timestampFormat),
+    notifyOnComment: src.notifyOnComment !== false,
+    notifyOnReply: src.notifyOnReply !== false
+  };
+}
+function preferencesFromSupabaseUser(u) {
+  const meta = u?.user_metadata && typeof u.user_metadata === "object" ? u.user_metadata : {};
+  return normalizePreferences({ ...PREFERENCE_DEFAULTS, ...meta });
+}
+function billingPortalUrlFromSupabaseUser(u) {
+  const app = u?.app_metadata && typeof u.app_metadata === "object" ? u.app_metadata : {};
+  const raw = app.billing_portal_url || app.billingPortalUrl || app.billing_portal || app.billingPortal || "";
+  return String(raw || "").trim();
 }
 function dropboxHostnameOk(h) {
   return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
@@ -17899,13 +17929,28 @@ function handleRuntimeMessage(msg, sendResponse) {
     });
     return true;
   }
+  if (msg?.type === "MF_SUPABASE_SIGN_OUT") {
+    const client = getSupabase();
+    if (!client) {
+      void Promise.all([chrome.storage.local.clear(), chrome.storage.sync.clear()]).then(() => {
+        sendResponse({ ok: true });
+      });
+      return false;
+    }
+    client.auth.signOut().then(async () => {
+      invalidateSupabaseClient();
+      await Promise.all([chrome.storage.local.clear(), chrome.storage.sync.clear()]);
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
   if (msg?.type === "MF_SUPABASE_GET_USER") {
     const client = getSupabase();
     if (!client) {
       sendResponse({ ok: false, configured: false, user: null });
       return false;
     }
-    void client.auth.getUser().then(async ({ data, error }) => {
+    void client.auth.getUser().then(({ data, error }) => {
       if (error) {
         sendResponse({
           ok: false,
@@ -17917,36 +17962,25 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       const user = data?.user ?? null;
       const plan = planFromSupabaseUser(user);
-      try {
-        const { session } = await getSessionSafe(client);
-        const accessToken = String(session?.access_token || "");
-        const refreshToken = String(session?.refresh_token || "");
-        if (user && accessToken && refreshToken) {
-          await client.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken
-          });
-        }
-      } catch {
-      }
+      const preferences = preferencesFromSupabaseUser(user);
+      const billingPortalUrl = billingPortalUrlFromSupabaseUser(user);
       sendResponse({
         ok: true,
         configured: true,
-        user: user ? { id: user.id, email: user.email, plan, companyLogoDataUrl: companyLogoFromSupabaseUser(user) } : null
+        user: user ? { id: user.id, email: user.email, plan, billingPortalUrl, preferences } : null
       });
     }).catch((e) => {
       sendResponse({ ok: false, configured: true, user: null, error: String(e?.message || e) });
     });
     return true;
   }
-  if (msg?.type === "MF_SUPABASE_SET_COMPANY_LOGO") {
+  if (msg?.type === "MF_SUPABASE_SET_PREFERENCES") {
     const client = getSupabase();
     if (!client) {
       sendResponse({ ok: false, error: "not_configured" });
       return false;
     }
-    const rawLogo = typeof msg.logoDataUrl === "string" ? msg.logoDataUrl.trim() : "";
-    const nextLogo = rawLogo && (rawLogo.startsWith("data:image/") || rawLogo.startsWith("https://")) ? rawLogo : "";
+    const incoming = normalizePreferences(msg.preferences || {});
     void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
       const user = session?.user;
       if (sessErr || !user) {
@@ -17954,7 +17988,7 @@ function handleRuntimeMessage(msg, sendResponse) {
         return;
       }
       const currentMeta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
-      const data = { ...currentMeta, company_logo_data_url: nextLogo || null };
+      const data = { ...currentMeta, ...incoming };
       const { data: updated, error } = await client.auth.updateUser({ data });
       if (error) {
         sendResponse({ ok: false, error: error.message || "save_failed" });
@@ -17962,36 +17996,8 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       sendResponse({
         ok: true,
-        logoDataUrl: companyLogoFromSupabaseUser(updated?.user ?? user)
+        preferences: preferencesFromSupabaseUser(updated?.user ?? user)
       });
-    }).catch((e) => {
-      sendResponse({ ok: false, error: String(e?.message || e) });
-    });
-    return true;
-  }
-  if (msg?.type === "MF_OPEN_TAB") {
-    const url = String(msg?.url || "").trim();
-    if (!url) {
-      sendResponse({ ok: false, error: "invalid_url" });
-      return false;
-    }
-    void chrome.tabs.create({ url, active: true }).then(() => {
-      sendResponse({ ok: true });
-    }).catch((e) => {
-      sendResponse({ ok: false, error: String(e?.message || e) });
-    });
-    return true;
-  }
-  if (msg?.type === "MF_SUPABASE_SIGN_OUT") {
-    const client = getSupabase();
-    if (!client) {
-      sendResponse({ ok: true });
-      return false;
-    }
-    client.auth.signOut().then(async () => {
-      invalidateSupabaseClient();
-      await syncAuthMarkerFromChromeStorage();
-      sendResponse({ ok: true });
     });
     return true;
   }
@@ -18552,7 +18558,7 @@ async function restoreAuthMarker() {
     console.warn("Notch restoreAuthMarker", e?.message || e);
   }
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, NOTCH_DIAG, supabase;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, NOTCH_DIAG, PREFERENCE_DEFAULTS, supabase;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -18563,6 +18569,18 @@ var init_sw_cloud = __esm({
     AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
     CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
     NOTCH_DIAG = true;
+    PREFERENCE_DEFAULTS = {
+      displayName: "",
+      companyName: "",
+      avatar: null,
+      logoDataUrl: null,
+      panelPosition: "bottom-right",
+      autoPause: true,
+      floatPanel: false,
+      timestampFormat: "short",
+      notifyOnComment: true,
+      notifyOnReply: true
+    };
     supabase = null;
   }
 });
@@ -18579,12 +18597,11 @@ var require_sw_main = __commonJS({
       "MF_AUTH_CHANGED",
       "MF_SUPABASE_SESSION",
       "MF_SUPABASE_GET_USER",
-      "MF_SUPABASE_SET_COMPANY_LOGO",
+      "MF_SUPABASE_SET_PREFERENCES",
       "MF_SUPABASE_SIGN_OUT",
       "MF_SUPABASE_CHANGE_EMAIL",
       "MF_SUPABASE_RESET_PASSWORD",
       "MF_SUPABASE_DELETE_USER",
-      "MF_OPEN_TAB",
       "MF_CLOUD_LOAD_CLIP",
       "MF_CLOUD_SAVE_CLIP",
       "MF_CLOUD_LIST_CLIPS",
@@ -18721,10 +18738,6 @@ var require_sw_main = __commonJS({
         return;
       }
       if (t === "MF_SUPABASE_CHANGE_EMAIL" || t === "MF_SUPABASE_RESET_PASSWORD") {
-        sendResponse({ ok: false, error: "Cloud handler failed." });
-        return;
-      }
-      if (t === "MF_SUPABASE_SET_COMPANY_LOGO") {
         sendResponse({ ok: false, error: "Cloud handler failed." });
         return;
       }

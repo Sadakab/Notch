@@ -33,6 +33,75 @@ function planFromSupabaseUser(u) {
   return String(raw || "").trim().toLowerCase() === "pro" ? "pro" : "free";
 }
 
+const PREFERENCE_DEFAULTS = {
+  displayName: "",
+  companyName: "",
+  avatar: null,
+  logoDataUrl: null,
+  panelPosition: "bottom-right",
+  autoPause: true,
+  floatPanel: false,
+  timestampFormat: "short",
+  notifyOnComment: true,
+  notifyOnReply: true,
+};
+
+function normalizePanelPositionValue(v) {
+  const p = String(v || "").trim().toLowerCase();
+  if (p === "top-left" || p === "top left" || p === "tl") return "top-left";
+  if (p === "top-right" || p === "top right" || p === "tr") return "top-right";
+  if (p === "bottom-left" || p === "bottom left" || p === "bl") return "bottom-left";
+  return "bottom-right";
+}
+
+function normalizeTimestampFormatValue(v) {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "long" || s === "00:00:39" ? "long" : "short";
+}
+
+function normalizePreferences(input) {
+  const src = input && typeof input === "object" ? input : {};
+  const avatarRaw = src.avatar;
+  const logoRaw = src.logoDataUrl;
+  const avatar =
+    typeof avatarRaw === "string" &&
+    (avatarRaw.startsWith("data:image/") || avatarRaw.startsWith("https://"))
+      ? avatarRaw
+      : null;
+  const logo =
+    typeof logoRaw === "string" && (logoRaw.startsWith("data:image/") || logoRaw.startsWith("https://"))
+      ? logoRaw
+      : null;
+  return {
+    displayName: String(src.displayName || "").trim(),
+    companyName: String(src.companyName || "").trim(),
+    avatar,
+    logoDataUrl: logo,
+    panelPosition: normalizePanelPositionValue(src.panelPosition),
+    autoPause: src.autoPause !== false,
+    floatPanel: !!src.floatPanel,
+    timestampFormat: normalizeTimestampFormatValue(src.timestampFormat),
+    notifyOnComment: src.notifyOnComment !== false,
+    notifyOnReply: src.notifyOnReply !== false,
+  };
+}
+
+function preferencesFromSupabaseUser(u) {
+  const meta = u?.user_metadata && typeof u.user_metadata === "object" ? u.user_metadata : {};
+  return normalizePreferences({ ...PREFERENCE_DEFAULTS, ...meta });
+}
+
+function billingPortalUrlFromSupabaseUser(u) {
+  const app = u?.app_metadata && typeof u.app_metadata === "object" ? u.app_metadata : {};
+  const raw =
+    app.billing_portal_url ||
+    app.billingPortalUrl ||
+    app.billing_portal ||
+    app.billingPortal ||
+    "";
+  return String(raw || "").trim();
+}
+
 function dropboxHostnameOk(h) {
   return h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com";
 }
@@ -611,13 +680,80 @@ export function handleRuntimeMessage(msg, sendResponse) {
   if (msg?.type === "MF_SUPABASE_SIGN_OUT") {
     const client = getSupabase();
     if (!client) {
-      sendResponse({ ok: true });
+      void Promise.all([chrome.storage.local.clear(), chrome.storage.sync.clear()]).then(() => {
+        sendResponse({ ok: true });
+      });
       return false;
     }
     client.auth.signOut().then(async () => {
       invalidateSupabaseClient();
-      await syncAuthMarkerFromChromeStorage();
+      await Promise.all([chrome.storage.local.clear(), chrome.storage.sync.clear()]);
       sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_GET_USER") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, configured: false, user: null });
+      return false;
+    }
+    void client.auth
+      .getUser()
+      .then(({ data, error }) => {
+        if (error) {
+          sendResponse({
+            ok: false,
+            configured: true,
+            user: null,
+            error: String(error?.message ?? error ?? ""),
+          });
+          return;
+        }
+        const user = data?.user ?? null;
+        const plan = planFromSupabaseUser(user);
+        const preferences = preferencesFromSupabaseUser(user);
+        const billingPortalUrl = billingPortalUrlFromSupabaseUser(user);
+        sendResponse({
+          ok: true,
+          configured: true,
+          user: user
+            ? { id: user.id, email: user.email, plan, billingPortalUrl, preferences }
+            : null,
+        });
+      })
+      .catch((e) => {
+        sendResponse({ ok: false, configured: true, user: null, error: String(e?.message || e) });
+      });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_SET_PREFERENCES") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured" });
+      return false;
+    }
+    const incoming = normalizePreferences(msg.preferences || {});
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      const user = session?.user;
+      if (sessErr || !user) {
+        sendResponse({ ok: false, error: "not_authenticated" });
+        return;
+      }
+      const currentMeta =
+        user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+      const data = { ...currentMeta, ...incoming };
+      const { data: updated, error } = await client.auth.updateUser({ data });
+      if (error) {
+        sendResponse({ ok: false, error: error.message || "save_failed" });
+        return;
+      }
+      sendResponse({
+        ok: true,
+        preferences: preferencesFromSupabaseUser(updated?.user ?? user),
+      });
     });
     return true;
   }
