@@ -2415,7 +2415,7 @@
     const accountEmail = root.querySelector(".mf-settings-account-email");
     if (accountEmail) accountEmail.textContent = email || "Not signed in";
     const planBadge = root.querySelector(".mf-settings-plan-badge");
-    if (planBadge) planBadge.textContent = pro ? "Pro" : "Free";
+    if (planBadge) planBadge.textContent = pro ? "PRO" : "Free";
     applySettingsCompanyLogoPreview(s.logoDataUrl);
     const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
     const billingBtn = root.querySelector('[data-action="manage-billing"]');
@@ -4594,9 +4594,9 @@
         void refreshWatchClipFromSupabase();
       }
     });
-    const headerEl = root.querySelector(".mf-header");
-    if (headerEl) {
-      headerEl.addEventListener("mousedown", (e) => {
+    const bindPanelDragHandle = (handleEl) => {
+      if (!handleEl) return;
+      handleEl.addEventListener("mousedown", (e) => {
         if (!root || root.dataset.mfFloating !== "1") return;
         const target = e.target instanceof Element ? e.target : null;
         if (target && target.closest("button,input,textarea,select,a")) return;
@@ -4609,6 +4609,10 @@
         };
         e.preventDefault();
       });
+    };
+    bindPanelDragHandle(root.querySelector(".mf-header"));
+    bindPanelDragHandle(root.querySelector(".mf-settings-header"));
+    if (root) {
       document.addEventListener("mousemove", (e) => {
         if (!root || !panelDragState || root.dataset.mfFloating !== "1") return;
         const dx = e.clientX - panelDragState.pointerX;
