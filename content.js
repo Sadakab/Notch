@@ -292,6 +292,8 @@
     reviewOwnerEmail: "",
     /** Current clip review row id in Supabase (empty when unknown/local-only). */
     currentReviewId: "",
+    /** `null` = show all root comments; `"complete"` | `"incomplete"` = filter thread list. */
+    commentCompleteFilter: null,
   };
 
   let cloudAuthCacheValidUntil = 0;
@@ -2732,6 +2734,34 @@
     root.classList.toggle("mf-user-pro", isProUser());
     updateCopyReviewLinkButtonState();
     updateExportPdfButtonState();
+    updateCommentFilterToolbarUi();
+  }
+
+  function closeCommentFilterDropdown() {
+    if (!root) return;
+    const wrap = root.querySelector(".mf-toolbar-filter-dropdown");
+    const btn = root.querySelector('[data-action="toggle-comment-filter"]');
+    if (wrap) wrap.classList.remove("mf-open");
+    if (btn) btn.setAttribute("aria-expanded", "false");
+  }
+
+  function updateCommentFilterToolbarUi() {
+    if (!root) return;
+    const btn = root.querySelector('[data-action="toggle-comment-filter"]');
+    const wrap = root.querySelector(".mf-toolbar-filter-dropdown");
+    if (btn) {
+      const active = state.commentCompleteFilter != null;
+      btn.classList.toggle("mf-toolbar-filter-active", active);
+      btn.title = active ? "Filter comments (active)" : "Filter comments";
+      btn.setAttribute("aria-label", active ? "Filter comments (active)" : "Filter comments");
+      if (wrap) btn.setAttribute("aria-expanded", wrap.classList.contains("mf-open") ? "true" : "false");
+    }
+    root.querySelectorAll(".mf-toolbar-filter-option").forEach((el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const v = el.getAttribute("data-value") || "";
+      el.classList.toggle("mf-active", state.commentCompleteFilter === v);
+      el.setAttribute("aria-checked", state.commentCompleteFilter === v ? "true" : "false");
+    });
   }
 
   async function loadPanelCorner() {
@@ -3119,6 +3149,8 @@
   async function loadClipData(clip) {
     state.replyTargetId = null;
     state.collapsedReplyRoots.clear();
+    state.commentCompleteFilter = null;
+    closeCommentFilterDropdown();
     state.reviewOwnerEmail = "";
     state.currentReviewId = "";
     await refreshCloudUser(false);
@@ -4707,13 +4739,22 @@
     const thread = root.querySelector(".mf-thread");
     if (!thread) return;
     thread.innerHTML = "";
-    const roots = state.comments
+    const allRoots = state.comments
       .filter((c) => !c.parentId)
       .sort((a, b) => a.ts - b.ts);
+    const f = state.commentCompleteFilter;
+    const roots =
+      f === "complete"
+        ? allRoots.filter((c) => c.complete)
+        : f === "incomplete"
+          ? allRoots.filter((c) => !c.complete)
+          : allRoots;
     if (!roots.length) {
       const empty = document.createElement("div");
       empty.className = "mf-empty";
-      empty.textContent = "No comments yet.";
+      empty.textContent = allRoots.length
+        ? "No comments match this filter."
+        : "No comments yet.";
       thread.appendChild(empty);
       scheduleReactionPublicNamesRefresh();
       return;
@@ -4864,6 +4905,36 @@
                 <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
               </svg>
             </button>
+            <div class="mf-toolbar-filter-dropdown">
+              <button
+                type="button"
+                class="mf-btn mf-toolbar-filter-btn"
+                data-action="toggle-comment-filter"
+                title="Filter comments"
+                aria-label="Filter comments"
+                aria-expanded="false"
+                aria-haspopup="true"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-list-filter" aria-hidden="true">
+                  <path d="M3 6h18" />
+                  <path d="M7 12h10" />
+                  <path d="M10 18h4" />
+                </svg>
+              </button>
+              <div class="mf-toolbar-filter-menu" role="menu" aria-label="Comment filters">
+                <button type="button" class="mf-toolbar-filter-option" role="menuitemradio" data-value="complete" data-action="set-comment-filter" aria-checked="false">
+                  Complete
+                </button>
+                <button type="button" class="mf-toolbar-filter-option" role="menuitemradio" data-value="incomplete" data-action="set-comment-filter" aria-checked="false">
+                  Incomplete
+                </button>
+                <div class="mf-toolbar-filter-menu-footer">
+                  <button type="button" class="mf-toolbar-filter-clear" data-action="clear-comment-filter">
+                    Clear filters
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="mf-thread"></div>
           <div class="mf-footer">
@@ -5565,6 +5636,46 @@
     root.querySelector('[data-action="screengrab-copy"]').addEventListener("click", () => {
       void copyCurrentVideoFrameToClipboard();
     });
+
+    const filterToggle = root.querySelector('[data-action="toggle-comment-filter"]');
+    if (filterToggle) {
+      filterToggle.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const wrap = root.querySelector(".mf-toolbar-filter-dropdown");
+        if (!wrap) return;
+        wrap.classList.toggle("mf-open");
+        updateCommentFilterToolbarUi();
+      });
+    }
+    root.querySelectorAll('[data-action="set-comment-filter"]').forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const v = el.getAttribute("data-value");
+        if (v !== "complete" && v !== "incomplete") return;
+        state.commentCompleteFilter = v;
+        closeCommentFilterDropdown();
+        renderThread();
+      });
+    });
+    const clearFilterBtn = root.querySelector('[data-action="clear-comment-filter"]');
+    if (clearFilterBtn) {
+      clearFilterBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        state.commentCompleteFilter = null;
+        closeCommentFilterDropdown();
+        renderThread();
+      });
+    }
+    document.addEventListener(
+      "click",
+      (e) => {
+        if (!root) return;
+        const menu =
+          e.target instanceof Element ? e.target.closest(".mf-toolbar-filter-dropdown") : null;
+        if (!menu) closeCommentFilterDropdown();
+      },
+      true
+    );
 
     const commentInp = root.querySelector(".mf-comment-input");
     commentInp.addEventListener("focus", () => {

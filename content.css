@@ -1129,6 +1129,85 @@
   flex-shrink: 0;
 }
 
+#markframe-root .mf-toolbar-filter-dropdown {
+  position: relative;
+  flex-shrink: 0;
+}
+#markframe-root .mf-toolbar-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+#markframe-root .mf-toolbar-filter-btn .mf-lucide-list-filter {
+  display: block;
+  flex-shrink: 0;
+}
+#markframe-root .mf-toolbar-filter-btn.mf-toolbar-filter-active {
+  color: #00e5ff;
+  border-color: rgba(0, 229, 255, 0.45);
+  background: rgba(0, 229, 255, 0.1);
+}
+#markframe-root .mf-toolbar-filter-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 148px;
+  background: #122131;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  padding: 4px;
+  z-index: 20;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+#markframe-root .mf-toolbar-filter-dropdown.mf-open .mf-toolbar-filter-menu {
+  display: block;
+}
+#markframe-root .mf-toolbar-filter-option {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.74);
+  text-align: left;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: var(--mf-font);
+}
+#markframe-root .mf-toolbar-filter-option:hover {
+  color: #00e5ff;
+  background: rgba(0, 229, 255, 0.1);
+}
+#markframe-root .mf-toolbar-filter-option.mf-active {
+  color: #00e5ff;
+  background: rgba(0, 229, 255, 0.12);
+}
+#markframe-root .mf-toolbar-filter-menu-footer {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.1);
+}
+#markframe-root .mf-toolbar-filter-clear {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+  font-size: 11px;
+  padding: 8px 6px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-family: var(--mf-font);
+}
+#markframe-root .mf-toolbar-filter-clear:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 #markframe-root .mf-btn {
   appearance: none;
   -webkit-appearance: none;
@@ -1148,7 +1227,8 @@
 
 #markframe-root .mf-btn.mf-export-pdf-btn,
 #markframe-root .mf-btn.mf-screengrab-download-btn,
-#markframe-root .mf-btn.mf-screengrab-copy-btn {
+#markframe-root .mf-btn.mf-screengrab-copy-btn,
+#markframe-root .mf-btn.mf-toolbar-filter-btn {
   padding: 6px 5px;
 }
 
