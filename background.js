@@ -17444,6 +17444,53 @@ function preferencesFromSupabaseUser(u) {
   const meta = u?.user_metadata && typeof u.user_metadata === "object" ? u.user_metadata : {};
   return normalizePreferences({ ...PREFERENCE_DEFAULTS, ...meta });
 }
+function normalizeUserIdForPublicProfileQuery(raw) {
+  const s = String(raw || "").trim();
+  if (!REACTOR_UUID_RE.test(s)) return "";
+  return s.toLowerCase();
+}
+function displayNameForPublicProfileFromUser(user) {
+  if (!user) return "";
+  const meta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+  const fromMeta = String(meta.displayName ?? "").trim();
+  const email = String(user.email ?? "").trim();
+  return fromMeta || email;
+}
+async function ensureUserMetadataDisplayNameDefaultsToEmail(client, user) {
+  if (!user || !client) return user;
+  const meta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+  const existing = String(meta.displayName ?? "").trim();
+  if (existing) return user;
+  const email = String(user.email ?? "").trim();
+  if (!email) return user;
+  const data = { ...meta, displayName: email };
+  const { data: updated, error } = await client.auth.updateUser({ data });
+  if (error || !updated?.user) return user;
+  return updated.user;
+}
+async function upsertUserPublicDisplayName(client, user, displayName) {
+  if (!user || !client) return;
+  const id = String(user.id || "").trim();
+  if (!id) return;
+  console.log("[Notch] upserting user_public_profiles:", {
+    id: user.id,
+    displayName: user.user_metadata?.displayName,
+    email: user.email,
+    fullUserMetadata: user.user_metadata
+  });
+  const nm = String(displayName || "").trim();
+  const { data, error } = await client.from("user_public_profiles").upsert(
+    { id, display_name: nm, updated_at: (/* @__PURE__ */ new Date()).toISOString() },
+    { onConflict: "id" }
+  );
+  console.log("[Notch] user_public_profiles upsert result:", { data, error });
+  if (error) {
+    try {
+      notchSwLog("user_public_profiles upsert", { message: error.message });
+    } catch {
+    }
+  }
+}
 function billingPortalUrlFromSupabaseUser(u) {
   const app = u?.app_metadata && typeof u.app_metadata === "object" ? u.app_metadata : {};
   const raw = app.billing_portal_url || app.billingPortalUrl || app.billing_portal || app.billingPortal || "";
@@ -17730,7 +17777,13 @@ async function handoffSupabaseSession(sessionPayload) {
   if (error) {
     return { ok: false, error: error.message || "set_session_failed" };
   }
-  await syncAuthStateMarker(data?.session ?? null);
+  const sessionUser = data?.session?.user ?? null;
+  if (sessionUser) {
+    const user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, sessionUser);
+    void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+  }
+  const { session: latest } = await getSessionSafe(client);
+  await syncAuthStateMarker(latest ?? data?.session ?? null);
   await syncAuthMarkerFromChromeStorage();
   return {
     ok: true,
@@ -17972,10 +18025,18 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
           sendResponse({ ok: false });
           return;
         }
-        const { session, error } = await getSessionSafe(client);
+        let { session, error } = await getSessionSafe(client);
         if (error && !session) {
           sendResponse({ ok: false });
           return;
+        }
+        if (session?.user) {
+          const user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, session.user);
+          void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+          const refreshed = await getSessionSafe(client);
+          if (!refreshed.error && refreshed.session) {
+            session = refreshed.session;
+          }
         }
         try {
           await syncAuthStateMarker(session);
@@ -18033,7 +18094,7 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
       sendResponse({ ok: false, configured: false, user: null });
       return false;
     }
-    void client.auth.getUser().then(({ data, error }) => {
+    void client.auth.getUser().then(async ({ data, error }) => {
       if (error) {
         sendResponse({
           ok: false,
@@ -18043,7 +18104,11 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
         });
         return;
       }
-      const user = data?.user ?? null;
+      let user = data?.user ?? null;
+      if (user) {
+        user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, user);
+        void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+      }
       const plan = planFromSupabaseUser(user);
       const preferences = preferencesFromSupabaseUser(user);
       const billingPortalUrl = billingPortalUrlFromSupabaseUser(user);
@@ -18077,10 +18142,65 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
         sendResponse({ ok: false, error: error.message || "save_failed" });
         return;
       }
+      const resolvedUser = updated?.user ?? user;
+      const prefs = preferencesFromSupabaseUser(resolvedUser);
+      void upsertUserPublicDisplayName(
+        client,
+        resolvedUser,
+        displayNameForPublicProfileFromUser(resolvedUser)
+      );
       sendResponse({
         ok: true,
-        preferences: preferencesFromSupabaseUser(updated?.user ?? user)
+        preferences: prefs
       });
+    });
+    return true;
+  }
+  if (msg?.type === "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured", names: {} });
+      return false;
+    }
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      if (sessErr || !session?.user) {
+        sendResponse({ ok: false, error: "not_authenticated", names: {} });
+        return;
+      }
+      const rawIds = Array.isArray(msg.userIds) ? msg.userIds : [];
+      const seen = /* @__PURE__ */ new Set();
+      const unique = [];
+      for (const x of rawIds) {
+        const id = normalizeUserIdForPublicProfileQuery(x);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        unique.push(id);
+        if (unique.length >= 120) break;
+      }
+      if (!unique.length) {
+        sendResponse({ ok: true, names: {} });
+        return;
+      }
+      const names = {};
+      const chunkSize = 40;
+      try {
+        for (let i = 0; i < unique.length; i += chunkSize) {
+          const chunk = unique.slice(i, i + chunkSize);
+          const { data, error: qErr } = await client.from("user_public_profiles").select("id, display_name").in("id", chunk);
+          if (qErr) {
+            sendResponse({ ok: false, error: qErr.message, names: {} });
+            return;
+          }
+          for (const row of data || []) {
+            const rid = row.id ? String(row.id).trim().toLowerCase() : "";
+            const nm = String(row.display_name || "").trim();
+            if (rid && nm) names[rid] = nm;
+          }
+        }
+        sendResponse({ ok: true, names });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e), names: {} });
+      }
     });
     return true;
   }
@@ -18642,7 +18762,7 @@ async function restoreAuthMarker() {
   } catch (e) {
   }
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, PREFERENCE_DEFAULTS, supabase, clipRealtimeByTabId;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, PREFERENCE_DEFAULTS, REACTOR_UUID_RE, supabase, clipRealtimeByTabId;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -18665,6 +18785,7 @@ var init_sw_cloud = __esm({
       notifyOnReaction: true,
       notifyOnReply: true
     };
+    REACTOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     supabase = null;
     clipRealtimeByTabId = /* @__PURE__ */ new Map();
   }
@@ -18683,6 +18804,7 @@ var require_sw_main = __commonJS({
       "MF_SUPABASE_SESSION",
       "MF_SUPABASE_GET_USER",
       "MF_SUPABASE_SET_PREFERENCES",
+      "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES",
       "MF_SUPABASE_SIGN_OUT",
       "MF_SUPABASE_CHANGE_EMAIL",
       "MF_SUPABASE_RESET_PASSWORD",
@@ -18864,6 +18986,10 @@ var require_sw_main = __commonJS({
       }
       if (t === "MF_SUPABASE_DELETE_USER") {
         sendResponse({ ok: false, error: "Cloud handler failed." });
+        return;
+      }
+      if (t === "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES") {
+        sendResponse({ ok: false, error: "Cloud handler failed.", names: {} });
         return;
       }
       if (t === "MF_CLOUD_LOAD_CLIP") {

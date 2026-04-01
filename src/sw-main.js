@@ -16,6 +16,7 @@ const CLOUD_TYPES = new Set([
   "MF_SUPABASE_SESSION",
   "MF_SUPABASE_GET_USER",
   "MF_SUPABASE_SET_PREFERENCES",
+  "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES",
   "MF_SUPABASE_SIGN_OUT",
   "MF_SUPABASE_CHANGE_EMAIL",
   "MF_SUPABASE_RESET_PASSWORD",
@@ -221,6 +222,10 @@ function sendCloudFallback(msg, sendResponse) {
   }
   if (t === "MF_SUPABASE_DELETE_USER") {
     sendResponse({ ok: false, error: "Cloud handler failed." });
+    return;
+  }
+  if (t === "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES") {
+    sendResponse({ ok: false, error: "Cloud handler failed.", names: {} });
     return;
   }
   if (t === "MF_CLOUD_LOAD_CLIP") {

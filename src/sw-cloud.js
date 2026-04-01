@@ -80,6 +80,70 @@ function preferencesFromSupabaseUser(u) {
   return normalizePreferences({ ...PREFERENCE_DEFAULTS, ...meta });
 }
 
+const REACTOR_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeUserIdForPublicProfileQuery(raw) {
+  const s = String(raw || "").trim();
+  if (!REACTOR_UUID_RE.test(s)) return "";
+  return s.toLowerCase();
+}
+
+/** Synced to user_public_profiles; uses metadata first (defaults to email once ensure* runs). */
+function displayNameForPublicProfileFromUser(user) {
+  if (!user) return "";
+  const meta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+  const fromMeta = String(meta.displayName ?? "").trim();
+  const email = String(user.email ?? "").trim();
+  return fromMeta || email;
+}
+
+/**
+ * New accounts often have no displayName in user_metadata; set it to email before public profile upsert.
+ * @returns {Promise<import("@supabase/supabase-js").User>} Same user, or updated user from Auth.
+ */
+async function ensureUserMetadataDisplayNameDefaultsToEmail(client, user) {
+  if (!user || !client) return user;
+  const meta = user.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : {};
+  const existing = String(meta.displayName ?? "").trim();
+  if (existing) return user;
+  const email = String(user.email ?? "").trim();
+  if (!email) return user;
+  const data = { ...meta, displayName: email };
+  const { data: updated, error } = await client.auth.updateUser({ data });
+  if (error || !updated?.user) return user;
+  return updated.user;
+}
+
+async function upsertUserPublicDisplayName(client, user, displayName) {
+  if (!user || !client) return;
+  const id = String(user.id || "").trim();
+  if (!id) return;
+
+  console.log("[Notch] upserting user_public_profiles:", {
+    id: user.id,
+    displayName: user.user_metadata?.displayName,
+    email: user.email,
+    fullUserMetadata: user.user_metadata,
+  });
+
+  const nm = String(displayName || "").trim();
+  const { data, error } = await client.from("user_public_profiles").upsert(
+    { id, display_name: nm, updated_at: new Date().toISOString() },
+    { onConflict: "id" }
+  );
+
+  console.log("[Notch] user_public_profiles upsert result:", { data, error });
+
+  if (error) {
+    try {
+      notchSwLog("user_public_profiles upsert", { message: error.message });
+    } catch {
+      /* noop */
+    }
+  }
+}
+
 function billingPortalUrlFromSupabaseUser(u) {
   const app = u?.app_metadata && typeof u.app_metadata === "object" ? u.app_metadata : {};
   const raw =
@@ -455,7 +519,13 @@ export async function handoffSupabaseSession(sessionPayload) {
   if (error) {
     return { ok: false, error: error.message || "set_session_failed" };
   }
-  await syncAuthStateMarker(data?.session ?? null);
+  const sessionUser = data?.session?.user ?? null;
+  if (sessionUser) {
+    const user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, sessionUser);
+    void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+  }
+  const { session: latest } = await getSessionSafe(client);
+  await syncAuthStateMarker(latest ?? data?.session ?? null);
   await syncAuthMarkerFromChromeStorage();
   return {
     ok: true,
@@ -724,10 +794,18 @@ export function handleRuntimeMessage(msg, sendResponse, sender) {
           sendResponse({ ok: false });
           return;
         }
-        const { session, error } = await getSessionSafe(client);
+        let { session, error } = await getSessionSafe(client);
         if (error && !session) {
           sendResponse({ ok: false });
           return;
+        }
+        if (session?.user) {
+          const user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, session.user);
+          void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+          const refreshed = await getSessionSafe(client);
+          if (!refreshed.error && refreshed.session) {
+            session = refreshed.session;
+          }
         }
         try {
           await syncAuthStateMarker(session);
@@ -790,7 +868,7 @@ export function handleRuntimeMessage(msg, sendResponse, sender) {
     }
     void client.auth
       .getUser()
-      .then(({ data, error }) => {
+      .then(async ({ data, error }) => {
         if (error) {
           sendResponse({
             ok: false,
@@ -800,7 +878,11 @@ export function handleRuntimeMessage(msg, sendResponse, sender) {
           });
           return;
         }
-        const user = data?.user ?? null;
+        let user = data?.user ?? null;
+        if (user) {
+          user = await ensureUserMetadataDisplayNameDefaultsToEmail(client, user);
+          void upsertUserPublicDisplayName(client, user, displayNameForPublicProfileFromUser(user));
+        }
         const plan = planFromSupabaseUser(user);
         const preferences = preferencesFromSupabaseUser(user);
         const billingPortalUrl = billingPortalUrlFromSupabaseUser(user);
@@ -839,10 +921,69 @@ export function handleRuntimeMessage(msg, sendResponse, sender) {
         sendResponse({ ok: false, error: error.message || "save_failed" });
         return;
       }
+      const resolvedUser = updated?.user ?? user;
+      const prefs = preferencesFromSupabaseUser(resolvedUser);
+      void upsertUserPublicDisplayName(
+        client,
+        resolvedUser,
+        displayNameForPublicProfileFromUser(resolvedUser)
+      );
       sendResponse({
         ok: true,
-        preferences: preferencesFromSupabaseUser(updated?.user ?? user),
+        preferences: prefs,
       });
+    });
+    return true;
+  }
+
+  if (msg?.type === "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES") {
+    const client = getSupabase();
+    if (!client) {
+      sendResponse({ ok: false, error: "not_configured", names: {} });
+      return false;
+    }
+    void getSessionSafe(client).then(async ({ session, error: sessErr }) => {
+      if (sessErr || !session?.user) {
+        sendResponse({ ok: false, error: "not_authenticated", names: {} });
+        return;
+      }
+      const rawIds = Array.isArray(msg.userIds) ? msg.userIds : [];
+      const seen = new Set();
+      const unique = [];
+      for (const x of rawIds) {
+        const id = normalizeUserIdForPublicProfileQuery(x);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        unique.push(id);
+        if (unique.length >= 120) break;
+      }
+      if (!unique.length) {
+        sendResponse({ ok: true, names: {} });
+        return;
+      }
+      const names = {};
+      const chunkSize = 40;
+      try {
+        for (let i = 0; i < unique.length; i += chunkSize) {
+          const chunk = unique.slice(i, i + chunkSize);
+          const { data, error: qErr } = await client
+            .from("user_public_profiles")
+            .select("id, display_name")
+            .in("id", chunk);
+          if (qErr) {
+            sendResponse({ ok: false, error: qErr.message, names: {} });
+            return;
+          }
+          for (const row of data || []) {
+            const rid = row.id ? String(row.id).trim().toLowerCase() : "";
+            const nm = String(row.display_name || "").trim();
+            if (rid && nm) names[rid] = nm;
+          }
+        }
+        sendResponse({ ok: true, names });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e), names: {} });
+      }
     });
     return true;
   }

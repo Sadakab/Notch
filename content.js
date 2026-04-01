@@ -249,6 +249,10 @@
   let reactionRosterTooltipEl = null;
   let reactionRosterTooltipShowTid = null;
   const REACTION_ROSTER_TIP_DELAY_MS = 100;
+  /** Compare-normalized user id → display_name from user_public_profiles (batch-fetched). */
+  let reactionPublicNameByCompareKey = new Map();
+  let reactionPublicNamesFetchTid = null;
+  let lastReactionPublicNamesIdsKey = "";
   let proUpgradePollTimer = null;
   let proUpgradePollDeadline = 0;
   /** Sync cache for renderThread (display name + avatar URL). */
@@ -2629,7 +2633,9 @@
     await saveAuthorOverride(override);
     await refreshAuthorPresentationCache();
     await relabelOwnCommentsInActiveClip(previousDisplayName);
+    invalidateReactionPublicNamesCache();
     if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+    scheduleReactionPublicNamesRefresh();
   }
 
   async function handleSettingsDropdownPick(buttonEl) {
@@ -2888,26 +2894,110 @@
     return comment.reactions;
   }
 
-  /** Map auth user id (compare-normalized) → display name from comments in this review. */
-  function buildReactionParticipantNameMap() {
+  /** Map compare-normalized id → display name from comment authors only (no Supabase). */
+  function buildCommentAuthorDisplayNameMap() {
     const map = new Map();
     if (!Array.isArray(state.comments)) return map;
     for (const c of state.comments) {
       const aid = normalizeAuthorId(c?.authorId);
       if (!aid) continue;
       const key = normalizeUuidForCompare(aid);
-      const label = String(displayNameForComment(c) || "").trim() || "Someone";
+      const label = String(displayNameForComment(c) || "").trim();
+      if (!label) continue;
       map.set(key, label);
     }
     return map;
   }
 
-  /** Comma-separated roster for a reaction; current user shown as "You". */
+  /** Comment authors first; `user_public_profiles` overwrites for current display names. */
+  function mergedReactionDisplayNameMap() {
+    const merged = buildCommentAuthorDisplayNameMap();
+    for (const [k, v] of reactionPublicNameByCompareKey) {
+      const nm = String(v || "").trim();
+      if (nm) merged.set(k, nm);
+    }
+    return merged;
+  }
+
+  function collectReactorAndAuthorUserIds() {
+    const raw = new Set();
+    if (!Array.isArray(state.comments)) return [];
+    for (const c of state.comments) {
+      const aid = normalizeAuthorId(c?.authorId);
+      if (aid) raw.add(aid);
+      const reactions = normalizeCommentReactions(c?.reactions);
+      for (const emoji of COMMENT_REACTION_EMOJIS) {
+        const arr = reactions[emoji];
+        if (!Array.isArray(arr)) continue;
+        for (const uid of arr) {
+          const id = normalizeAuthorId(uid);
+          if (id) raw.add(id);
+        }
+      }
+    }
+    return [...raw];
+  }
+
+  function invalidateReactionPublicNamesCache() {
+    lastReactionPublicNamesIdsKey = "";
+  }
+
+  function scheduleReactionPublicNamesRefresh() {
+    clearTimeout(reactionPublicNamesFetchTid);
+    if (!currentCloudUserId()) {
+      reactionPublicNameByCompareKey = new Map();
+      lastReactionPublicNamesIdsKey = "";
+      return;
+    }
+    const ids = collectReactorAndAuthorUserIds();
+    const key = [...ids].sort().join("\0");
+    if (key === lastReactionPublicNamesIdsKey) {
+      return;
+    }
+    reactionPublicNamesFetchTid = setTimeout(() => {
+      reactionPublicNamesFetchTid = null;
+      void refreshReactionPublicNamesFromServer();
+    }, 200);
+  }
+
+  async function refreshReactionPublicNamesFromServer() {
+    if (!currentCloudUserId()) return;
+    const ids = collectReactorAndAuthorUserIds();
+    const key = [...ids].sort().join("\0");
+    if (!ids.length) {
+      lastReactionPublicNamesIdsKey = "";
+      reactionPublicNameByCompareKey = new Map();
+      return;
+    }
+    if (key === lastReactionPublicNamesIdsKey) return;
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_SUPABASE_FETCH_PUBLIC_DISPLAY_NAMES",
+        userIds: ids,
+      });
+      if (!r?.ok) return;
+      const next = new Map();
+      for (const [id, name] of Object.entries(r.names || {})) {
+        const cmp = normalizeUuidForCompare(id);
+        const nm = String(name || "").trim();
+        if (cmp && nm) next.set(cmp, nm);
+      }
+      reactionPublicNameByCompareKey = next;
+      lastReactionPublicNamesIdsKey = key;
+      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") {
+        renderThread();
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Roster for a reaction pill; current user shown as "You". Names from DB + comment fallbacks. */
   function formatReactionHoverTitle(reactorIds) {
     const ids = Array.isArray(reactorIds) ? reactorIds : [];
     const myId = normalizeAuthorId(currentCloudUserId());
     const myKey = myId ? normalizeUuidForCompare(myId) : "";
-    const nameMap = buildReactionParticipantNameMap();
+    const nameMap = mergedReactionDisplayNameMap();
     const seen = new Set();
     const labels = [];
     for (const rawId of ids) {
@@ -2916,8 +3006,8 @@
       const key = normalizeUuidForCompare(id);
       if (seen.has(key)) continue;
       seen.add(key);
-      const label = myKey && key === myKey ? "You" : nameMap.get(key) || "Someone";
-      labels.push(label);
+      const label = myKey && key === myKey ? "You" : nameMap.get(key);
+      if (label) labels.push(label);
     }
     labels.sort((a, b) => {
       if (a === "You") return -1;
@@ -3161,6 +3251,8 @@
         await mirrorCloudRecordToLocalCache(clip, r.record);
         sharedReviewCloudReloadOnce.delete(key);
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
+        invalidateReactionPublicNamesCache();
+        scheduleReactionPublicNamesRefresh();
         return;
       }
       state.comments = [];
@@ -3199,6 +3291,8 @@
     } else {
       state.comments = [];
     }
+    invalidateReactionPublicNamesCache();
+    scheduleReactionPublicNamesRefresh();
     notchLog("loadClipData end (local)", { commentCount: state.comments.length });
   }
 
@@ -4621,6 +4715,7 @@
       empty.className = "mf-empty";
       empty.textContent = "No comments yet.";
       thread.appendChild(empty);
+      scheduleReactionPublicNamesRefresh();
       return;
     }
 
@@ -4642,6 +4737,7 @@
       }
       thread.appendChild(block);
     }
+    scheduleReactionPublicNamesRefresh();
   }
 
   let previewTimer = null;
@@ -6942,6 +7038,7 @@
         state.comments = list;
         applyOwnIdentityToLoadedComments();
         normalizeCommentsShape();
+        invalidateReactionPublicNamesCache();
         renderThread();
       }
       sendResponse({ ok: true });
