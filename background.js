@@ -17761,6 +17761,7 @@ function commentsFromDb(value) {
 }
 function rowToPayload(row) {
   return {
+    reviewId: row.id != null ? String(row.id) : "",
     comments: commentsFromDb(row.comments),
     updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
     title: row.title ?? null,
@@ -18204,7 +18205,7 @@ function handleRuntimeMessage(msg, sendResponse) {
       };
       try {
         if (!isCollaboratorWrite) {
-          const { error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" });
+          const { data, error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" }).select("id").single();
           if (error) {
             const errLine = formatSupabaseError(error);
             console.error("Notch cloud save", errLine, error);
@@ -18233,7 +18234,12 @@ function handleRuntimeMessage(msg, sendResponse) {
             commentCount: comments.length,
             mode: "owner"
           });
-          sendResponse({ ok: true });
+          sendResponse({
+            ok: true,
+            reviewId: data?.id != null ? String(data.id) : "",
+            sharedReview: false,
+            hostUserId: null
+          });
           return;
         }
         if (!hostUserId) {
@@ -18251,12 +18257,12 @@ function handleRuntimeMessage(msg, sendResponse) {
           sendResponse({ ok: false, error: "host_row_missing" });
           return;
         }
-        const { data: updatedRows, error: updateErr } = await client.from("clip_reviews").update({
+        const { data: updatedRow, error: updateErr } = await client.from("clip_reviews").update({
           comments: commentsPayload,
           title: cloudOptionalTextField(msg.title),
           thumbnail_url: cloudOptionalTextField(msg.thumbnailUrl),
           updated_at: row.updated_at
-        }).eq("id", existingRow.id).eq("user_id", rowUserId).eq("platform", platform).eq("clip_id", existingRow.clip_id).select("id").limit(1);
+        }).eq("id", existingRow.id).eq("user_id", rowUserId).eq("platform", platform).eq("clip_id", existingRow.clip_id).select("id").single();
         if (updateErr) {
           const errLine = formatSupabaseError(updateErr);
           console.error("Notch cloud save collab update", errLine, updateErr);
@@ -18271,7 +18277,7 @@ function handleRuntimeMessage(msg, sendResponse) {
           sendResponse({ ok: false, error: "rls_denied_or_no_match", detail: errLine });
           return;
         }
-        if (!Array.isArray(updatedRows) || updatedRows.length === 0) {
+        if (!updatedRow?.id) {
           sendResponse({ ok: false, error: "host_row_missing" });
           return;
         }
@@ -18283,7 +18289,12 @@ function handleRuntimeMessage(msg, sendResponse) {
           hostUserId,
           dbClipId: existingRow.clip_id
         });
-        sendResponse({ ok: true });
+        sendResponse({
+          ok: true,
+          reviewId: String(updatedRow.id),
+          sharedReview: true,
+          hostUserId
+        });
       } catch (e) {
         console.error("Notch cloud save exception", e);
         sendResponse({ ok: false, error: "save_failed", detail: String(e?.message || e) });

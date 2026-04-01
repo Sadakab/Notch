@@ -292,6 +292,8 @@
     cloudUser: null,
     /** Current review owner email from cloud row source-of-truth. */
     reviewOwnerEmail: "",
+    /** Current clip review row id in Supabase (empty when unknown/local-only). */
+    currentReviewId: "",
   };
 
   let cloudAuthCacheValidUntil = 0;
@@ -2966,6 +2968,7 @@
     state.replyTargetId = null;
     state.collapsedReplyRoots.clear();
     state.reviewOwnerEmail = "";
+    state.currentReviewId = "";
     await refreshCloudUser(false);
     const key = clip.storageKey;
     const hostBindingRaw = await readCollabHostUserIdForClip(clip);
@@ -3092,6 +3095,7 @@
         applyOwnIdentityToLoadedComments();
         normalizeCommentsShape();
         state.reviewOwnerEmail = String(r.record.reviewOwnerEmail || "").trim();
+        state.currentReviewId = String(r.record.reviewId || "").trim();
         await mirrorCloudRecordToLocalCache(clip, r.record);
         sharedReviewCloudReloadOnce.delete(key);
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
@@ -3143,6 +3147,8 @@
    */
   async function saveClipData(clip, options) {
     const commentsPayload = options?.comments != null ? options.comments : state.comments;
+    const hasExplicitCommentsPayload = options?.comments != null;
+    const isLikelyNewComment = hasExplicitCommentsPayload && commentsPayload.length > state.comments.length;
     if (!Array.isArray(commentsPayload)) {
       notchLog("saveClipData abort: comments not an array");
       return false;
@@ -3220,18 +3226,62 @@
           ...(cloudHostForSave ? { hostUserId: cloudHostForSave } : {}),
         });
         const errCode = r?.error ? String(r.error) : "";
-        notchLog("saveClipData cloud result", {
+        const result = {
           ok: r?.ok === true,
-          typeofR: r == null ? "null" : typeof r,
           error: errCode || null,
           sharedReview,
           hostUserId: cloudHostForSave || null,
+          reviewId: typeof r?.reviewId === "string" ? r.reviewId.trim() : "",
+        };
+        notchLog("saveClipData cloud result", {
+          ok: result.ok,
+          typeofR: r == null ? "null" : typeof r,
+          error: result.error,
+          sharedReview: result.sharedReview,
+          hostUserId: result.hostUserId,
+          reviewId: result.reviewId || null,
           platform: clip.platform,
           canonicalClipId,
         });
-        if (!r?.ok) {
+        if (!result.ok) {
           showToast(cloudSaveFailureToast(errCode, sharedReview));
           return false;
+        }
+        if (result.reviewId) {
+          state.currentReviewId = result.reviewId;
+        }
+        // Fire-and-forget shared-review notifications after a successful cloud save.
+        if (result.sharedReview && result.hostUserId && result.reviewId && isLikelyNewComment) {
+          let storageSession = null;
+          try {
+            const authBlob = await chrome.storage.local.get(SUPABASE_AUTH_STORAGE_KEY);
+            const raw = authBlob?.[SUPABASE_AUTH_STORAGE_KEY];
+            if (typeof raw === "string") storageSession = JSON.parse(raw);
+            else if (raw && typeof raw === "object") storageSession = raw;
+          } catch {
+            storageSession = null;
+          }
+          const sessionUserId = String(storageSession?.user?.id || "").trim();
+          if (sessionUserId) {
+            const newComment = commentsPayload[commentsPayload.length - 1];
+            if (newComment) {
+              void fetch("https://notch.video/.netlify/functions/notify-comment", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  reviewId: result.reviewId,
+                  newComment: {
+                    id: newComment.id,
+                    ts: newComment.ts,
+                    text: newComment.text,
+                    author: newComment.author,
+                    authorId: newComment.authorId,
+                    parentId: newComment.parentId || null,
+                  },
+                }),
+              }).catch((err) => console.log("[Notch] notify-comment error", err));
+            }
+          }
         }
       } catch (e) {
         console.error("Notch cloud save", e);
@@ -3252,6 +3302,7 @@
       return false;
     }
 
+    state.currentReviewId = "";
     await chrome.storage.local.set({ [key]: payload });
     notchLog("saveClipData local-only (no Supabase project)", {
       key,
