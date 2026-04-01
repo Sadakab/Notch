@@ -35,6 +35,8 @@
   width: min(320px, calc(100vw - 24px));
   z-index: 2147483646;
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.55);
+  /* Viewport cap for tall views (settings uses this via var). */
+  --mf-panel-max-vh: calc(100vh - 32px);
 }
 
 #markframe-root[data-mf-corner="tl"] {
@@ -65,12 +67,12 @@
   left: auto;
 }
 
-/* When settings are open, let the extension grow to full content height. */
+/* Settings: grow with content up to viewport; scroll body when taller than the window. */
 #markframe-root.mf-settings-open {
-  max-height: none;
+  max-height: var(--mf-panel-max-vh);
   min-height: 0;
   height: auto;
-  overflow: visible;
+  overflow: hidden;
 }
 
 /* Narrow viewport */
@@ -80,12 +82,14 @@
   max-height: min(88vh, calc(100vh - 16px));
   min-height: min(300px, calc(100vh - 16px));
   border-radius: 8px;
+  --mf-panel-max-vh: calc(100vh - 16px);
 }
 
 #markframe-root[data-mf-compact="1"].mf-settings-open {
-  max-height: none;
+  max-height: var(--mf-panel-max-vh);
   min-height: 0;
   height: auto;
+  overflow: hidden;
 }
 
 #markframe-root[data-mf-compact="1"] .mf-header {
@@ -338,6 +342,12 @@
   padding: 6px;
   background: transparent;
   backdrop-filter: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  overflow: hidden;
 }
 
 /* Focus mode: hide non-settings UI while settings are open. */
@@ -360,12 +370,21 @@
   color: rgba(255, 255, 255, 0.7);
 }
 
+#markframe-root.mf-settings-open .mf-settings-dialog {
+  display: flex;
+  flex-direction: column;
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 100%;
+}
+
 #markframe-root .mf-settings-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 12px 14px;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
 }
 
 #markframe-root .mf-settings-title {
@@ -401,6 +420,14 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+}
+
+#markframe-root.mf-settings-open .mf-settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 #markframe-root .mf-settings-section {
@@ -798,17 +825,19 @@
   min-height: 0;
 }
 
-/* Collapsed panel uses max-height: none; cap it again while settings are open. */
+/* Collapsed panel uses max-height: none; cap again while settings are open (viewport scroll). */
 #markframe-root.mf-collapsed.mf-settings-open {
-  max-height: none;
+  max-height: var(--mf-panel-max-vh);
   min-height: 0;
   height: auto;
+  overflow: hidden;
 }
 
 #markframe-root[data-mf-compact="1"].mf-collapsed.mf-settings-open {
-  max-height: none;
+  max-height: var(--mf-panel-max-vh);
   min-height: 0;
   height: auto;
+  overflow: hidden;
 }
 
 #markframe-root .mf-watch-pane {
