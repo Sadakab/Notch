@@ -17402,14 +17402,7 @@ var init_dist4 = __esm({
 });
 
 // src/sw-cloud.js
-function notchSwLog(msg, detail) {
-  if (!NOTCH_DIAG) return;
-  if (detail !== void 0) {
-    const extra = detail && typeof detail === "object" ? JSON.stringify(detail) : String(detail);
-    console.log("[Notch SW]", msg, extra);
-  } else {
-    console.log("[Notch SW]", msg);
-  }
+function notchSwLog() {
 }
 function planFromSupabaseUser(u) {
   if (!u) return "free";
@@ -17443,6 +17436,7 @@ function normalizePreferences(input) {
     floatPanel: !!src.floatPanel,
     timestampFormat: normalizeTimestampFormatValue(src.timestampFormat),
     notifyOnComment: src.notifyOnComment !== false,
+    notifyOnReaction: src.notifyOnReaction !== false,
     notifyOnReply: src.notifyOnReply !== false
   };
 }
@@ -17667,7 +17661,6 @@ function getSupabase() {
         try {
           await syncAuthStateMarker(session);
         } catch (e) {
-          console.warn("Notch auth state marker", e?.message || e);
         }
       })();
     });
@@ -17713,11 +17706,9 @@ async function getSessionSafe(client) {
       if (isUnauthorizedError(err)) {
         await clearAuthSessionAndClient();
       }
-      console.warn("Notch getSession", err.message ?? err);
     }
     return { session, error: err };
   } catch (e) {
-    console.warn("Notch getSession", e?.message || e);
     if (isUnauthorizedError(e)) {
       await clearAuthSessionAndClient();
     }
@@ -17836,7 +17827,79 @@ function rowToDashboardItem(row) {
     reviewOwnerUserId: row.user_id ?? null
   };
 }
-function handleRuntimeMessage(msg, sendResponse) {
+function isRealtimeRowMatch(platform, expectedClipId, rowClipId) {
+  const expected = String(expectedClipId || "");
+  const actual = String(rowClipId || "");
+  if (platform !== "dropbox") return expected === actual;
+  if (expected === actual) return true;
+  const expectedPath = dropboxPathnameOnlyFromClipId(expected);
+  const actualPath = dropboxPathnameOnlyFromClipId(actual);
+  return !!expectedPath && expectedPath === actualPath;
+}
+async function unsubscribeClipRealtimeByTabId(tabId) {
+  if (tabId == null) return;
+  const prior = clipRealtimeByTabId.get(tabId);
+  clipRealtimeByTabId.delete(tabId);
+  if (!prior) return;
+  try {
+    await prior.client.removeChannel(prior.channel);
+  } catch {
+  }
+}
+async function cleanupRealtimeForTab(tabId) {
+  await unsubscribeClipRealtimeByTabId(tabId);
+}
+async function subscribeClipRealtimeForTab(tabId, platform, clipId, hostUserId) {
+  const client = getSupabase();
+  if (!client || tabId == null || !platform || !clipId) return { ok: false, error: "invalid_args" };
+  const { session, error: sessErr } = await getSessionSafe(client);
+  const sessionUserId = session?.user?.id;
+  if (sessErr || !sessionUserId) return { ok: false, error: "not_authenticated" };
+  const ownerUserId = rowUserIdFromHostMessage(hostUserId, sessionUserId);
+  const normalizedClipId = normalizeDropboxClipIdForDb(platform, clipId);
+  await unsubscribeClipRealtimeByTabId(tabId);
+  const channel = client.channel(`clip-reactions-${tabId}-${Date.now()}`).on(
+    "postgres_changes",
+    {
+      event: "UPDATE",
+      schema: "public",
+      table: "clip_reviews",
+      filter: `user_id=eq.${ownerUserId}`
+    },
+    (payload) => {
+      const row = payload?.new;
+      if (!row || row.platform !== platform) return;
+      if (!isRealtimeRowMatch(platform, normalizedClipId, row.clip_id)) return;
+      void chrome.tabs.sendMessage(tabId, {
+        type: "MF_CLOUD_CLIP_UPDATED",
+        record: rowToPayload(row)
+      });
+    }
+  );
+  channel.subscribe();
+  clipRealtimeByTabId.set(tabId, { client, channel });
+  return { ok: true };
+}
+function handleRuntimeMessage(msg, sendResponse, sender) {
+  if (msg?.type === "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS") {
+    void (async () => {
+      const tabId = sender?.tab?.id;
+      const platform = msg.platform;
+      const clipId = msg.clipId;
+      const hostUserId = msg.hostUserId;
+      const result = await subscribeClipRealtimeForTab(tabId, platform, clipId, hostUserId);
+      sendResponse(result);
+    })();
+    return true;
+  }
+  if (msg?.type === "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS") {
+    void (async () => {
+      const tabId = sender?.tab?.id;
+      await unsubscribeClipRealtimeByTabId(tabId);
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
   if (msg?.type === "MF_AUTH_OAUTH_GOOGLE") {
     void (async () => {
       try {
@@ -17864,7 +17927,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         await chrome.tabs.create({ url, active: true });
         sendResponse({ ok: true });
       } catch (e) {
-        console.error("Notch MF_AUTH_OAUTH_GOOGLE", e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       }
     })();
@@ -17895,7 +17957,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         }
         sendResponse({ ok: true, message: "Check your email for a login link" });
       } catch (e) {
-        console.error("Notch MF_AUTH_MAGIC_LINK", e);
         sendResponse({ ok: false, error: String(e?.message || e) });
       }
     })();
@@ -17919,11 +17980,9 @@ function handleRuntimeMessage(msg, sendResponse) {
         try {
           await syncAuthStateMarker(session);
         } catch (e) {
-          console.warn("Notch MF_AUTH_CHANGED marker", e?.message || e);
         }
         sendResponse({ ok: true, email: session?.user?.email ?? null });
       } catch (e) {
-        console.error("Notch MF_AUTH_CHANGED", e);
         sendResponse({ ok: false });
       }
     })();
@@ -18124,7 +18183,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         const { data, error } = await loadClipReviewRow(client, platform, clipId, clipOwner);
         if (error) {
           const errLine = formatSupabaseError(error);
-          console.error("Notch cloud load", errLine, error);
           notchSwLog("MF_CLOUD_LOAD_CLIP query error", {
             code: error.code,
             message: error.message,
@@ -18155,7 +18213,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         });
         sendResponse({ ok: true, record });
       } catch (e) {
-        console.error("Notch cloud load", e);
         sendResponse({ ok: false, record: null });
       }
     });
@@ -18208,7 +18265,6 @@ function handleRuntimeMessage(msg, sendResponse) {
           const { data, error } = await client.from("clip_reviews").upsert(row, { onConflict: "user_id,platform,clip_id" }).select("id").single();
           if (error) {
             const errLine = formatSupabaseError(error);
-            console.error("Notch cloud save", errLine, error);
             notchSwLog("MF_CLOUD_SAVE_CLIP owner upsert error", {
               code: error.code,
               message: error.message,
@@ -18249,7 +18305,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         const { data: existingRow, error: loadErr } = await loadClipReviewRow(client, platform, clipId, rowUserId);
         if (loadErr) {
           const errLine = formatSupabaseError(loadErr);
-          console.error("Notch cloud save collab load", errLine, loadErr);
           sendResponse({ ok: false, error: "rls_denied_or_no_match", detail: errLine });
           return;
         }
@@ -18265,7 +18320,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         }).eq("id", existingRow.id).eq("user_id", rowUserId).eq("platform", platform).eq("clip_id", existingRow.clip_id).select("id").single();
         if (updateErr) {
           const errLine = formatSupabaseError(updateErr);
-          console.error("Notch cloud save collab update", errLine, updateErr);
           notchSwLog("MF_CLOUD_SAVE_CLIP collab update error", {
             code: updateErr.code,
             message: updateErr.message,
@@ -18296,7 +18350,6 @@ function handleRuntimeMessage(msg, sendResponse) {
           hostUserId
         });
       } catch (e) {
-        console.error("Notch cloud save exception", e);
         sendResponse({ ok: false, error: "save_failed", detail: String(e?.message || e) });
       }
     });
@@ -18316,7 +18369,6 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       client.from("clip_reviews").select("*").order("updated_at", { ascending: false }).then(({ data, error }) => {
         if (error) {
-          console.error("Notch cloud list", error);
           sendResponse({ ok: false, items: [] });
           return;
         }
@@ -18361,7 +18413,6 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       q.then(({ error }) => {
         if (error) {
-          console.error("Notch cloud thumb", error);
           sendResponse({ ok: false });
           return;
         }
@@ -18399,7 +18450,6 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       const { error: reviewErr } = await reviewQ;
       if (reviewErr) {
-        console.error("Notch cloud delete clip_reviews", reviewErr);
         sendResponse({ ok: false });
         return;
       }
@@ -18414,7 +18464,6 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       const { error: collabErr } = await collabQ;
       if (collabErr) {
-        console.error("Notch cloud delete clip_review_collaborators", collabErr);
         sendResponse({ ok: false });
         return;
       }
@@ -18451,7 +18500,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         );
         if (loadErr) {
           const errLine = formatSupabaseError(loadErr);
-          console.error("Notch ensure clip row load", errLine, loadErr);
           sendResponse({ ok: false, error: "load_failed", detail: errLine });
           return;
         }
@@ -18463,7 +18511,8 @@ function handleRuntimeMessage(msg, sendResponse) {
           }
           sendResponse({
             ok: true,
-            userId: user.id,
+            /** auth.users id / clip_reviews.user_id — not clip_reviews.id */
+            hostUserId: user.id,
             platform,
             clipId: clipIdOut
           });
@@ -18487,14 +18536,13 @@ function handleRuntimeMessage(msg, sendResponse) {
             }
             sendResponse({
               ok: true,
-              userId: user.id,
+              hostUserId: user.id,
               platform,
               clipId: clipIdOutR
             });
             return;
           }
           const errLine = formatSupabaseError(insertErr);
-          console.error("Notch ensure clip row insert", errLine, insertErr);
           sendResponse({ ok: false, error: "insert_failed", detail: errLine });
           return;
         }
@@ -18511,12 +18559,11 @@ function handleRuntimeMessage(msg, sendResponse) {
         }
         sendResponse({
           ok: true,
-          userId: user.id,
+          hostUserId: user.id,
           platform,
           clipId: clipIdDb
         });
       } catch (e) {
-        console.error("Notch ensure clip row", e);
         sendResponse({ ok: false, error: "ensure_failed", detail: String(e?.message || e) });
       }
     });
@@ -18542,7 +18589,6 @@ function handleRuntimeMessage(msg, sendResponse) {
         p_clip_id: clipId
       });
       if (error) {
-        console.error("Notch join shared review", error);
         sendResponse({ ok: false, error: error.message || "rpc_error" });
         return;
       }
@@ -18575,7 +18621,6 @@ function handleRuntimeMessage(msg, sendResponse) {
       }
       client.from("clip_review_collaborators").delete().eq("host_user_id", hostUserId).eq("platform", platform).eq("clip_id", collabClipId).eq("member_user_id", user.id).then(({ error }) => {
         if (error) {
-          console.error("Notch collab leave", error);
           sendResponse({ ok: false });
           return;
         }
@@ -18595,10 +18640,9 @@ async function restoreAuthMarker() {
     if (error && !session) return;
     await syncAuthStateMarker(session);
   } catch (e) {
-    console.warn("Notch restoreAuthMarker", e?.message || e);
   }
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, NOTCH_DIAG, PREFERENCE_DEFAULTS, supabase;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, PREFERENCE_DEFAULTS, supabase, clipRealtimeByTabId;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -18608,7 +18652,6 @@ var init_sw_cloud = __esm({
     AUTH_STATE_KEY = "markframe_auth_state";
     AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
     CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
-    NOTCH_DIAG = true;
     PREFERENCE_DEFAULTS = {
       displayName: "",
       companyName: "",
@@ -18619,9 +18662,11 @@ var init_sw_cloud = __esm({
       floatPanel: false,
       timestampFormat: "short",
       notifyOnComment: true,
+      notifyOnReaction: true,
       notifyOnReply: true
     };
     supabase = null;
+    clipRealtimeByTabId = /* @__PURE__ */ new Map();
   }
 });
 
@@ -18647,6 +18692,8 @@ var require_sw_main = __commonJS({
       "MF_CLOUD_LIST_CLIPS",
       "MF_CLOUD_UPDATE_THUMB",
       "MF_CLOUD_DELETE_CLIP",
+      "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS",
+      "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS",
       "MF_ENSURE_CLIP_REVIEW_ROW",
       "MF_JOIN_SHARED_REVIEW",
       "MF_COLLAB_LEAVE"
@@ -18791,7 +18838,6 @@ var require_sw_main = __commonJS({
           await new Promise((r) => setTimeout(r, 400));
         }
       }
-      console.warn("[Notch] open-shared-review: could not reach content script on tab", tabId);
     }
     function sendCloudFallback(msg, sendResponse) {
       if (!sendResponse) return;
@@ -18837,6 +18883,10 @@ var require_sw_main = __commonJS({
         return;
       }
       if (t === "MF_CLOUD_DELETE_CLIP") {
+        sendResponse({ ok: false });
+        return;
+      }
+      if (t === "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS" || t === "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS") {
         sendResponse({ ok: false });
         return;
       }
@@ -18920,7 +18970,6 @@ var require_sw_main = __commonJS({
           });
           sendResponse({ ok: true, tabId: tabId ?? null });
         } catch (e) {
-          console.error("[Notch] load-shared-review", e);
           sendResponse({ ok: false, error: String(e?.message || e) });
         }
       })();
@@ -18984,12 +19033,14 @@ var require_sw_main = __commonJS({
       }
       if (!CLOUD_TYPES.has(msg?.type)) return false;
       try {
-        return handleRuntimeMessage(msg, sendResponse);
+        return handleRuntimeMessage(msg, sendResponse, sender);
       } catch (e) {
-        console.error("Notch: cloud handler", e);
         sendCloudFallback(msg, sendResponse);
         return false;
       }
+    });
+    chrome.tabs.onRemoved.addListener((tabId) => {
+      void cleanupRealtimeForTab(tabId);
     });
   }
 });

@@ -6,20 +6,7 @@
   const ACCENT = "#00E5FF";
   /** Set true to show Draw / color / save, overlay canvas, and drawing thumbnails. */
   const FEATURE_DRAWING = false;
-  /** Page console: filter `[Notch]` — cloud load/save diagnostics. Set false to silence. */
-  const NOTCH_DIAG = true;
-  function notchLog(msg, detail) {
-    if (!NOTCH_DIAG) return;
-    if (detail !== undefined) {
-      const extra =
-        detail && typeof detail === "object"
-          ? JSON.stringify(detail)
-          : String(detail);
-      console.log("[Notch]", msg, extra);
-    } else {
-      console.log("[Notch]", msg);
-    }
-  }
+  function notchLog() {}
   /** Must match service worker Supabase auth storageKey. */
   const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
 
@@ -50,6 +37,7 @@
     floatPanel: false,
     timestampFormat: "short",
     notifyOnComment: true,
+    notifyOnReaction: true,
     notifyOnReply: true,
   };
 
@@ -226,6 +214,7 @@
   }
 
   const MF_PARAM = "mf";
+  const COMMENT_REACTION_EMOJIS = ["👍", "👀", "✅", "❤️", "🔥", "❓"];
 
   let root = null;
   let canvasHost = null;
@@ -255,6 +244,11 @@
   let hasSupportedClipOnPage = false;
   let globalPanelState = { isVisible: true, activePanelView: "main" };
   let panelDragState = null;
+  let pendingReactionSaves = 0;
+  /** Custom hover roster for reaction pills (native `title` delay is not controllable). */
+  let reactionRosterTooltipEl = null;
+  let reactionRosterTooltipShowTid = null;
+  const REACTION_ROSTER_TIP_DELAY_MS = 100;
   let proUpgradePollTimer = null;
   let proUpgradePollDeadline = 0;
   /** Sync cache for renderThread (display name + avatar URL). */
@@ -338,6 +332,7 @@
       floatPanel: !!src.floatPanel,
       timestampFormat: normalizeTimestampFormatValue(src.timestampFormat),
       notifyOnComment: src.notifyOnComment !== false,
+      notifyOnReaction: src.notifyOnReaction !== false,
       notifyOnReply: src.notifyOnReply !== false,
     };
   }
@@ -2503,9 +2498,11 @@
     const floatCb = root.querySelector(".mf-settings-float-panel");
     if (floatCb) floatCb.checked = !!s.floatPanel;
     const notifyComment = root.querySelector(".mf-settings-notify-comment");
+    const notifyReaction = root.querySelector(".mf-settings-notify-reaction");
     const notifyReply = root.querySelector(".mf-settings-notify-reply");
     const pro = isProUser();
     if (notifyComment) notifyComment.checked = pro ? !!s.notifyOnComment : false;
+    if (notifyReaction) notifyReaction.checked = pro ? !!s.notifyOnReaction : false;
     if (notifyReply) notifyReply.checked = pro ? !!s.notifyOnReply : false;
     refreshProGatedToolbar();
     const avSrc = await loadStoredAvatar();
@@ -2853,6 +2850,7 @@
       const av = normalizeCommentAvatarUrl(c.avatarUrl);
       if (av) c.avatarUrl = av;
       else delete c.avatarUrl;
+      c.reactions = normalizeCommentReactions(c.reactions);
     }
   }
 
@@ -2863,6 +2861,70 @@
   function normalizeAuthorId(v) {
     if (typeof v !== "string") return "";
     return v.trim();
+  }
+
+  function normalizeCommentReactions(raw) {
+    const out = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    for (const emoji of COMMENT_REACTION_EMOJIS) {
+      const arr = raw[emoji];
+      if (!Array.isArray(arr)) continue;
+      const seen = new Set();
+      const cleaned = [];
+      for (const userId of arr) {
+        const id = normalizeAuthorId(userId);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        cleaned.push(id);
+      }
+      if (cleaned.length) out[emoji] = cleaned;
+    }
+    return out;
+  }
+
+  function ensureCommentReactions(comment) {
+    if (!comment || typeof comment !== "object") return {};
+    comment.reactions = normalizeCommentReactions(comment.reactions);
+    return comment.reactions;
+  }
+
+  /** Map auth user id (compare-normalized) → display name from comments in this review. */
+  function buildReactionParticipantNameMap() {
+    const map = new Map();
+    if (!Array.isArray(state.comments)) return map;
+    for (const c of state.comments) {
+      const aid = normalizeAuthorId(c?.authorId);
+      if (!aid) continue;
+      const key = normalizeUuidForCompare(aid);
+      const label = String(displayNameForComment(c) || "").trim() || "Someone";
+      map.set(key, label);
+    }
+    return map;
+  }
+
+  /** Comma-separated roster for a reaction; current user shown as "You". */
+  function formatReactionHoverTitle(reactorIds) {
+    const ids = Array.isArray(reactorIds) ? reactorIds : [];
+    const myId = normalizeAuthorId(currentCloudUserId());
+    const myKey = myId ? normalizeUuidForCompare(myId) : "";
+    const nameMap = buildReactionParticipantNameMap();
+    const seen = new Set();
+    const labels = [];
+    for (const rawId of ids) {
+      const id = normalizeAuthorId(rawId);
+      if (!id) continue;
+      const key = normalizeUuidForCompare(id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const label = myKey && key === myKey ? "You" : nameMap.get(key) || "Someone";
+      labels.push(label);
+    }
+    labels.sort((a, b) => {
+      if (a === "You") return -1;
+      if (b === "You") return 1;
+      return a.localeCompare(b, undefined, { sensitivity: "base" });
+    });
+    return labels.join("\n");
   }
 
   function isOwnComment(comment) {
@@ -3279,12 +3341,11 @@
                     parentId: newComment.parentId || null,
                   },
                 }),
-              }).catch((err) => console.log("[Notch] notify-comment error", err));
+              }).catch(() => {});
             }
           }
         }
       } catch (e) {
-        console.error("Notch cloud save", e);
         notchLog("saveClipData cloud exception", String(e?.message || e));
         showToast("Could not save to cloud — check your connection.");
         return false;
@@ -3309,6 +3370,50 @@
       commentCount: payload.comments.length,
     });
     return true;
+  }
+
+  /** After a reaction is saved to Supabase: notify comment author on shared reviews (fire-and-forget). */
+  function queueNotifyReactionAfterSave(clip, comment, emoji, isAddingReaction) {
+    if (!isAddingReaction || !clip || !comment || !COMMENT_REACTION_EMOJIS.includes(emoji)) return;
+    void (async () => {
+      await refreshCloudUser(false);
+      if (!state.cloudUser?.id) return;
+      const reactorId = normalizeAuthorId(currentCloudUserId());
+      if (!reactorId) return;
+      const hostBindingRaw = await readCollabHostUserIdForClip(clip);
+      const sharedReview =
+        !!hostBindingRaw &&
+        (!state.cloudUser?.id ||
+          normalizeUuidForCompare(hostBindingRaw) !== normalizeUuidForCompare(state.cloudUser.id));
+      if (!sharedReview) return;
+      const reviewId = String(state.currentReviewId || "").trim();
+      if (!reviewId) return;
+      const authorId = normalizeAuthorId(comment.authorId);
+      if (!authorId || normalizeUuidForCompare(authorId) === normalizeUuidForCompare(reactorId)) return;
+      const prefs = await loadCachedPreferences();
+      const reactorName =
+        String(prefs.displayName || "").trim() || String(state.cloudUser?.email || "").trim() || "Someone";
+      const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+      const videoTitle = clipDisplayTitleFromRecord(raw, clip);
+      void fetch("https://notch.video/.netlify/functions/notify-comment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          notificationType: "reaction",
+          reviewId,
+          emoji,
+          reactorName,
+          reactorId: state.cloudUser.id,
+          comment: {
+            id: comment.id,
+            ts: comment.ts,
+            text: comment.text,
+            authorId: comment.authorId,
+          },
+          videoTitle,
+        }),
+      }).catch(() => {});
+    })();
   }
 
   async function mergeClipMetadata(clip) {
@@ -3392,7 +3497,6 @@
           return;
         }
       } catch (e) {
-        console.error("Notch cloud merge", e);
         showToast("Could not update video details in the cloud.");
         return;
       }
@@ -3639,7 +3743,6 @@
         });
         if (!r?.ok) throw new Error("cloud delete failed");
       } catch (e) {
-        console.error("Notch cloud delete", e);
         throw e;
       }
     }
@@ -3685,6 +3788,76 @@
     t.classList.add("mf-show");
     clearTimeout(showToast._tid);
     showToast._tid = setTimeout(() => t.classList.remove("mf-show"), 2600);
+  }
+
+  function hideReactionRosterTooltip() {
+    clearTimeout(reactionRosterTooltipShowTid);
+    reactionRosterTooltipShowTid = null;
+    const tip = reactionRosterTooltipEl;
+    if (tip) {
+      tip.classList.remove("mf-show");
+      tip.hidden = true;
+      tip.textContent = "";
+      tip.style.left = "";
+      tip.style.top = "";
+      tip.style.visibility = "";
+    }
+  }
+
+  function ensureReactionRosterTooltipEl() {
+    if (!root) return null;
+    if (reactionRosterTooltipEl && reactionRosterTooltipEl.isConnected) return reactionRosterTooltipEl;
+    const el = document.createElement("div");
+    el.className = "mf-reaction-roster-tooltip";
+    el.setAttribute("role", "tooltip");
+    el.hidden = true;
+    root.appendChild(el);
+    reactionRosterTooltipEl = el;
+    return el;
+  }
+
+  function positionReactionRosterTooltip(anchor) {
+    const tip = reactionRosterTooltipEl;
+    if (!tip || !root || !anchor.isConnected) return;
+    tip.classList.add("mf-show");
+    tip.hidden = false;
+    tip.style.visibility = "hidden";
+    tip.style.left = "0";
+    tip.style.top = "0";
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    const ar = anchor.getBoundingClientRect();
+    const rr = root.getBoundingClientRect();
+    let left = ar.left - rr.left + ar.width / 2 - tw / 2;
+    let top = ar.top - rr.top - th - 6;
+    if (top < 4) top = ar.bottom - rr.top + 6;
+    left = Math.max(4, Math.min(left, rr.width - tw - 4));
+    top = Math.max(4, Math.min(top, rr.height - th - 4));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+    tip.style.visibility = "";
+  }
+
+  function bindReactionRosterTooltip(pill, rosterText) {
+    if (!rosterText) return;
+    pill.removeAttribute("title");
+    const scheduleShow = () => {
+      clearTimeout(reactionRosterTooltipShowTid);
+      reactionRosterTooltipShowTid = setTimeout(() => {
+        reactionRosterTooltipShowTid = null;
+        const tip = ensureReactionRosterTooltipEl();
+        if (!tip || !pill.isConnected) return;
+        tip.textContent = rosterText;
+        positionReactionRosterTooltip(pill);
+      }, REACTION_ROSTER_TIP_DELAY_MS);
+    };
+    const scheduleHide = () => {
+      hideReactionRosterTooltip();
+    };
+    pill.addEventListener("mouseenter", scheduleShow);
+    pill.addEventListener("mouseleave", scheduleHide);
+    pill.addEventListener("focusin", scheduleShow);
+    pill.addEventListener("focusout", scheduleHide);
   }
 
   function getActiveVideoEl() {
@@ -3923,6 +4096,47 @@
     return svg;
   }
 
+  /** Lucide `smile-plus` (ISC license) — inlined for content script. */
+  function createLucideSmilePlusIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "mf-lucide mf-lucide-smile-plus");
+    svg.setAttribute("width", "15");
+    svg.setAttribute("height", "15");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const p1 = document.createElementNS(NS, "path");
+    p1.setAttribute("d", "M22 11v1a10 10 0 1 1-9-10");
+    const p2 = document.createElementNS(NS, "path");
+    p2.setAttribute("d", "M8 14s1.5 2 4 2 4-2 4-2");
+    const eyeL = document.createElementNS(NS, "line");
+    eyeL.setAttribute("x1", "9");
+    eyeL.setAttribute("x2", "9.01");
+    eyeL.setAttribute("y1", "9");
+    eyeL.setAttribute("y2", "9");
+    const eyeR = document.createElementNS(NS, "line");
+    eyeR.setAttribute("x1", "15");
+    eyeR.setAttribute("x2", "15.01");
+    eyeR.setAttribute("y1", "9");
+    eyeR.setAttribute("y2", "9");
+    const p3 = document.createElementNS(NS, "path");
+    p3.setAttribute("d", "M16 5h6");
+    const p4 = document.createElementNS(NS, "path");
+    p4.setAttribute("d", "M19 2v6");
+    svg.appendChild(p1);
+    svg.appendChild(p2);
+    svg.appendChild(eyeL);
+    svg.appendChild(eyeR);
+    svg.appendChild(p3);
+    svg.appendChild(p4);
+    return svg;
+  }
+
   function uid() {
     return "mf_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   }
@@ -3988,6 +4202,7 @@
       authorId: currentCloudUserId() || "",
       avatarUrl: normalizeCommentAvatarUrl(cachedAuthorAvatarUrl),
       createdAt: Date.now(),
+      reactions: {},
     };
     if (threadParentId) {
       c.parentId = threadParentId;
@@ -4090,6 +4305,142 @@
     return wrap;
   }
 
+  function updateCommentReactionsInState(commentId, updater) {
+    if (!commentId || typeof updater !== "function") return false;
+    const idx = state.comments.findIndex((x) => x && x.id === commentId);
+    if (idx === -1) return false;
+    const original = state.comments[idx];
+    const next = updater(original);
+    if (!next || next === original) return false;
+    state.comments[idx] = next;
+    return true;
+  }
+
+  function toggleCommentReaction(commentId, emoji) {
+    if (!COMMENT_REACTION_EMOJIS.includes(emoji)) return;
+    const clip = resolveClipContext();
+    if (!clip) return;
+    const uid = normalizeAuthorId(currentCloudUserId());
+    if (!uid) {
+      showToast("Sign in to react.");
+      return;
+    }
+    const before = state.comments.find((x) => x && x.id === commentId);
+    if (!before) return;
+    const prevReactions = normalizeCommentReactions(before.reactions);
+    const prevEmojiUsers = Array.isArray(prevReactions[emoji]) ? prevReactions[emoji] : [];
+    const hasReacted = prevEmojiUsers.includes(uid);
+    const nextEmojiUsers = hasReacted
+      ? prevEmojiUsers.filter((id) => id !== uid)
+      : prevEmojiUsers.concat(uid);
+    const nextReactions = { ...prevReactions };
+    if (nextEmojiUsers.length) nextReactions[emoji] = nextEmojiUsers;
+    else delete nextReactions[emoji];
+    const changed = updateCommentReactionsInState(commentId, (comment) => ({
+      ...comment,
+      reactions: nextReactions,
+    }));
+    if (!changed) return;
+    renderThread();
+    pendingReactionSaves += 1;
+    void (async () => {
+      const ok = await saveClipData(clip);
+      if (ok) {
+        queueNotifyReactionAfterSave(clip, before, emoji, !hasReacted);
+        return;
+      }
+      updateCommentReactionsInState(commentId, (comment) => ({
+        ...comment,
+        reactions: prevReactions,
+      }));
+      renderThread();
+    })().finally(() => {
+      pendingReactionSaves = Math.max(0, pendingReactionSaves - 1);
+    });
+  }
+
+  function buildReactionBarEl(comment, opts) {
+    const inlineActions = opts?.inlineActions === true;
+    const bar = document.createElement("div");
+    bar.className = "mf-reaction-bar" + (inlineActions ? " mf-reaction-bar--in-actions" : "");
+    const canReact = !!currentCloudUserId();
+    const reactionPicker = document.createElement("details");
+    reactionPicker.className = "mf-reaction-picker";
+    const summary = document.createElement("summary");
+    summary.className = "mf-reaction-add-btn";
+    summary.title = canReact ? "Add reaction" : "Sign in to react";
+    summary.appendChild(createLucideSmilePlusIcon());
+    reactionPicker.appendChild(summary);
+    const menu = document.createElement("div");
+    menu.className = "mf-reaction-menu";
+    const ownUserId = normalizeAuthorId(currentCloudUserId());
+    const reactions = ensureCommentReactions(comment);
+    for (const emoji of COMMENT_REACTION_EMOJIS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "mf-reaction-emoji-btn";
+      btn.textContent = emoji;
+      const users = reactions[emoji] || [];
+      if (ownUserId && users.includes(ownUserId)) btn.classList.add("mf-on");
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        reactionPicker.open = false;
+        if (!canReact) {
+          showToast("Sign in to react.");
+          return;
+        }
+        toggleCommentReaction(comment.id, emoji);
+      });
+      menu.appendChild(btn);
+    }
+    reactionPicker.appendChild(menu);
+    const rows = document.createElement("div");
+    rows.className = "mf-reaction-list";
+    for (const emoji of COMMENT_REACTION_EMOJIS) {
+      const users = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+      if (!users.length) continue;
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "mf-reaction-pill";
+      if (ownUserId && users.includes(ownUserId)) pill.classList.add("mf-on");
+      const pillEmoji = document.createElement("span");
+      pillEmoji.className = "mf-reaction-pill-emoji";
+      pillEmoji.textContent = emoji;
+      const pillCount = document.createElement("span");
+      pillCount.className = "mf-reaction-pill-count";
+      pillCount.textContent = String(users.length);
+      pill.appendChild(pillEmoji);
+      pill.appendChild(pillCount);
+      const roster = formatReactionHoverTitle(users);
+      if (roster) {
+        pill.setAttribute("aria-label", roster);
+        bindReactionRosterTooltip(pill, roster);
+      } else {
+        pill.title = canReact ? "Toggle reaction" : "Sign in to react";
+      }
+      pill.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        hideReactionRosterTooltip();
+        if (!canReact) {
+          showToast("Sign in to react.");
+          return;
+        }
+        toggleCommentReaction(comment.id, emoji);
+      });
+      rows.appendChild(pill);
+    }
+    if (inlineActions) {
+      bar.appendChild(rows);
+      bar.appendChild(reactionPicker);
+    } else {
+      bar.appendChild(reactionPicker);
+      bar.appendChild(rows);
+    }
+    return bar;
+  }
+
   function goToCommentInVideo(c, isReply) {
     state.selectedId = c.id;
     seekTo(c.ts, false);
@@ -4115,6 +4466,7 @@
     el.addEventListener("click", (e) => {
       if (e.target.closest("button.mf-status-btn")) return;
       if (e.target.closest(".mf-comment-actions")) return;
+      if (e.target.closest(".mf-reaction-bar")) return;
       goToCommentInVideo(c, isReply);
     });
 
@@ -4210,7 +4562,10 @@
         renderThread();
       });
       actions.appendChild(replyBtn);
+      actions.appendChild(buildReactionBarEl(c, { inlineActions: true }));
       el.appendChild(actions);
+    } else {
+      el.appendChild(buildReactionBarEl(c));
     }
 
     return el;
@@ -4253,6 +4608,7 @@
 
   function renderThread() {
     if (!root) return;
+    hideReactionRosterTooltip();
     refreshProGatedToolbar();
     const thread = root.querySelector(".mf-thread");
     if (!thread) return;
@@ -4274,33 +4630,8 @@
       const rootEl = createCommentElement(rootComment, false);
       const reps = repliesSortedForRoot(rootComment.id);
       const replyCount = reps.length;
-      const threadCollapsed =
-        replyCount > 0 && state.collapsedReplyRoots.has(rootComment.id);
-      if (replyCount) {
-        const actions = rootEl.querySelector(".mf-comment-actions");
-        if (actions) {
-          const toggle = document.createElement("button");
-          toggle.type = "button";
-          toggle.className = "mf-comment-replies-toggle";
-          toggle.textContent = threadCollapsed
-            ? `${replyCount} ${replyCount === 1 ? "reply" : "replies"}`
-            : "Hide replies";
-          toggle.title = threadCollapsed ? "Show replies" : "Hide replies";
-          toggle.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (state.collapsedReplyRoots.has(rootComment.id)) {
-              state.collapsedReplyRoots.delete(rootComment.id);
-            } else {
-              state.collapsedReplyRoots.add(rootComment.id);
-            }
-            renderThread();
-          });
-          actions.appendChild(toggle);
-        }
-      }
       block.appendChild(rootEl);
-      if (replyCount && !threadCollapsed) {
+      if (replyCount) {
         const repliesEl = document.createElement("div");
         repliesEl.className = "mf-replies";
         for (const r of reps) repliesEl.appendChild(createCommentElement(r, true));
@@ -4512,6 +4843,7 @@
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading-row"><span class="mf-settings-section-heading">Notifications <span class="mf-pro-badge">Pro</span></span><span class="mf-settings-via-email">via email</span></div>
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone comments on my review</span><input type="checkbox" class="mf-settings-notify-comment mf-settings-toggle" /></label>
+              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone reacts to my comment</span><input type="checkbox" class="mf-settings-notify-reaction mf-settings-toggle" /></label>
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone replies to my comment</span><input type="checkbox" class="mf-settings-notify-reply mf-settings-toggle" /></label>
             </section>
             <section class="mf-settings-section">
@@ -4683,7 +5015,6 @@
           await renderDashboard();
           void tick();
         } else {
-          console.error("Notch: collab leave failed");
           showToast("Could not update — try again.");
         }
       });
@@ -4705,7 +5036,6 @@
           showToast("Removed from library.");
           await renderDashboard();
         } catch (err) {
-          console.error("Notch: delete failed", err);
           showToast("Could not remove — try again.");
         }
       });
@@ -4949,6 +5279,15 @@
         );
       });
     }
+    const notifyReaction = root.querySelector(".mf-settings-notify-reaction");
+    if (notifyReaction) {
+      notifyReaction.addEventListener("change", () => {
+        if (!isProUser()) return;
+        void updateCachedPreferences({ notifyOnReaction: !!notifyReaction.checked }).then((next) =>
+          queueSupabasePreferenceSync(next)
+        );
+      });
+    }
     const notifyReply = root.querySelector(".mf-settings-notify-reply");
     if (notifyReply) {
       notifyReply.addEventListener("change", () => {
@@ -5092,7 +5431,6 @@
           showToast("Signed out.");
           void tick();
         } catch (e) {
-          console.error("Notch: sign out", e);
           showToast("Sign out failed — try again.");
         }
       });
@@ -5270,7 +5608,6 @@
     try {
       g.drawImage(raw, 0, 0, vw, vh);
     } catch (e) {
-      console.error("Notch screengrab drawImage", e);
       return null;
     }
     return { canvas: c, w: vw, h: vh };
@@ -5283,7 +5620,6 @@
     try {
       return cap.canvas.toDataURL("image/png");
     } catch (e) {
-      console.error("Notch screengrab toDataURL", e);
       return null;
     }
   }
@@ -5418,7 +5754,6 @@
       } catch (_) {}
       return out;
     } catch (e) {
-      console.warn("Notch PDF Roboto", e);
       return out;
     }
   }
@@ -5505,7 +5840,6 @@
       g.drawImage(sourceCanvas, 0, 0, destW, destH);
       return c.toDataURL("image/png");
     } catch (e) {
-      console.error("Notch PDF rounded raster", e);
       return null;
     } finally {
       g.restore();
@@ -5745,9 +6079,7 @@
         let stillCap = null;
         try {
           stillCap = await captureVideoFrameCanvasForPdf(clip, c.ts);
-        } catch (e) {
-          console.error("Notch PDF frame", e);
-        }
+        } catch (e) {}
 
         const textBlock = (c.text || "").trim() || "(no text)";
         const commentTextLines = doc.splitTextToSize(textBlock, maxTextW);
@@ -5823,7 +6155,6 @@
             try {
               doc.addImage(roundedPng, "PNG", margin, y, imgW, imgH);
             } catch (e) {
-              console.error("Notch PDF addImage still", e);
               const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
               if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
             }
@@ -5867,7 +6198,6 @@
             if (mkRounded) doc.addImage(mkRounded, "PNG", margin, y, markupDims.w, markupDims.h);
             y += markupDims.h + 6;
           } catch (e) {
-            console.error("Notch PDF markup", e);
             y += 4;
           }
         }
@@ -5898,7 +6228,6 @@
       doc.save(fname);
       showToast("PDF downloaded.");
     } catch (e) {
-      console.error("Notch PDF export", e);
       showToast("Could not generate PDF.");
     } finally {
       try {
@@ -6021,7 +6350,6 @@
       try {
         blob = await (await fetch(dataUrl)).blob();
       } catch (e) {
-        console.error("Notch screengrab blob", e);
         showToast("Could not export frame (this site may block captures).");
         return null;
       }
@@ -6064,7 +6392,6 @@
     try {
       blob = await (await fetch(dataUrl)).blob();
     } catch (e) {
-      console.error("Notch screengrab blob", e);
       showToast("Could not export frame (this site may block captures).");
       return null;
     }
@@ -6099,7 +6426,6 @@
       await navigator.clipboard.write([new ClipboardItem({ "image/png": got.blob })]);
       showToast("Frame copied to clipboard.");
     } catch (e) {
-      console.error("Notch screengrab clipboard", e);
       showToast("Could not copy image to clipboard.");
     }
   }
@@ -6120,12 +6446,26 @@
       return;
     }
     try {
+      await refreshCloudUser(false);
+      const hostSupabaseUserId = String(state.cloudUser?.id || "").trim();
+      if (!hostSupabaseUserId) {
+        showToast("Sign in to copy a review link.");
+        return;
+      }
       const r = await sendExtensionMessage({
         type: "MF_ENSURE_CLIP_REVIEW_ROW",
         platform: clip.platform,
         clipId: clip.clipId,
       });
-      if (!r?.ok || !r.userId || !r.platform || r.clipId == null || String(r.clipId) === "") {
+      const rowHostId = String(r?.hostUserId ?? r?.userId ?? "").trim();
+      if (
+        !r?.ok ||
+        !r.platform ||
+        r.clipId == null ||
+        String(r.clipId) === "" ||
+        !rowHostId ||
+        normalizeUuidForCompare(rowHostId) !== normalizeUuidForCompare(hostSupabaseUserId)
+      ) {
         const err = r?.error || "";
         if (err === "not_authenticated") showToast("Sign in to copy a review link.");
         else if (err === "pro_required") showToast("Upgrade to Pro to copy review links.");
@@ -6133,7 +6473,7 @@
         return;
       }
       const qs = new URLSearchParams({
-        uid: String(r.userId),
+        uid: hostSupabaseUserId,
         platform: String(r.platform),
         clip: String(r.clipId),
       });
@@ -6154,7 +6494,6 @@
       showToast("Review link copied to clipboard.");
     } catch (err) {
       showToast("Could not copy link.");
-      console.error(err);
     }
   }
 
@@ -6194,9 +6533,7 @@
       const u = new URL(location.href);
       u.searchParams.delete(MF_PARAM);
       history.replaceState(null, "", u.toString());
-    } catch (e) {
-      console.warn("Notch: could not import mf param", e);
-    }
+    } catch (e) {}
   }
 
   async function initReview(clip) {
@@ -6248,6 +6585,13 @@
 
     await Promise.all([refreshAuthorPresentationCache(), refreshTimestampFormatCache()]);
     renderThread();
+    const hostUserId = await getCloudLoadSaveHostUserId(clip);
+    void sendExtensionMessage({
+      type: "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS",
+      platform: clip.platform,
+      clipId: clip.clipId,
+      ...(hostUserId ? { hostUserId } : {}),
+    }).catch(() => {});
 
     ensureCanvasOverlay(clip);
     videoEl = clip.getVideoElement();
@@ -6296,10 +6640,14 @@
     if (now - openSharedReviewDedupAt < 800) return;
     openSharedReviewDedupAt = now;
 
-    await setSidebarVisible(true);
+    await setGlobalVisibility(true);
 
     const clip = resolveClipContext();
-    if (!clip || !clipMatchesRedeemTarget(clip, platform, sharedClipId)) {
+    if (!clip) {
+      showToast("Open the matching video page to load this review.");
+      return;
+    }
+    if (!clipMatchesRedeemTarget(clip, platform, sharedClipId)) {
       showToast("Open the matching video page to load this review.");
       return;
     }
@@ -6356,6 +6704,7 @@
     applyCompactRootLayout();
 
     root.classList.toggle("mf-collapsed", state.collapsed);
+    void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
 
     await renderDashboard();
   }
@@ -6428,7 +6777,6 @@
       await tickInner();
     } catch (e) {
       if (isExtensionContextInvalidated(e)) return;
-      console.warn("[Notch] tick", e);
     }
   }
 
@@ -6514,6 +6862,7 @@
     root.classList.toggle("mf-collapsed", state.collapsed);
 
     if (!unlocked) {
+      void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       teardownDriveYoutubeEmbedBridge();
       teardownCanvas();
       activeClipStorageKey = null;
@@ -6526,6 +6875,7 @@
     }
 
     if (!clip) {
+      void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       teardownDriveYoutubeEmbedBridge();
       state.dashboardForced = false;
       await initDashboard();
@@ -6581,6 +6931,21 @@
         .then(() => sendResponse({ ok: true }))
         .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
       return true;
+    }
+    if (msg && msg.type === "MF_CLOUD_CLIP_UPDATED" && msg.record) {
+      if (pendingReactionSaves > 0) {
+        sendResponse({ ok: true, skipped: "pending_local_save" });
+        return false;
+      }
+      const list = coerceIncomingComments(msg.record);
+      if (list !== null) {
+        state.comments = list;
+        applyOwnIdentityToLoadedComments();
+        normalizeCommentsShape();
+        renderThread();
+      }
+      sendResponse({ ok: true });
+      return false;
     }
   });
 

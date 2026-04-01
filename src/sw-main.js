@@ -1,6 +1,7 @@
 import { isClientSafeSupabaseKey } from "./supabase-client-key.js";
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from "./supabase-config.js";
 import {
+  cleanupRealtimeForTab,
   handleRuntimeMessage,
   handoffSupabaseSession,
   invalidateSupabaseClient,
@@ -24,6 +25,8 @@ const CLOUD_TYPES = new Set([
   "MF_CLOUD_LIST_CLIPS",
   "MF_CLOUD_UPDATE_THUMB",
   "MF_CLOUD_DELETE_CLIP",
+  "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS",
+  "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS",
   "MF_ENSURE_CLIP_REVIEW_ROW",
   "MF_JOIN_SHARED_REVIEW",
   "MF_COLLAB_LEAVE",
@@ -191,7 +194,6 @@ async function dispatchOpenSharedReviewToTab(tabId, payload) {
       await new Promise((r) => setTimeout(r, 400));
     }
   }
-  console.warn("[Notch] open-shared-review: could not reach content script on tab", tabId);
 }
 
 function sendCloudFallback(msg, sendResponse) {
@@ -238,6 +240,10 @@ function sendCloudFallback(msg, sendResponse) {
     return;
   }
   if (t === "MF_CLOUD_DELETE_CLIP") {
+    sendResponse({ ok: false });
+    return;
+  }
+  if (t === "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS" || t === "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS") {
     sendResponse({ ok: false });
     return;
   }
@@ -334,7 +340,6 @@ chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
       chrome.runtime.sendMessage(internal).catch(() => {});
       sendResponse({ ok: true, tabId: tabId ?? null });
     } catch (e) {
-      console.error("[Notch] load-shared-review", e);
       sendResponse({ ok: false, error: String(e?.message || e) });
     }
   })();
@@ -423,10 +428,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!CLOUD_TYPES.has(msg?.type)) return false;
 
   try {
-    return handleRuntimeMessage(msg, sendResponse);
+    return handleRuntimeMessage(msg, sendResponse, sender);
   } catch (e) {
-    console.error("Notch: cloud handler", e);
     sendCloudFallback(msg, sendResponse);
     return false;
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void cleanupRealtimeForTab(tabId);
 });

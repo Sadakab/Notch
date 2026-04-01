@@ -1201,6 +1201,7 @@
   margin-bottom: 8px;
   background: var(--mf-bg-elevated);
   cursor: pointer;
+  position: relative;
 }
 
 #markframe-root .mf-comment.mf-selected {
@@ -1371,16 +1372,17 @@
 
 #markframe-root .mf-comment.mf-reply {
   margin-bottom: 0;
-  padding: 6px 8px;
+  padding: 6px 8px 8px;
   background: rgba(0, 0, 0, 0.12);
 }
 
 #markframe-root .mf-comment-actions {
   margin-top: 8px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 #markframe-root .mf-comment-reply-btn {
@@ -1510,6 +1512,201 @@
   word-break: break-word;
 }
 
+#markframe-root .mf-reaction-bar {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Root comments: counts after Reply (left); add-reaction control pinned right */
+#markframe-root .mf-reaction-bar--in-actions {
+  margin-top: 0;
+  margin-left: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  align-items: center;
+}
+
+#markframe-root .mf-reaction-bar--in-actions .mf-reaction-list {
+  padding-right: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+#markframe-root .mf-reaction-bar--in-actions > .mf-reaction-picker {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+#markframe-root .mf-reaction-picker {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+
+#markframe-root .mf-comment-actions .mf-reaction-picker {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  flex-shrink: 0;
+  transform: none;
+}
+
+#markframe-root .mf-comment.mf-reply .mf-reaction-picker {
+  right: 8px;
+  bottom: 6px;
+}
+
+#markframe-root .mf-comment.mf-reply .mf-reaction-bar {
+  margin-top: 4px;
+}
+
+#markframe-root .mf-comment:hover .mf-reaction-picker,
+#markframe-root .mf-comment:focus-within .mf-reaction-picker,
+#markframe-root .mf-reaction-picker[open] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+#markframe-root .mf-comment:hover .mf-comment-actions .mf-reaction-picker,
+#markframe-root .mf-comment:focus-within .mf-comment-actions .mf-reaction-picker,
+#markframe-root .mf-comment-actions .mf-reaction-picker[open] {
+  transform: none;
+}
+
+#markframe-root .mf-reaction-picker summary {
+  list-style: none;
+}
+
+#markframe-root .mf-reaction-picker summary::-webkit-details-marker {
+  display: none;
+}
+
+#markframe-root .mf-reaction-add-btn {
+  border: none;
+  background: transparent;
+  color: var(--mf-text-muted);
+  border-radius: 0;
+  min-width: 0;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+#markframe-root .mf-reaction-picker[open] .mf-reaction-add-btn,
+#markframe-root .mf-reaction-add-btn:hover {
+  color: var(--mf-accent);
+  background: transparent;
+}
+
+#markframe-root .mf-lucide-smile-plus {
+  display: block;
+  shape-rendering: geometricPrecision;
+}
+
+#markframe-root .mf-reaction-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--mf-border);
+  border-radius: 8px;
+  background: var(--mf-bg);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+#markframe-root .mf-reaction-emoji-btn {
+  border: 1px solid var(--mf-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--mf-text);
+  border-radius: 999px;
+  height: 24px;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+#markframe-root .mf-reaction-emoji-btn:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+#markframe-root .mf-reaction-emoji-btn.mf-on {
+  border-color: rgba(0, 229, 255, 0.5);
+  background: rgba(0, 229, 255, 0.18);
+}
+
+/* Inline counts on the card — no pill chrome */
+#markframe-root .mf-reaction-pill {
+  border: none;
+  background: transparent;
+  color: var(--mf-text-muted);
+  border-radius: 0;
+  height: auto;
+  min-height: 0;
+  padding: 0 4px 0 0;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1.35;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+#markframe-root .mf-reaction-pill:hover .mf-reaction-pill-emoji {
+  color: var(--mf-text);
+}
+
+#markframe-root .mf-reaction-pill-count {
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-reaction-pill:hover .mf-reaction-pill-count {
+  color: var(--mf-text);
+}
+
+#markframe-root .mf-reaction-pill.mf-on .mf-reaction-pill-emoji {
+  color: var(--mf-accent);
+}
+
+#markframe-root .mf-reaction-pill.mf-on .mf-reaction-pill-count {
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-reaction-pill.mf-on:hover .mf-reaction-pill-count {
+  color: var(--mf-text);
+}
+
+#markframe-root .mf-reaction-list {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding-right: 34px;
+}
+
 #markframe-root .mf-drawing-row {
   margin-top: 8px;
   display: flex;
@@ -1569,6 +1766,27 @@
 }
 
 #markframe-root .mf-toast.mf-show {
+  display: block;
+}
+
+#markframe-root .mf-reaction-roster-tooltip {
+  position: absolute;
+  z-index: 50;
+  max-width: min(220px, calc(100% - 16px));
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--mf-text);
+  background: var(--mf-bg-elevated);
+  border: 1px solid var(--mf-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  white-space: pre-line;
+  pointer-events: none;
+  display: none;
+}
+
+#markframe-root .mf-reaction-roster-tooltip.mf-show {
   display: block;
 }
 
