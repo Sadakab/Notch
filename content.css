@@ -1457,6 +1457,7 @@
   width: 22px;
   height: 22px;
   flex-shrink: 0;
+  line-height: 22px;
 }
 
 #markframe-root .mf-comment-avatar-img {
@@ -1471,16 +1472,19 @@
 #markframe-root .mf-comment-avatar-fallback {
   width: 22px;
   height: 22px;
-  border-radius: 50%;
-  background: var(--mf-accent-dim);
-  border: 1px solid var(--mf-border);
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 9px;
   font-weight: 600;
   color: var(--mf-accent);
-  line-height: 1;
+  line-height: 22px;
+  border-radius: 50%;
+  background: var(--mf-accent-dim);
+  border: 1px solid var(--mf-border);
+  vertical-align: middle;
+  flex-shrink: 0;
+  font-style: normal;
 }
 
 #markframe-root .mf-ts {
