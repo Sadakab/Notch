@@ -4659,37 +4659,18 @@
     } else {
       c.complete = false;
       try {
-        const frameDataUrl = await Promise.race([
-          (async () => {
-            const dataUrl = videoElementToPngDataUrl(videoEl);
-            if (!dataUrl) return null;
-            return await new Promise((resolve) => {
-              const img = new Image();
-              img.onload = () => {
-                const canvas = document.createElement("canvas");
-                canvas.width = 640;
-                canvas.height = 360;
-                const ctx = canvas.getContext("2d");
-                if (!ctx) {
-                  resolve(null);
-                  return;
-                }
-                const scale = Math.min(640 / img.width, 360 / img.height);
-                const w = img.width * scale;
-                const h = img.height * scale;
-                const x = (640 - w) / 2;
-                const y = (360 - h) / 2;
-                ctx.fillStyle = "#0a0e14";
-                ctx.fillRect(0, 0, 640, 360);
-                ctx.drawImage(img, x, y, w, h);
-                resolve(canvas.toDataURL("image/jpeg", 0.7));
-              };
-              img.onerror = () => resolve(null);
-              img.src = dataUrl;
-            });
-          })(),
-          new Promise((resolve) => setTimeout(() => resolve(null), 500)),
-        ]);
+        let frameDataUrl = null;
+        if (clip.platform === "googledrive") {
+          frameDataUrl = await Promise.race([
+            captureGoogleDriveFrameViaVisibleTab({ quiet: true }),
+            new Promise((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+        } else {
+          frameDataUrl = await Promise.race([
+            captureVideoFrameWithCrossOriginFallback(videoEl),
+            new Promise((resolve) => setTimeout(() => resolve(null), 4000)),
+          ]);
+        }
         if (frameDataUrl) c.frameCapture = frameDataUrl;
       } catch (_) {
         // frame capture is non-critical, continue without it
@@ -6379,6 +6360,96 @@
     }
   }
 
+  /** JPEG data URL (640×360) for comment thumbnails; cross-origin fallback for tainted canvases (e.g. Google Drive). */
+  async function captureVideoFrameWithCrossOriginFallback(videoEl) {
+    if (!videoEl) return null;
+    const vw = videoEl.videoWidth;
+    const vh = videoEl.videoHeight;
+    if (!vw || !vh) return null;
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 360;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
+      const scale = Math.min(640 / vw, 360 / vh);
+      const w = vw * scale;
+      const h = vh * scale;
+      ctx.fillStyle = "#0a0e14";
+      ctx.fillRect(0, 0, 640, 360);
+      ctx.drawImage(videoEl, (640 - w) / 2, (360 - h) / 2, w, h);
+      return canvas.toDataURL("image/jpeg", 0.7);
+    } catch (e) {
+      const srcUrl = videoEl.currentSrc || videoEl.src;
+      if (!srcUrl) return null;
+
+      return await new Promise((resolve) => {
+        const v = document.createElement("video");
+        v.crossOrigin = "anonymous";
+        v.muted = true;
+        v.playsInline = true;
+        v.preload = "auto";
+
+        const timeout = setTimeout(() => {
+          v.removeAttribute("src");
+          v.load();
+          resolve(null);
+        }, 3000);
+
+        v.onloadeddata = () => {
+          try {
+            v.currentTime = videoEl.currentTime;
+          } catch (_) {}
+        };
+
+        v.onseeked = () => {
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = 640;
+            canvas.height = 360;
+            const ctx = canvas.getContext("2d");
+            if (!ctx) {
+              clearTimeout(timeout);
+              v.removeAttribute("src");
+              v.load();
+              resolve(null);
+              return;
+            }
+            const scale = Math.min(640 / v.videoWidth, 360 / v.videoHeight);
+            const w = v.videoWidth * scale;
+            const h = v.videoHeight * scale;
+            ctx.fillStyle = "#0a0e14";
+            ctx.fillRect(0, 0, 640, 360);
+            ctx.drawImage(v, (640 - w) / 2, (360 - h) / 2, w, h);
+            clearTimeout(timeout);
+            v.removeAttribute("src");
+            v.load();
+            resolve(canvas.toDataURL("image/jpeg", 0.7));
+          } catch (_) {
+            clearTimeout(timeout);
+            v.removeAttribute("src");
+            v.load();
+            resolve(null);
+          }
+        };
+
+        v.onerror = () => {
+          clearTimeout(timeout);
+          v.removeAttribute("src");
+          v.load();
+          resolve(null);
+        };
+
+        try {
+          v.currentTime = videoEl.currentTime;
+        } catch (_) {}
+        v.src = srcUrl;
+        v.load();
+      });
+    }
+  }
+
   function getClipVideoDurationSecondsForExport(clip) {
     if (!clip) return null;
     const el = clip.getVideoElement();
@@ -6696,8 +6767,8 @@
     });
   }
 
-  async function captureGoogleDriveFrameViaVisibleTab() {
-    return captureGoogleDriveVisibleTabPngDataUrl({ quiet: false });
+  async function captureGoogleDriveFrameViaVisibleTab(options) {
+    return captureGoogleDriveVisibleTabPngDataUrl(options);
   }
 
   async function captureCurrentVideoFrameBlob() {
