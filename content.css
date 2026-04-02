@@ -1588,6 +1588,130 @@
   color: #66f0ff;
 }
 
+#markframe-root .mf-reaction-bar-trailing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+  line-height: 0;
+}
+
+#markframe-root .mf-reaction-bar-trailing .mf-reaction-picker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  min-height: 15px;
+  height: 15px;
+  position: relative;
+  right: auto;
+  bottom: auto;
+  flex-shrink: 0;
+  transform: none;
+}
+
+#markframe-root .mf-reaction-bar-delete-slot {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+#markframe-root .mf-comment-delete-wrap {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+  font-size: 11px;
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-comment:hover .mf-comment-delete-wrap,
+#markframe-root .mf-comment:focus-within .mf-comment-delete-wrap,
+#markframe-root .mf-comment-delete-wrap.mf-comment-delete-confirming {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#markframe-root .mf-comment-delete-btn {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  width: 15px;
+  height: 15px;
+  min-width: 15px;
+  min-height: 15px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mf-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease;
+}
+
+#markframe-root .mf-comment-delete-btn:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.1);
+}
+
+#markframe-root .mf-comment-delete-btn:focus {
+  outline: none;
+}
+
+#markframe-root .mf-comment-delete-btn:focus-visible {
+  outline: 2px solid var(--mf-accent);
+  outline-offset: 1px;
+}
+
+#markframe-root .mf-lucide-trash-2 {
+  display: block;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  shape-rendering: geometricPrecision;
+}
+
+#markframe-root .mf-comment-delete-prompt {
+  color: var(--mf-text-muted);
+  user-select: none;
+  white-space: nowrap;
+}
+
+#markframe-root .mf-comment-delete-yes,
+#markframe-root .mf-comment-delete-no {
+  margin: 0;
+  padding: 0 5px;
+  border: none;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--mf-accent);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+#markframe-root .mf-comment-delete-yes:hover,
+#markframe-root .mf-comment-delete-no:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+#markframe-root .mf-comment-delete-yes {
+  color: #f87171;
+}
+
 #markframe-root .mf-reply-composer {
   margin-top: 8px;
   padding: 8px 10px;
@@ -1703,10 +1827,17 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  min-width: 0;
 }
 
-/* Root comments: counts after Reply (left); add-reaction control pinned right */
+#markframe-root .mf-reaction-bar > .mf-reaction-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 0;
+}
+
+/* Root comments: bar grows in the actions row */
 #markframe-root .mf-reaction-bar--in-actions {
   margin-top: 0;
   margin-left: 0;
@@ -1714,17 +1845,6 @@
   min-width: 0;
   justify-content: flex-start;
   align-items: center;
-}
-
-#markframe-root .mf-reaction-bar--in-actions .mf-reaction-list {
-  padding-right: 0;
-  flex: 0 1 auto;
-  min-width: 0;
-}
-
-#markframe-root .mf-reaction-bar--in-actions > .mf-reaction-picker {
-  margin-left: auto;
-  flex-shrink: 0;
 }
 
 #markframe-root .mf-reaction-picker {
@@ -1747,13 +1867,9 @@
   transform: none;
 }
 
-#markframe-root .mf-comment.mf-reply .mf-reaction-picker {
-  right: 8px;
-  bottom: 6px;
-}
-
 #markframe-root .mf-comment.mf-reply .mf-reaction-bar {
-  margin-top: 4px;
+  margin-top: -5px;
+  width: 100%;
 }
 
 #markframe-root .mf-comment:hover .mf-reaction-picker,
@@ -1801,6 +1917,9 @@
 
 #markframe-root .mf-lucide-smile-plus {
   display: block;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
   shape-rendering: geometricPrecision;
 }
 

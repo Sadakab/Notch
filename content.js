@@ -463,6 +463,8 @@
     cloudUser: null,
     /** Current review owner email from cloud row source-of-truth. */
     reviewOwnerEmail: "",
+    /** Row owner's Supabase user id when loaded from cloud (for host moderation). */
+    reviewOwnerUserId: "",
     /** Current clip review row id in Supabase (empty when unknown/local-only). */
     currentReviewId: "",
     /** `null` = show all root comments; `"complete"` | `"incomplete"` = filter thread list. */
@@ -3388,6 +3390,7 @@
     state.commentCompleteFilter = null;
     closeCommentFilterDropdown();
     state.reviewOwnerEmail = "";
+    state.reviewOwnerUserId = "";
     state.currentReviewId = "";
     await refreshCloudUser(false);
     const key = clip.storageKey;
@@ -3515,6 +3518,7 @@
         applyOwnIdentityToLoadedComments();
         normalizeCommentsShape();
         state.reviewOwnerEmail = String(r.record.reviewOwnerEmail || "").trim();
+        state.reviewOwnerUserId = String(r.record.reviewOwnerUserId ?? "").trim();
         state.currentReviewId = String(r.record.reviewId || "").trim();
         await mirrorCloudRecordToLocalCache(clip, r.record);
         sharedReviewCloudReloadOnce.delete(key);
@@ -3554,6 +3558,7 @@
           applyOwnIdentityToLoadedComments();
           normalizeCommentsShape();
           state.reviewOwnerEmail = "";
+          state.reviewOwnerUserId = String(r.record.reviewOwnerUserId ?? "").trim();
           state.currentReviewId = String(r.record.reviewId || "").trim();
           await mirrorCloudRecordToLocalCache(clip, r.record);
           sharedReviewCloudReloadOnce.delete(key);
@@ -4583,6 +4588,44 @@
     return svg;
   }
 
+  /** Lucide `trash-2` (ISC license) — inlined for content script. */
+  function createLucideTrashIcon() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "mf-lucide mf-lucide-trash-2");
+    svg.setAttribute("width", "15");
+    svg.setAttribute("height", "15");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const p1 = document.createElementNS(NS, "path");
+    p1.setAttribute("d", "M3 6h18");
+    const p2 = document.createElementNS(NS, "path");
+    p2.setAttribute("d", "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6");
+    const p3 = document.createElementNS(NS, "path");
+    p3.setAttribute("d", "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2");
+    const l1 = document.createElementNS(NS, "line");
+    l1.setAttribute("x1", "10");
+    l1.setAttribute("x2", "10");
+    l1.setAttribute("y1", "11");
+    l1.setAttribute("y2", "17");
+    const l2 = document.createElementNS(NS, "line");
+    l2.setAttribute("x1", "14");
+    l2.setAttribute("x2", "14");
+    l2.setAttribute("y1", "11");
+    l2.setAttribute("y2", "17");
+    svg.appendChild(p1);
+    svg.appendChild(p2);
+    svg.appendChild(p3);
+    svg.appendChild(l1);
+    svg.appendChild(l2);
+    return svg;
+  }
+
   function uid() {
     return "mf_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
   }
@@ -4902,13 +4945,21 @@
       });
       rows.appendChild(pill);
     }
-    if (inlineActions) {
-      bar.appendChild(rows);
-      bar.appendChild(reactionPicker);
-    } else {
-      bar.appendChild(reactionPicker);
-      bar.appendChild(rows);
+    function appendDeleteSlot(parent) {
+      const del = opts?.deleteControl;
+      if (!del) return;
+      const slot = document.createElement("span");
+      slot.className = "mf-reaction-bar-delete-slot";
+      slot.appendChild(del);
+      parent.appendChild(slot);
     }
+
+    bar.appendChild(rows);
+    const trailing = document.createElement("div");
+    trailing.className = "mf-reaction-bar-trailing";
+    trailing.appendChild(reactionPicker);
+    appendDeleteSlot(trailing);
+    bar.appendChild(trailing);
     return bar;
   }
 
@@ -4929,6 +4980,107 @@
     renderThread();
   }
 
+  function isReviewRowOwner() {
+    const uid = currentCloudUserId();
+    const oid = String(state.reviewOwnerUserId || "").trim();
+    if (!uid || !oid) return false;
+    return normalizeUuidForCompare(uid) === normalizeUuidForCompare(oid);
+  }
+
+  function isCommentAuthorForDelete(comment) {
+    if (!currentCloudUserId()) return false;
+    if (comment?.isGuest === true) return false;
+    const uid = currentCloudUserId();
+    const aid = normalizeAuthorId(comment?.authorId);
+    if (uid && aid && normalizeUuidForCompare(uid) === normalizeUuidForCompare(aid)) return true;
+    const author = String(comment?.author || "").trim();
+    return !!author && author === cachedEffectiveDisplayName;
+  }
+
+  function canDeleteComment(comment) {
+    if (isGuestSharedReviewActive()) return false;
+    if (!currentCloudUserId()) return false;
+    if (isReviewRowOwner()) return true;
+    return isCommentAuthorForDelete(comment);
+  }
+
+  async function deleteCommentChain(comment) {
+    const clip = resolveClipContext();
+    if (!clip || !comment || !canDeleteComment(comment)) return;
+    const id = comment.id;
+    const isReply = !!comment.parentId;
+    const toRemove = new Set([id]);
+    if (!isReply) {
+      for (const c of state.comments) {
+        if (c && c.parentId === id) toRemove.add(c.id);
+      }
+    }
+    const next = state.comments.filter((c) => c && !toRemove.has(c.id));
+    normalizeCommentListShape(next);
+    const ok = await saveClipData(clip, { comments: next });
+    if (!ok) return;
+    state.comments = next;
+    normalizeCommentsShape();
+    if (state.replyTargetId && toRemove.has(state.replyTargetId)) state.replyTargetId = null;
+    if (!isReply) state.collapsedReplyRoots.delete(id);
+    const sel = state.selectedId;
+    if (sel && toRemove.has(sel)) state.selectedId = null;
+    hideReactionRosterTooltip();
+    invalidateReactionPublicNamesCache();
+    scheduleReactionPublicNamesRefresh();
+    renderThread();
+  }
+
+  function mountCommentDeleteTrashUi(wrap, comment) {
+    wrap.classList.remove("mf-comment-delete-confirming");
+    wrap.replaceChildren();
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "mf-comment-delete-btn";
+    btn.title = "Delete comment";
+    btn.setAttribute("aria-label", "Delete comment");
+    btn.appendChild(createLucideTrashIcon());
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      wrap.classList.add("mf-comment-delete-confirming");
+      wrap.replaceChildren();
+      const prompt = document.createElement("span");
+      prompt.className = "mf-comment-delete-prompt";
+      prompt.textContent = "Delete?";
+      const yes = document.createElement("button");
+      yes.type = "button";
+      yes.className = "mf-comment-delete-yes";
+      yes.textContent = "Yes";
+      const no = document.createElement("button");
+      no.type = "button";
+      no.className = "mf-comment-delete-no";
+      no.textContent = "No";
+      no.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        mountCommentDeleteTrashUi(wrap, comment);
+      });
+      yes.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void deleteCommentChain(comment);
+      });
+      wrap.appendChild(prompt);
+      wrap.appendChild(yes);
+      wrap.appendChild(no);
+    });
+    wrap.appendChild(btn);
+  }
+
+  function buildCommentDeleteControl(comment) {
+    if (!canDeleteComment(comment)) return null;
+    const wrap = document.createElement("span");
+    wrap.className = "mf-comment-delete-wrap";
+    mountCommentDeleteTrashUi(wrap, comment);
+    return wrap;
+  }
+
   function createCommentElement(c, isReply) {
     const el = document.createElement("div");
     el.className = "mf-comment" + (isReply ? " mf-reply" : "");
@@ -4937,6 +5089,7 @@
     el.addEventListener("click", (e) => {
       if (e.target.closest("button.mf-status-btn")) return;
       if (e.target.closest(".mf-comment-actions")) return;
+      if (e.target.closest(".mf-comment-delete-wrap")) return;
       if (e.target.closest(".mf-reaction-bar")) return;
       goToCommentInVideo(c, isReply);
     });
@@ -5033,10 +5186,19 @@
         renderThread();
       });
       actions.appendChild(replyBtn);
-      actions.appendChild(buildReactionBarEl(c, { inlineActions: true }));
+      const delRoot = buildCommentDeleteControl(c);
+      actions.appendChild(
+        buildReactionBarEl(c, {
+          inlineActions: true,
+          ...(delRoot ? { deleteControl: delRoot } : {}),
+        }),
+      );
       el.appendChild(actions);
     } else {
-      el.appendChild(buildReactionBarEl(c));
+      const delReply = buildCommentDeleteControl(c);
+      el.appendChild(
+        buildReactionBarEl(c, delReply ? { deleteControl: delReply } : {}),
+      );
     }
 
     return el;
