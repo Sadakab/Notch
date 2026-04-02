@@ -2277,3 +2277,22 @@
   color: rgba(255, 255, 255, 0.65);
   font-weight: 500;
 }
+
+#markframe-root .mf-settings-guest-identity {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--mf-text-muted);
+}
+
+#markframe-root .mf-settings-guest-name {
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 500;
+}
+
+#markframe-root .mf-settings-guest-footer {
+  margin-top: 4px;
+}
+
+#markframe-root .mf-settings-guest-footer .mf-settings-cta-btn {
+  width: 100%;
+}

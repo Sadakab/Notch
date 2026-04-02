@@ -282,7 +282,6 @@
     const guest = isGuestSharedReviewActive();
     root.dataset.mfGuest = guest ? "1" : "";
     root.querySelector(".mf-back-dashboard")?.classList.toggle("mf-hidden", !!guest);
-    root.querySelector(".mf-settings-btn")?.classList.toggle("mf-hidden", !!guest);
     root.querySelector('[data-action="go-watch-panel"]')?.classList.toggle("mf-hidden", !!guest);
     root.querySelector('[data-action="copy-link"]')?.classList.toggle("mf-hidden", !!guest);
     root.querySelector('[data-action="export-pdf"]')?.classList.toggle("mf-hidden", !!guest);
@@ -291,6 +290,21 @@
     const nameEl = root.querySelector(".mf-guest-footer-name");
     if (nameEl) {
       nameEl.textContent = guest ? String(state.guestSession?.guestName || "").trim() : "";
+    }
+  }
+
+  function syncSettingsGuestModeSections() {
+    if (!root) return;
+    const guest = isGuestSharedReviewActive();
+    root.querySelectorAll(".mf-settings-guest-only").forEach((el) => {
+      el.classList.toggle("mf-hidden", !guest);
+    });
+    root.querySelectorAll(".mf-settings-signed-in-only").forEach((el) => {
+      el.classList.toggle("mf-hidden", guest);
+    });
+    const guestNameEl = root.querySelector(".mf-settings-guest-name");
+    if (guestNameEl) {
+      guestNameEl.textContent = guest ? String(state.guestSession?.guestName || "").trim() : "";
     }
   }
 
@@ -2729,6 +2743,7 @@
     const billingBtn = root.querySelector('[data-action="manage-billing"]');
     if (upgradeBtn) upgradeBtn.classList.toggle("mf-hidden", pro);
     if (billingBtn) billingBtn.classList.toggle("mf-hidden", !pro);
+    syncSettingsGuestModeSections();
     overlay.classList.remove("mf-hidden");
     overlay.setAttribute("aria-hidden", "false");
     root.classList.add("mf-settings-open");
@@ -2751,7 +2766,18 @@
     };
     document.addEventListener("keydown", settingsEscapeHandler, true);
     document.addEventListener("click", settingsOutsideClickHandler, true);
-    requestAnimationFrame(() => inp.focus());
+    requestAnimationFrame(() => {
+      if (isGuestSharedReviewActive()) {
+        const dlg = root.querySelector(".mf-settings-dialog");
+        if (dlg instanceof HTMLElement) {
+          try {
+            dlg.focus();
+          } catch (_) {}
+        }
+      } else {
+        inp.focus();
+      }
+    });
     if (persistGlobal) {
       globalPanelState.activePanelView = "settings";
       await requestGlobalStatePatch({ activePanelView: "settings" });
@@ -5343,7 +5369,13 @@
             </button>
           </div>
           <div class="mf-settings-body">
-            <section class="mf-settings-section">
+            <section class="mf-settings-section mf-settings-guest-only mf-hidden" aria-label="Guest identity">
+              <div class="mf-settings-guest-identity mf-guest-footer-line">
+                Commenting as <span class="mf-settings-guest-name"></span> ·
+                <button type="button" class="mf-guest-footer-not-you">Not you?</button>
+              </div>
+            </section>
+            <section class="mf-settings-section mf-settings-signed-in-only">
               <div class="mf-settings-section-heading">Profile</div>
               <div class="mf-settings-profile-row">
                 <input type="file" class="mf-settings-profile-avatar-file" accept="image/*" tabindex="-1" aria-hidden="true" />
@@ -5372,7 +5404,7 @@
                   </div>
                 </div>
               </div>
-              <label class="mf-settings-row"><span>Auto-pause when typing</span><input type="checkbox" class="mf-settings-auto-pause-comments mf-settings-toggle" /></label>
+              <label class="mf-settings-row mf-settings-signed-in-only"><span>Auto-pause when typing</span><input type="checkbox" class="mf-settings-auto-pause-comments mf-settings-toggle" /></label>
               <label class="mf-settings-row"><span>Float panel</span><input type="checkbox" class="mf-settings-float-panel mf-settings-toggle" /></label>
             </section>
             <section class="mf-settings-section">
@@ -5387,13 +5419,13 @@
                 </div>
               </div>
             </section>
-            <section class="mf-settings-section">
+            <section class="mf-settings-section mf-settings-signed-in-only">
               <div class="mf-settings-section-heading-row"><span class="mf-settings-section-heading">Notifications <span class="mf-pro-badge">Pro</span></span><span class="mf-settings-via-email">via email</span></div>
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone comments on my review</span><input type="checkbox" class="mf-settings-notify-comment mf-settings-toggle" /></label>
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone reacts to my comment</span><input type="checkbox" class="mf-settings-notify-reaction mf-settings-toggle" /></label>
               <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone replies to my comment</span><input type="checkbox" class="mf-settings-notify-reply mf-settings-toggle" /></label>
             </section>
-            <section class="mf-settings-section">
+            <section class="mf-settings-section mf-settings-signed-in-only">
               <div class="mf-settings-section-heading">PDF Export <span class="mf-pro-badge">Pro</span></div>
               <div class="mf-settings-row mf-settings-pro-disabled">
                 <span>Company logo</span>
@@ -5403,7 +5435,7 @@
                 </button>
               </div>
             </section>
-            <section class="mf-settings-section">
+            <section class="mf-settings-section mf-settings-signed-in-only">
               <div class="mf-settings-section-heading">Account</div>
               <div class="mf-settings-account-row">
                 <span class="mf-settings-account-email"></span>
@@ -5419,16 +5451,19 @@
               </div>
               <div class="mf-settings-change-email-notice mf-hidden" aria-live="polite"></div>
             </section>
-            <section class="mf-settings-section">
+            <section class="mf-settings-section mf-settings-signed-in-only">
               <div class="mf-settings-section-heading">Plan</div>
               <div class="mf-settings-row"><span>Current plan</span><span class="mf-settings-plan-badge">Free</span></div>
               <button type="button" class="mf-settings-cta-btn" data-action="upgrade-pro">Upgrade to Pro</button>
               <button type="button" class="mf-settings-ghost-btn mf-hidden" data-action="manage-billing">Manage billing</button>
               <div class="mf-settings-upgrade-status mf-hidden" aria-live="polite"></div>
             </section>
-            <div class="mf-settings-footer-row">
+            <div class="mf-settings-footer-row mf-settings-signed-in-only">
               <button type="button" class="mf-settings-link-btn" data-action="sign-out">Sign out</button>
               <button type="button" class="mf-settings-link-btn mf-settings-link-danger" data-action="delete-account">Delete account</button>
+            </div>
+            <div class="mf-settings-guest-footer mf-settings-guest-only mf-hidden">
+              <button type="button" class="mf-settings-cta-btn" data-action="guest-settings-sign-in">Sign in to Notch</button>
             </div>
           </div>
         </div>
@@ -6172,6 +6207,10 @@
     root.querySelector('[data-action="guest-sign-up-from-name"]')?.addEventListener("click", () => {
       openAuthGateFromGuestFlow();
     });
+    root.querySelector('[data-action="guest-settings-sign-in"]')?.addEventListener("click", () => {
+      void closeSettingsPanel({ persistGlobal: true });
+      openAuthGateFromGuestFlow();
+    });
     root.querySelector('[data-action="guest-join-review"]')?.addEventListener("click", () => {
       const nameInp = root.querySelector(".mf-guest-invite-name-input");
       const err = root.querySelector(".mf-guest-invite-error");
@@ -6189,14 +6228,17 @@
       lastTickSignature = "";
       void tick();
     });
-    root.querySelector(".mf-guest-footer-not-you")?.addEventListener("click", () => {
-      clearGuestIdentityLocalStorage();
-      state.guestSession = null;
-      guestAuthRouteGate = false;
-      resetGuestInviteModalUi();
-      clearGuestSharedPoll();
-      lastTickSignature = "";
-      void tick();
+    root.querySelectorAll(".mf-guest-footer-not-you").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        void closeSettingsPanel({ persistGlobal: true });
+        clearGuestIdentityLocalStorage();
+        state.guestSession = null;
+        guestAuthRouteGate = false;
+        resetGuestInviteModalUi();
+        clearGuestSharedPoll();
+        lastTickSignature = "";
+        void tick();
+      });
     });
   }
 
