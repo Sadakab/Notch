@@ -9,6 +9,10 @@
   function notchLog() {}
   /** Must match service worker Supabase auth storageKey. */
   const SUPABASE_AUTH_STORAGE_KEY = "sb-notch-auth";
+  /** Page localStorage: guest display name for shared reviews. */
+  const NOTCH_GUEST_NAME_KEY = "notch_guest_name";
+  /** Stable id for reaction arrays when commenting as a guest (page localStorage). */
+  const NOTCH_GUEST_REACTOR_ID_KEY = "notch_guest_reactor_id";
 
   const STORAGE_KEYS = {
     sidebarVisible: "markframe_sidebar_visible",
@@ -141,6 +145,155 @@
     return false;
   }
 
+  function readNotchGuestNameFromLocalStorage() {
+    try {
+      return String(localStorage.getItem(NOTCH_GUEST_NAME_KEY) || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function writeNotchGuestNameToLocalStorage(name) {
+    try {
+      const t = String(name || "").trim();
+      if (!t) localStorage.removeItem(NOTCH_GUEST_NAME_KEY);
+      else localStorage.setItem(NOTCH_GUEST_NAME_KEY, t);
+    } catch (_) {}
+  }
+
+  function ensureGuestReactorId() {
+    try {
+      let id = String(localStorage.getItem(NOTCH_GUEST_REACTOR_ID_KEY) || "").trim();
+      if (!id) {
+        id = crypto.randomUUID();
+        localStorage.setItem(NOTCH_GUEST_REACTOR_ID_KEY, id);
+      }
+      return id;
+    } catch {
+      return "";
+    }
+  }
+
+  function clearGuestIdentityLocalStorage() {
+    try {
+      localStorage.removeItem(NOTCH_GUEST_NAME_KEY);
+      localStorage.removeItem(NOTCH_GUEST_REACTOR_ID_KEY);
+    } catch (_) {}
+  }
+
+  /** Host binding on this clip and the signed-in user is not the host (or signed out). */
+  async function isSharedCollaborationClip(clip) {
+    if (!clip) return false;
+    const host = await readCollabHostUserIdForClip(clip);
+    if (!host) return false;
+    if (!state.cloudUser?.id) return true;
+    return normalizeUuidForCompare(host) !== normalizeUuidForCompare(state.cloudUser.id);
+  }
+
+  async function syncGuestSessionForClip(clip) {
+    if (state.cloudUser) {
+      state.guestSession = null;
+      return;
+    }
+    if (!clip || !(await isSharedCollaborationClip(clip))) {
+      state.guestSession = null;
+      return;
+    }
+    const name = readNotchGuestNameFromLocalStorage();
+    if (name) state.guestSession = { isGuest: true, guestName: name };
+    else state.guestSession = null;
+  }
+
+  function isGuestSharedReviewActive() {
+    return !!(state.guestSession?.isGuest && String(state.guestSession?.guestName || "").trim());
+  }
+
+  async function getGuestSharedHostUserId(clip) {
+    if (!clip || !isGuestSharedReviewActive()) return "";
+    return String((await readCollabHostUserIdForClip(clip)) || "").trim();
+  }
+
+  function clearGuestSharedPoll() {
+    if (guestSharedPollTimer != null) {
+      clearInterval(guestSharedPollTimer);
+      guestSharedPollTimer = null;
+    }
+  }
+
+  function startGuestSharedPoll() {
+    clearGuestSharedPoll();
+    guestSharedPollTimer = setInterval(() => {
+      const clip = resolveClipContext();
+      if (!clip || !isGuestSharedReviewActive()) return;
+      void reloadGuestSharedClipQuietly(clip);
+    }, 8000);
+  }
+
+  async function reloadGuestSharedClipQuietly(clip) {
+    if (!clip || pendingReactionSaves > 0) return;
+    const hid = await getGuestSharedHostUserId(clip);
+    if (!hid) return;
+    try {
+      const r = await sendExtensionMessage({
+        type: "MF_GUEST_CLOUD_LOAD_CLIP",
+        platform: clip.platform,
+        clipId: clip.clipId,
+        hostUserId: hid,
+      });
+      if (r?.ok !== true || !r.record) return;
+      const list = coerceIncomingComments(r.record);
+      if (list === null) return;
+      state.comments = list;
+      applyOwnIdentityToLoadedComments();
+      normalizeCommentsShape();
+      invalidateReactionPublicNamesCache();
+      renderThread();
+    } catch {
+      /* noop */
+    }
+  }
+
+  function resetGuestInviteModalUi() {
+    guestModalStep = "choice";
+    if (!root) return;
+    const choice = root.querySelector(".mf-guest-invite-choice");
+    const namePanel = root.querySelector(".mf-guest-invite-name-panel");
+    const nameInp = root.querySelector(".mf-guest-invite-name-input");
+    choice?.classList.remove("mf-hidden");
+    namePanel?.classList.add("mf-hidden");
+    if (nameInp) nameInp.value = "";
+    root.querySelector(".mf-guest-invite-error")?.classList.add("mf-hidden");
+  }
+
+  async function updateGuestInviteSubtitle(clip) {
+    if (!root) return;
+    const el = root.querySelector(".mf-guest-invite-subtitle");
+    if (!el) return;
+    if (!clip) {
+      el.textContent = "";
+      return;
+    }
+    const raw = await getClipRecordForDisplay(clip);
+    el.textContent = clipDisplayTitleFromRecord(raw, clip);
+  }
+
+  function applyGuestWatchChrome() {
+    if (!root) return;
+    const guest = isGuestSharedReviewActive();
+    root.dataset.mfGuest = guest ? "1" : "";
+    root.querySelector(".mf-back-dashboard")?.classList.toggle("mf-hidden", !!guest);
+    root.querySelector(".mf-settings-btn")?.classList.toggle("mf-hidden", !!guest);
+    root.querySelector('[data-action="go-watch-panel"]')?.classList.toggle("mf-hidden", !!guest);
+    root.querySelector('[data-action="copy-link"]')?.classList.toggle("mf-hidden", !!guest);
+    root.querySelector('[data-action="export-pdf"]')?.classList.toggle("mf-hidden", !!guest);
+    const guestFooter = root.querySelector(".mf-guest-footer-row");
+    guestFooter?.classList.toggle("mf-hidden", !guest);
+    const nameEl = root.querySelector(".mf-guest-footer-name");
+    if (nameEl) {
+      nameEl.textContent = guest ? String(state.guestSession?.guestName || "").trim() : "";
+    }
+  }
+
   function canonicalClipIdForCloudLog(platform, clipId) {
     if (platform !== "dropbox" || typeof clipId !== "string") return clipId;
     const q = clipId.indexOf("?");
@@ -265,6 +418,11 @@
   let lastTickSignature = "";
   /** At most one delayed reload per storageKey when shared-review binding exists but host row not returned yet. */
   const sharedReviewCloudReloadOnce = new Set();
+  let guestSharedPollTimer = null;
+  /** `"choice"` | `"name"` — guest invite modal step. */
+  let guestModalStep = "choice";
+  /** When true, shared unsigned user chose "Sign up" — show auth gate instead of guest modal until signed in. */
+  let guestAuthRouteGate = false;
   /** Bumps on each dashboard paint; stale async completions skip DOM so concurrent renders cannot duplicate rows. */
   let dashboardRenderGeneration = 0;
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
@@ -295,6 +453,8 @@
     currentReviewId: "",
     /** `null` = show all root comments; `"complete"` | `"incomplete"` = filter thread list. */
     commentCompleteFilter: null,
+    /** `{ isGuest, guestName }` while reviewing a shared link signed out; cleared when not on a shared clip. */
+    guestSession: null,
   };
 
   let cloudAuthCacheValidUntil = 0;
@@ -645,13 +805,32 @@
     }
   }
 
-  function applyAppShellLocked(locked) {
+  function syncRootChromeVisibility(opts) {
     if (!root) return;
-    root.dataset.mfLocked = locked ? "1" : "";
+    const guestInvite = opts?.guestInvite === true;
+    const unlocked = opts?.unlocked === true;
     const gate = root.querySelector(".mf-gate-pane");
     const shell = root.querySelector(".mf-app-shell");
-    if (gate) gate.classList.toggle("mf-hidden", !locked);
-    if (shell) shell.classList.toggle("mf-hidden", !!locked);
+    const guestOverlay = root.querySelector(".mf-guest-invite-overlay");
+    root.dataset.mfLocked = unlocked && !guestInvite ? "" : "1";
+    root.dataset.mfGuestInviteOpen = guestInvite ? "1" : "";
+    if (guestInvite) {
+      gate?.classList.add("mf-hidden");
+      shell?.classList.add("mf-hidden");
+      guestOverlay?.classList.remove("mf-hidden");
+    } else if (!unlocked) {
+      gate?.classList.remove("mf-hidden");
+      shell?.classList.add("mf-hidden");
+      guestOverlay?.classList.add("mf-hidden");
+    } else {
+      gate?.classList.add("mf-hidden");
+      shell?.classList.remove("mf-hidden");
+      guestOverlay?.classList.add("mf-hidden");
+    }
+  }
+
+  function applyAppShellLocked(locked) {
+    syncRootChromeVisibility({ guestInvite: false, unlocked: !locked });
   }
 
   function isYoutubeSite() {
@@ -2262,6 +2441,10 @@
   }
 
   async function effectiveDisplayName() {
+    if (state.guestSession?.isGuest) {
+      const gn = String(state.guestSession.guestName || "").trim();
+      if (gn) return gn;
+    }
     await refreshCloudUser(false);
     const raw = (await loadAuthorOverride()).trim();
     if (raw) return raw;
@@ -2272,6 +2455,11 @@
 
   async function refreshAuthorPresentationCache() {
     await refreshCloudUser(false);
+    if (isGuestSharedReviewActive()) {
+      cachedEffectiveDisplayName = String(state.guestSession?.guestName || "").trim() || "Guest";
+      cachedAuthorAvatarUrl = "";
+      return;
+    }
     cachedEffectiveDisplayName = await effectiveDisplayName();
     const prefs = await loadCachedPreferences();
     cachedAuthorAvatarUrl = typeof prefs.avatar === "string" && prefs.avatar.trim() ? prefs.avatar.trim() : "";
@@ -2735,6 +2923,7 @@
   function refreshProGatedToolbar() {
     if (!root) return;
     applyProOnlyUi();
+    applyGuestWatchChrome();
     root.classList.toggle("mf-user-pro", isProUser());
     updateCopyReviewLinkButtonState();
     updateExportPdfButtonState();
@@ -2884,9 +3073,13 @@
         c.complete = c.reaction === "approve";
       }
       delete c.reaction;
-      const authorId = normalizeAuthorId(c.authorId);
-      if (authorId) c.authorId = authorId;
-      else delete c.authorId;
+      if (c.isGuest === true) {
+        delete c.authorId;
+      } else {
+        const authorId = normalizeAuthorId(c.authorId);
+        if (authorId) c.authorId = authorId;
+        else delete c.authorId;
+      }
       const av = normalizeCommentAvatarUrl(c.avatarUrl);
       if (av) c.avatarUrl = av;
       else delete c.avatarUrl;
@@ -2949,6 +3142,11 @@
     for (const [k, v] of reactionPublicNameByCompareKey) {
       const nm = String(v || "").trim();
       if (nm) merged.set(k, nm);
+    }
+    if (isGuestSharedReviewActive()) {
+      const gid = ensureGuestReactorId();
+      const gn = String(state.guestSession?.guestName || "").trim();
+      if (gid && gn) merged.set(normalizeUuidForCompare(gid), gn);
     }
     return merged;
   }
@@ -3030,7 +3228,9 @@
   function formatReactionHoverTitle(reactorIds) {
     const ids = Array.isArray(reactorIds) ? reactorIds : [];
     const myId = normalizeAuthorId(currentCloudUserId());
-    const myKey = myId ? normalizeUuidForCompare(myId) : "";
+    const guestRid = isGuestSharedReviewActive() ? ensureGuestReactorId() : "";
+    const myKey =
+      myId ? normalizeUuidForCompare(myId) : guestRid ? normalizeUuidForCompare(guestRid) : "";
     const nameMap = mergedReactionDisplayNameMap();
     const seen = new Set();
     const labels = [];
@@ -3052,6 +3252,11 @@
   }
 
   function isOwnComment(comment) {
+    if (comment?.isGuest === true && isGuestSharedReviewActive()) {
+      const gn = String(state.guestSession?.guestName || "").trim();
+      const author = String(comment?.author || "").trim();
+      return !!gn && author === gn;
+    }
     const uid = currentCloudUserId();
     const aid = normalizeAuthorId(comment?.authorId);
     if (uid && aid && normalizeUuidForCompare(uid) === normalizeUuidForCompare(aid)) return true;
@@ -3068,6 +3273,7 @@
     const uid = currentCloudUserId();
     if (!uid || !Array.isArray(state.comments) || state.comments.length === 0) return;
     for (const c of state.comments) {
+      if (c?.isGuest === true) continue;
       if (normalizeAuthorId(c?.authorId)) continue;
       if (String(c?.author || "").trim() === cachedEffectiveDisplayName) {
         c.authorId = uid;
@@ -3299,6 +3505,55 @@
     }
 
     if (configured && !isCloudActive()) {
+      if (isGuestSharedReviewActive() && sharedReviewTarget) {
+        const gh = String(hostBindingRaw || "").trim();
+        let r = null;
+        try {
+          r = await sendExtensionMessage({
+            type: "MF_GUEST_CLOUD_LOAD_CLIP",
+            platform: clip.platform,
+            clipId: clip.clipId,
+            hostUserId: gh,
+          });
+        } catch (e) {
+          notchLog("loadClipData MF_GUEST_CLOUD_LOAD_CLIP threw", { message: String(e?.message || e) });
+        }
+        if (r?.ok === true && r.record != null) {
+          const list = coerceIncomingComments(r.record);
+          if (list !== null) {
+            state.comments = list;
+          } else {
+            state.comments = [];
+          }
+          applyOwnIdentityToLoadedComments();
+          normalizeCommentsShape();
+          state.reviewOwnerEmail = "";
+          state.currentReviewId = String(r.record.reviewId || "").trim();
+          await mirrorCloudRecordToLocalCache(clip, r.record);
+          sharedReviewCloudReloadOnce.delete(key);
+          invalidateReactionPublicNamesCache();
+          scheduleReactionPublicNamesRefresh();
+          notchLog("loadClipData guest cloud ok", { commentCount: state.comments.length });
+          return;
+        }
+        if (r?.ok === true && r.record == null) {
+          await removeLocalClipCacheKeys(clip);
+          state.comments = [];
+          normalizeCommentsShape();
+          if (!sharedReviewCloudReloadOnce.has(key)) {
+            sharedReviewCloudReloadOnce.add(key);
+            setTimeout(() => {
+              lastTickSignature = "";
+              void tick();
+            }, 500);
+          }
+          return;
+        }
+        state.comments = [];
+        normalizeCommentsShape();
+        showToast("Could not load this shared review. Check your connection.");
+        return;
+      }
       state.comments = [];
       normalizeCommentsShape();
       notchLog("loadClipData: Supabase configured but not signed in — skip local clip cache");
@@ -3489,6 +3744,41 @@
     }
 
     if (configured && !isCloudActive()) {
+      if (isGuestSharedReviewActive()) {
+        const hostBindingRaw = await readCollabHostUserIdForClip(clip);
+        const gh = String(hostBindingRaw || "").trim();
+        const sharedReview =
+          !!hostBindingRaw &&
+          (!state.cloudUser?.id ||
+            normalizeUuidForCompare(hostBindingRaw) !== normalizeUuidForCompare(state.cloudUser.id));
+        if (!sharedReview || !gh) {
+          showToast("Shared review target missing. Re-open the review link.");
+          return false;
+        }
+        try {
+          const r = await sendExtensionMessage({
+            type: "MF_GUEST_CLOUD_SAVE_CLIP",
+            platform: clip.platform,
+            clipId: clip.clipId,
+            hostUserId: gh,
+            comments: commentsPayload,
+            title,
+            thumbnailUrl,
+          });
+          if (r?.ok !== true) {
+            const err = String(r?.error || "");
+            showToast(cloudSaveFailureToast(err, true));
+            return false;
+          }
+          if (r?.reviewId) state.currentReviewId = String(r.reviewId).trim();
+        } catch (e) {
+          notchLog("saveClipData guest exception", String(e?.message || e));
+          showToast("Could not save — check your connection.");
+          return false;
+        }
+        await chrome.storage.local.set({ [key]: payload });
+        return true;
+      }
       showToast("Sign in to save notes to the cloud.");
       return false;
     }
@@ -4329,11 +4619,15 @@
       ts,
       text: trimmed,
       author,
-      authorId: currentCloudUserId() || "",
       avatarUrl: normalizeCommentAvatarUrl(cachedAuthorAvatarUrl),
       createdAt: Date.now(),
       reactions: {},
     };
+    if (isGuestSharedReviewActive()) {
+      c.isGuest = true;
+    } else {
+      c.authorId = currentCloudUserId() || "";
+    }
     if (threadParentId) {
       c.parentId = threadParentId;
     } else {
@@ -4487,7 +4781,9 @@
     const clip = resolveClipContext();
     if (!clip) return;
     const uid = normalizeAuthorId(currentCloudUserId());
-    if (!uid) {
+    const guestRid = isGuestSharedReviewActive() ? ensureGuestReactorId() : "";
+    const actorId = uid || guestRid;
+    if (!actorId) {
       showToast("Sign in to react.");
       return;
     }
@@ -4495,10 +4791,10 @@
     if (!before) return;
     const prevReactions = normalizeCommentReactions(before.reactions);
     const prevEmojiUsers = Array.isArray(prevReactions[emoji]) ? prevReactions[emoji] : [];
-    const hasReacted = prevEmojiUsers.includes(uid);
+    const hasReacted = prevEmojiUsers.includes(actorId);
     const nextEmojiUsers = hasReacted
-      ? prevEmojiUsers.filter((id) => id !== uid)
-      : prevEmojiUsers.concat(uid);
+      ? prevEmojiUsers.filter((id) => id !== actorId)
+      : prevEmojiUsers.concat(actorId);
     const nextReactions = { ...prevReactions };
     if (nextEmojiUsers.length) nextReactions[emoji] = nextEmojiUsers;
     else delete nextReactions[emoji];
@@ -4529,7 +4825,9 @@
     const inlineActions = opts?.inlineActions === true;
     const bar = document.createElement("div");
     bar.className = "mf-reaction-bar" + (inlineActions ? " mf-reaction-bar--in-actions" : "");
-    const canReact = !!currentCloudUserId();
+    const ownForReact =
+      normalizeAuthorId(currentCloudUserId()) || (isGuestSharedReviewActive() ? ensureGuestReactorId() : "");
+    const canReact = !!ownForReact;
     const reactionPicker = document.createElement("details");
     reactionPicker.className = "mf-reaction-picker";
     const summary = document.createElement("summary");
@@ -4539,7 +4837,7 @@
     reactionPicker.appendChild(summary);
     const menu = document.createElement("div");
     menu.className = "mf-reaction-menu";
-    const ownUserId = normalizeAuthorId(currentCloudUserId());
+    const ownUserId = ownForReact;
     const reactions = ensureCommentReactions(comment);
     for (const emoji of COMMENT_REACTION_EMOJIS) {
       const btn = document.createElement("button");
@@ -4875,6 +5173,42 @@
           </div>
         </div>
       </div>
+      <div class="mf-guest-invite-overlay mf-hidden" aria-hidden="true">
+        <div
+          class="mf-guest-invite-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mf-guest-invite-title"
+          tabindex="-1"
+        >
+          <h2 id="mf-guest-invite-title" class="mf-guest-invite-title">You've been invited to review a video</h2>
+          <p class="mf-guest-invite-subtitle" aria-live="polite"></p>
+          <div class="mf-guest-invite-choice">
+            <button type="button" class="mf-guest-invite-primary" data-action="guest-continue">
+              Continue as guest
+            </button>
+            <button type="button" class="mf-guest-invite-link" data-action="guest-sign-up">
+              Sign up free
+            </button>
+          </div>
+          <div class="mf-guest-invite-name-panel mf-hidden">
+            <input
+              type="text"
+              class="mf-guest-invite-name-input"
+              maxlength="80"
+              autocomplete="nickname"
+              spellcheck="false"
+              placeholder="Your name"
+              aria-label="Your name"
+            />
+            <p class="mf-guest-invite-error mf-hidden" aria-live="polite">Enter your name to continue.</p>
+            <button type="button" class="mf-guest-invite-join" data-action="guest-join-review">Join review</button>
+            <button type="button" class="mf-guest-invite-link mf-guest-invite-link-below" data-action="guest-sign-up-from-name">
+              Sign up free
+            </button>
+          </div>
+        </div>
+      </div>
       <div class="mf-app-shell mf-hidden">
         <div class="mf-header">
           <div class="mf-header-text">
@@ -4978,6 +5312,12 @@
           </div>
           <div class="mf-thread"></div>
           <div class="mf-footer">
+            <div class="mf-guest-footer-row mf-hidden" aria-live="polite">
+              <span class="mf-guest-footer-line">
+                Commenting as <span class="mf-guest-footer-name"></span> ·
+                <button type="button" class="mf-guest-footer-not-you">Not you?</button>
+              </span>
+            </div>
             <div class="mf-input-row">
               <input type="text" class="mf-comment-input" placeholder="Comment at current time…" maxlength="2000" />
             </div>
@@ -5798,6 +6138,66 @@
         addComment(v);
       }
     });
+
+    const guestContinue = root.querySelector('[data-action="guest-continue"]');
+    if (guestContinue) {
+      guestContinue.addEventListener("click", () => {
+        const choice = root.querySelector(".mf-guest-invite-choice");
+        const namePanel = root.querySelector(".mf-guest-invite-name-panel");
+        const nameInp = root.querySelector(".mf-guest-invite-name-input");
+        const err = root.querySelector(".mf-guest-invite-error");
+        err?.classList.add("mf-hidden");
+        choice?.classList.add("mf-hidden");
+        namePanel?.classList.remove("mf-hidden");
+        if (nameInp) {
+          nameInp.value = readNotchGuestNameFromLocalStorage();
+          requestAnimationFrame(() => {
+            try {
+              nameInp.focus();
+            } catch (_) {}
+          });
+        }
+      });
+    }
+    function openAuthGateFromGuestFlow() {
+      guestAuthRouteGate = true;
+      resetGuestInviteModalUi();
+      syncRootChromeVisibility({ guestInvite: false, unlocked: false });
+      lastTickSignature = "";
+      void tick();
+    }
+    root.querySelector('[data-action="guest-sign-up"]')?.addEventListener("click", () => {
+      openAuthGateFromGuestFlow();
+    });
+    root.querySelector('[data-action="guest-sign-up-from-name"]')?.addEventListener("click", () => {
+      openAuthGateFromGuestFlow();
+    });
+    root.querySelector('[data-action="guest-join-review"]')?.addEventListener("click", () => {
+      const nameInp = root.querySelector(".mf-guest-invite-name-input");
+      const err = root.querySelector(".mf-guest-invite-error");
+      const name = String(nameInp?.value || "").trim();
+      if (!name) {
+        err?.classList.remove("mf-hidden");
+        return;
+      }
+      err?.classList.add("mf-hidden");
+      writeNotchGuestNameToLocalStorage(name);
+      ensureGuestReactorId();
+      state.guestSession = { isGuest: true, guestName: name };
+      guestAuthRouteGate = false;
+      resetGuestInviteModalUi();
+      lastTickSignature = "";
+      void tick();
+    });
+    root.querySelector(".mf-guest-footer-not-you")?.addEventListener("click", () => {
+      clearGuestIdentityLocalStorage();
+      state.guestSession = null;
+      guestAuthRouteGate = false;
+      resetGuestInviteModalUi();
+      clearGuestSharedPoll();
+      lastTickSignature = "";
+      void tick();
+    });
   }
 
   function sanitizeFilenamePart(s) {
@@ -6493,7 +6893,7 @@
       teardownCanvas();
       activeClipStorageKey = clip.storageKey;
     }
-    if (clipChanged || isCloudActive()) {
+    if (clipChanged || isCloudActive() || isGuestSharedReviewActive()) {
       await loadClipData(clip);
       await tryImportFromUrl(clip);
     }
@@ -6505,6 +6905,12 @@
 
     await Promise.all([refreshAuthorPresentationCache(), refreshTimestampFormatCache()]);
     renderThread();
+    if (isGuestSharedReviewActive()) {
+      startGuestSharedPoll();
+    } else {
+      clearGuestSharedPoll();
+    }
+    refreshProGatedToolbar();
     const hostUserId = await getCloudLoadSaveHostUserId(clip);
     void sendExtensionMessage({
       type: "MF_CLOUD_SUBSCRIBE_CLIP_REACTIONS",
@@ -6706,6 +7112,8 @@
     hasSupportedClipOnPage = !!clip;
 
     await refreshCloudUser(false);
+    if (state.cloudUser) guestAuthRouteGate = false;
+
     let supabaseConfigured = false;
     try {
       const cfg = await sendExtensionMessage({ type: "MF_SUPABASE_CONFIG" });
@@ -6713,14 +7121,33 @@
     } catch {
       supabaseConfigured = false;
     }
+
+    await syncGuestSessionForClip(clip);
+
+    const collabHostOnClip = clip ? String((await readCollabHostUserIdForClip(clip)) || "").trim() : "";
+
     const unlocked = supabaseConfigured && !!state.cloudUser;
+    const guestUnlocked =
+      supabaseConfigured &&
+      !state.cloudUser &&
+      !!String(state.guestSession?.guestName || "").trim() &&
+      !!collabHostOnClip &&
+      !!clip;
+    const guestInvite =
+      supabaseConfigured &&
+      !state.cloudUser &&
+      !!clip &&
+      !!collabHostOnClip &&
+      !String(state.guestSession?.guestName || "").trim() &&
+      !guestAuthRouteGate;
+    const shellUnlocked = unlocked || guestUnlocked;
 
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
     let collabPart = "";
-    if (clip && unlocked) {
-      collabPart = (await readCollabHostUserIdForClip(clip)) || "";
+    if (clip && shellUnlocked) {
+      collabPart = collabHostOnClip || "";
     }
 
     const { notch_shared_review: nsr } = await chrome.storage.local.get("notch_shared_review");
@@ -6749,7 +7176,8 @@
           ? "ov1"
           : "ov0";
 
-    const sig = unlocked
+    const guestNameSig = String(state.guestSession?.guestName || "").trim();
+    const sig = shellUnlocked
       ? !clip
         ? href + "\0no_clip"
         : href +
@@ -6760,8 +7188,16 @@
           "\0" +
           (state.dashboardForced ? "dashboard" : "watch") +
           "\0" +
-          overlaySig
-      : href + "\0gate\0" + String(supabaseConfigured);
+          overlaySig +
+          "\0" +
+          guestNameSig
+      : href +
+          "\0gate\0" +
+          String(supabaseConfigured) +
+          "\0gi" +
+          String(guestInvite ? 1 : 0) +
+          "\0gag" +
+          String(guestAuthRouteGate ? 1 : 0);
 
     if (sig === lastTickSignature) return;
     lastTickSignature = sig;
@@ -6776,13 +7212,33 @@
 
     applyCompactRootLayout();
     updateGateCopy(supabaseConfigured);
-    applyAppShellLocked(!unlocked);
+
+    if (guestInvite) {
+      void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
+      clearGuestSharedPoll();
+      teardownDriveYoutubeEmbedBridge();
+      teardownCanvas();
+      activeClipStorageKey = null;
+      state.comments = [];
+      state.selectedId = null;
+      state.replyTargetId = null;
+      state.collapsedReplyRoots.clear();
+      state.drawMode = false;
+      syncRootChromeVisibility({ guestInvite: true, unlocked: false });
+      await applySidebarLayoutFromStorage();
+      root.classList.toggle("mf-collapsed", state.collapsed);
+      void updateGuestInviteSubtitle(clip);
+      return;
+    }
+
+    syncRootChromeVisibility({ guestInvite: false, unlocked: shellUnlocked });
 
     await applySidebarLayoutFromStorage();
     root.classList.toggle("mf-collapsed", state.collapsed);
 
-    if (!unlocked) {
+    if (!shellUnlocked) {
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
+      clearGuestSharedPoll();
       teardownDriveYoutubeEmbedBridge();
       teardownCanvas();
       activeClipStorageKey = null;
@@ -6796,6 +7252,7 @@
 
     if (!clip) {
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
+      clearGuestSharedPoll();
       teardownDriveYoutubeEmbedBridge();
       state.dashboardForced = false;
       await initDashboard();

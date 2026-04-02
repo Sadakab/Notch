@@ -18475,6 +18475,124 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
     });
     return true;
   }
+  if (msg?.type === "MF_GUEST_CLOUD_LOAD_CLIP") {
+    const client = getSupabase();
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    const hostUserId = normalizedHostUserId(msg.hostUserId);
+    notchSwLog("MF_GUEST_CLOUD_LOAD_CLIP request", { platform, clipId, hasClient: !!client, hostUserId: !!hostUserId });
+    if (!client || !platform || !clipId || !hostUserId) {
+      sendResponse({ ok: false, record: null, error: "invalid_args" });
+      return false;
+    }
+    void (async () => {
+      try {
+        const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+        const { data, error } = await client.rpc("guest_load_shared_review", {
+          p_host_user_id: hostUserId,
+          p_platform: platform,
+          p_clip_id: clipIdDb
+        });
+        if (error) {
+          notchSwLog("MF_GUEST_CLOUD_LOAD_CLIP rpc error", {
+            code: error.code,
+            message: error.message
+          });
+          sendResponse({ ok: false, record: null, error: "rpc_error" });
+          return;
+        }
+        const payload = data && typeof data === "object" ? data : null;
+        if (!payload?.ok) {
+          sendResponse({
+            ok: false,
+            record: null,
+            error: String(payload?.error || "load_failed")
+          });
+          return;
+        }
+        const rec = payload.record;
+        if (!rec || typeof rec !== "object") {
+          sendResponse({ ok: false, record: null, error: "no_record" });
+          return;
+        }
+        const fakeRow = {
+          id: rec.id,
+          user_id: rec.user_id,
+          platform: rec.platform,
+          clip_id: rec.clip_id,
+          comments: rec.comments,
+          title: rec.title ?? null,
+          thumbnail_url: rec.thumbnail_url ?? null,
+          updated_at: rec.updated_at
+        };
+        sendResponse({ ok: true, record: rowToPayload(fakeRow) });
+      } catch (e) {
+        notchSwLog("MF_GUEST_CLOUD_LOAD_CLIP threw", String(e?.message || e));
+        sendResponse({ ok: false, record: null, error: "exception" });
+      }
+    })();
+    return true;
+  }
+  if (msg?.type === "MF_GUEST_CLOUD_SAVE_CLIP") {
+    const client = getSupabase();
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    const comments = msg.comments;
+    const hostUserId = normalizedHostUserId(msg.hostUserId);
+    notchSwLog("MF_GUEST_CLOUD_SAVE_CLIP request", {
+      platform,
+      clipId,
+      hasClient: !!client,
+      hostUserId: !!hostUserId,
+      commentCount: Array.isArray(comments) ? comments.length : "n/a"
+    });
+    if (!client || !platform || !clipId || !Array.isArray(comments) || !hostUserId) {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    void (async () => {
+      try {
+        const clipIdDb = normalizeDropboxClipIdForDb(platform, clipId);
+        let commentsPayload = comments;
+        try {
+          commentsPayload = JSON.parse(JSON.stringify(comments));
+        } catch {
+        }
+        const { data, error } = await client.rpc("guest_update_shared_review", {
+          p_host_user_id: hostUserId,
+          p_platform: platform,
+          p_clip_id: clipIdDb,
+          p_comments: commentsPayload,
+          p_title: cloudOptionalTextField(msg.title),
+          p_thumbnail_url: cloudOptionalTextField(msg.thumbnailUrl)
+        });
+        if (error) {
+          notchSwLog("MF_GUEST_CLOUD_SAVE_CLIP rpc error", {
+            code: error.code,
+            message: error.message
+          });
+          sendResponse({ ok: false, error: "rpc_error" });
+          return;
+        }
+        const payload = data && typeof data === "object" ? data : null;
+        if (!payload?.ok) {
+          sendResponse({ ok: false, error: String(payload?.error || "save_failed") });
+          return;
+        }
+        const rid = payload.review_id;
+        sendResponse({
+          ok: true,
+          reviewId: rid != null ? String(rid) : "",
+          sharedReview: true,
+          hostUserId
+        });
+      } catch (e) {
+        notchSwLog("MF_GUEST_CLOUD_SAVE_CLIP threw", String(e?.message || e));
+        sendResponse({ ok: false, error: "exception" });
+      }
+    })();
+    return true;
+  }
   if (msg?.type === "MF_CLOUD_LIST_CLIPS") {
     const client = getSupabase();
     if (!client) {
@@ -18811,6 +18929,8 @@ var require_sw_main = __commonJS({
       "MF_SUPABASE_DELETE_USER",
       "MF_CLOUD_LOAD_CLIP",
       "MF_CLOUD_SAVE_CLIP",
+      "MF_GUEST_CLOUD_LOAD_CLIP",
+      "MF_GUEST_CLOUD_SAVE_CLIP",
       "MF_CLOUD_LIST_CLIPS",
       "MF_CLOUD_UPDATE_THUMB",
       "MF_CLOUD_DELETE_CLIP",
@@ -18997,6 +19117,14 @@ var require_sw_main = __commonJS({
         return;
       }
       if (t === "MF_CLOUD_SAVE_CLIP") {
+        sendResponse({ ok: false });
+        return;
+      }
+      if (t === "MF_GUEST_CLOUD_LOAD_CLIP") {
+        sendResponse({ ok: false, record: null });
+        return;
+      }
+      if (t === "MF_GUEST_CLOUD_SAVE_CLIP") {
         sendResponse({ ok: false });
         return;
       }

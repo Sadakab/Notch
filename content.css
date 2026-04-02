@@ -2126,3 +2126,150 @@
   width: 100%;
   height: 100%;
 }
+
+/* Guest invite modal (shared review, signed out) */
+#markframe-root .mf-guest-invite-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+  box-sizing: border-box;
+}
+
+#markframe-root .mf-guest-invite-overlay.mf-hidden {
+  display: none !important;
+}
+
+#markframe-root .mf-guest-invite-dialog {
+  width: 280px;
+  max-width: 100%;
+  box-sizing: border-box;
+  background: #0f1923;
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 18px 16px 16px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+#markframe-root .mf-guest-invite-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.3;
+}
+
+#markframe-root .mf-guest-invite-subtitle {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgba(255, 255, 255, 0.45);
+  min-height: 1.35em;
+}
+
+#markframe-root .mf-guest-invite-choice,
+#markframe-root .mf-guest-invite-name-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#markframe-root .mf-guest-invite-name-panel.mf-hidden,
+#markframe-root .mf-guest-invite-choice.mf-hidden {
+  display: none !important;
+}
+
+#markframe-root .mf-guest-invite-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 34px;
+  border-radius: 7px;
+  border: 0.5px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.82);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
+#markframe-root .mf-guest-invite-name-input:focus {
+  outline: none;
+  border-color: rgba(0, 229, 255, 0.6);
+}
+
+#markframe-root .mf-guest-invite-error {
+  margin: -4px 0 0;
+  font-size: 11px;
+  color: #f08080;
+}
+
+#markframe-root .mf-guest-invite-error.mf-hidden {
+  display: none !important;
+}
+
+#markframe-root .mf-guest-invite-primary,
+#markframe-root .mf-guest-invite-join {
+  width: 100%;
+  box-sizing: border-box;
+  height: 36px;
+  border: none;
+  border-radius: 8px;
+  background: #00e5ff;
+  color: #0a1218;
+  font-family: var(--mf-font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#markframe-root .mf-guest-invite-primary:hover,
+#markframe-root .mf-guest-invite-join:hover {
+  filter: brightness(1.06);
+}
+
+#markframe-root .mf-guest-invite-link,
+#markframe-root .mf-guest-footer-not-you {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.38);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#markframe-root .mf-guest-invite-link:hover,
+#markframe-root .mf-guest-footer-not-you:hover {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+#markframe-root .mf-guest-invite-link-below {
+  align-self: center;
+  margin-top: 2px;
+}
+
+#markframe-root .mf-guest-footer-row {
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--mf-text-muted);
+  margin-bottom: 8px;
+}
+
+#markframe-root .mf-guest-footer-row.mf-hidden {
+  display: none !important;
+}
+
+#markframe-root .mf-guest-footer-name {
+  color: rgba(255, 255, 255, 0.65);
+  font-weight: 500;
+}

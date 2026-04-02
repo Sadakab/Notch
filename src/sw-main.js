@@ -23,6 +23,8 @@ const CLOUD_TYPES = new Set([
   "MF_SUPABASE_DELETE_USER",
   "MF_CLOUD_LOAD_CLIP",
   "MF_CLOUD_SAVE_CLIP",
+  "MF_GUEST_CLOUD_LOAD_CLIP",
+  "MF_GUEST_CLOUD_SAVE_CLIP",
   "MF_CLOUD_LIST_CLIPS",
   "MF_CLOUD_UPDATE_THUMB",
   "MF_CLOUD_DELETE_CLIP",
@@ -233,6 +235,14 @@ function sendCloudFallback(msg, sendResponse) {
     return;
   }
   if (t === "MF_CLOUD_SAVE_CLIP") {
+    sendResponse({ ok: false });
+    return;
+  }
+  if (t === "MF_GUEST_CLOUD_LOAD_CLIP") {
+    sendResponse({ ok: false, record: null });
+    return;
+  }
+  if (t === "MF_GUEST_CLOUD_SAVE_CLIP") {
     sendResponse({ ok: false });
     return;
   }
