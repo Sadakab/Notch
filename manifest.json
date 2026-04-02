@@ -47,7 +47,7 @@
         "*://www.dropbox.com/*",
         "*://m.dropbox.com/*"
       ],
-      "js": ["jspdf-bridge.js", "content.js"],
+      "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

@@ -788,6 +788,79 @@
 #markframe-root .mf-settings-link-danger {
   color: rgba(255, 120, 120, 0.85);
 }
+
+/* PDF export modal — same shell as settings; overlay above sidebar + settings (z-index). */
+#markframe-root .mf-pdf-export-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 25;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+}
+
+#markframe-root .mf-pdf-export-dialog {
+  max-height: min(calc(var(--mf-panel-max-vh, 100vh) - 12px), 520px);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#markframe-root .mf-pdf-export-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+#markframe-root .mf-pdf-export-fields {
+  border-bottom: none;
+  padding-top: 2px;
+}
+
+#markframe-root .mf-pdf-export-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+#markframe-root .mf-pdf-export-field-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.35);
+}
+
+#markframe-root .mf-pdf-export-optional {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.28);
+}
+
+#markframe-root .mf-pdf-export-error {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #f08080;
+}
+
+#markframe-root .mf-pdf-export-error.mf-hidden {
+  display: none !important;
+}
+
+#markframe-root .mf-pdf-export-submit {
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
 #markframe-root .mf-settings-upgrade-status {
   margin-top: 8px;
   font-size: 11px;

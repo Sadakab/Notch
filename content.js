@@ -235,6 +235,7 @@
   let resizeObs = null;
   let urlCheckTimer = null;
   let settingsEscapeHandler = null;
+  let pdfExportEscapeHandler = null;
   let settingsOutsideClickHandler = null;
   let settingsAvatarPendingDataUrl = null;
   let settingsAvatarExplicitClear = false;
@@ -2469,6 +2470,7 @@
   async function openSettingsPanel(options) {
     const persistGlobal = options?.persistGlobal === true;
     if (!root) return;
+    closePdfExportModal();
     const overlay = root.querySelector(".mf-settings-overlay");
     const inp = root.querySelector(".mf-settings-display-name");
     if (!overlay || !inp) return;
@@ -2545,6 +2547,8 @@
     settingsMenuOpenKey = "";
     settingsEscapeHandler = (e) => {
       if (e.key === "Escape") {
+        const pdfOv = root.querySelector(".mf-pdf-export-overlay");
+        if (pdfOv && !pdfOv.classList.contains("mf-hidden")) return;
         e.preventDefault();
         e.stopPropagation();
         closeSettingsPanel({ persistGlobal: true });
@@ -4334,6 +4338,42 @@
       c.parentId = threadParentId;
     } else {
       c.complete = false;
+      try {
+        const frameDataUrl = await Promise.race([
+          (async () => {
+            const dataUrl = videoElementToPngDataUrl(videoEl);
+            if (!dataUrl) return null;
+            return await new Promise((resolve) => {
+              const img = new Image();
+              img.onload = () => {
+                const canvas = document.createElement("canvas");
+                canvas.width = 640;
+                canvas.height = 360;
+                const ctx = canvas.getContext("2d");
+                if (!ctx) {
+                  resolve(null);
+                  return;
+                }
+                const scale = Math.min(640 / img.width, 360 / img.height);
+                const w = img.width * scale;
+                const h = img.height * scale;
+                const x = (640 - w) / 2;
+                const y = (360 - h) / 2;
+                ctx.fillStyle = "#0a0e14";
+                ctx.fillRect(0, 0, 640, 360);
+                ctx.drawImage(img, x, y, w, h);
+                resolve(canvas.toDataURL("image/jpeg", 0.7));
+              };
+              img.onerror = () => resolve(null);
+              img.src = dataUrl;
+            });
+          })(),
+          new Promise((resolve) => setTimeout(() => resolve(null), 500)),
+        ]);
+        if (frameDataUrl) c.frameCapture = frameDataUrl;
+      } catch (_) {
+        // frame capture is non-critical, continue without it
+      }
     }
 
     const nextComments = state.comments.concat([c]);
@@ -5053,6 +5093,59 @@
           </div>
         </div>
       </div>
+      <div class="mf-pdf-export-overlay mf-hidden" aria-hidden="true">
+        <div
+          class="mf-settings-dialog mf-pdf-export-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="mf-pdf-export-heading"
+          tabindex="-1"
+        >
+          <div class="mf-settings-header mf-pdf-export-header">
+            <h2 id="mf-pdf-export-heading" class="mf-settings-title">Export PDF</h2>
+            <button type="button" class="mf-settings-close" data-action="close-pdf-export" aria-label="Close export">
+              ×
+            </button>
+          </div>
+          <div class="mf-settings-body mf-pdf-export-body">
+            <section class="mf-settings-section mf-pdf-export-fields">
+              <label class="mf-pdf-export-field">
+                <span class="mf-pdf-export-field-label">Project</span>
+                <input
+                  type="text"
+                  class="mf-settings-display-name mf-pdf-export-project"
+                  maxlength="500"
+                  required
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="mf-pdf-export-field">
+                <span class="mf-pdf-export-field-label">Prepared by</span>
+                <input
+                  type="text"
+                  class="mf-settings-display-name mf-pdf-export-prepared-by"
+                  maxlength="500"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="mf-pdf-export-field">
+                <span class="mf-pdf-export-field-label">Prepared for <span class="mf-pdf-export-optional">(optional)</span></span>
+                <input
+                  type="text"
+                  class="mf-settings-display-name mf-pdf-export-prepared-for"
+                  maxlength="500"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </label>
+            </section>
+            <p class="mf-pdf-export-error mf-hidden" role="alert" aria-live="polite"></p>
+            <button type="button" class="mf-settings-cta-btn mf-pdf-export-submit">Generate PDF</button>
+          </div>
+        </div>
+      </div>
       <div class="mf-toast" aria-live="polite"></div>
     `;
     return wrap;
@@ -5338,6 +5431,19 @@
       settingsOverlay.addEventListener("click", (e) => {
         if (e.target === settingsOverlay) void closeSettingsPanel({ persistGlobal: true });
       });
+    }
+    const pdfExportOverlay = root.querySelector(".mf-pdf-export-overlay");
+    if (pdfExportOverlay) {
+      pdfExportOverlay.addEventListener("click", (e) => {
+        if (e.target === pdfExportOverlay) closePdfExportModal();
+      });
+    }
+    root.querySelectorAll('[data-action="close-pdf-export"]').forEach((b) => {
+      b.addEventListener("click", () => closePdfExportModal());
+    });
+    const pdfSubmit = root.querySelector(".mf-pdf-export-submit");
+    if (pdfSubmit) {
+      pdfSubmit.addEventListener("click", () => void submitPdfExportModal());
     }
     const settingsNameInp = root.querySelector(".mf-settings-display-name");
     if (settingsNameInp) {
@@ -5626,7 +5732,7 @@
     if (exportPdfBtn) {
       exportPdfBtn.addEventListener("click", () => {
         if (exportPdfBtn.disabled) return;
-        void generateCommentsPdf();
+        void openPdfExportModal();
       });
     }
 
@@ -5831,317 +5937,65 @@
     }
   }
 
-  /** For PDF: seek, wait for a decodable frame, return canvas (jsPDF addImage handles canvas reliably). */
-  async function captureVideoFrameCanvasForPdf(clip, timeSec) {
+  function getClipVideoDurationSecondsForExport(clip) {
     if (!clip) return null;
     const el = clip.getVideoElement();
     if (!el) return null;
-
-    if (el instanceof HTMLVideoElement && el.isConnected) {
-      try {
-        await seekVideoAwaitSeeked(el, timeSec, 6000);
-      } catch {
-        return null;
-      }
-      const ok = await waitVideoHasDrawableFrame(el, 2500);
-      if (!ok) return null;
-      await new Promise((r) => requestAnimationFrame(r));
-      await new Promise((r) => requestAnimationFrame(r));
-      let cap = videoFrameToCaptureCanvas(el);
-      if (cap) return cap;
-      if (clip.platform === "googledrive") {
-        const pngUrl = await captureGoogleDriveVisibleTabPngDataUrl({ quiet: true });
-        if (pngUrl) return await pngDataUrlToCaptureCanvas(pngUrl);
-      }
-      return null;
-    }
-
-    if (clip.platform === "googledrive") {
-      try {
-        el.currentTime = timeSec;
-      } catch (_) {}
-      await new Promise((r) => setTimeout(r, 900));
-      await new Promise((r) => requestAnimationFrame(r));
-      await new Promise((r) => requestAnimationFrame(r));
-      const pngUrl = await captureGoogleDriveVisibleTabPngDataUrl({ quiet: true });
-      if (!pngUrl) return null;
-      return await pngDataUrlToCaptureCanvas(pngUrl);
-    }
-
-    return null;
+    const d = el.duration;
+    if (!Number.isFinite(d) || d <= 0) return null;
+    return d;
   }
 
-  function naturalSizeFromDataUrl(dataUrl) {
-    return new Promise((resolve, reject) => {
-      const im = new Image();
-      im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
-      im.onerror = () => reject(new Error("image load"));
-      im.src = dataUrl;
+  function formatVideoDurationForPdfExport(seconds) {
+    if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";
+    const total = Math.floor(seconds);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function buildNestedCommentsForPdfExport() {
+    const list = Array.isArray(state.comments) ? state.comments : [];
+    const roots = list.filter((c) => c && !c.parentId).sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    return roots.map((root) => {
+      const copy = JSON.parse(JSON.stringify(root));
+      const reps = list
+        .filter((x) => x && x.parentId === root.id)
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        .map((r) => JSON.parse(JSON.stringify(r)));
+      copy.frameCapture = copy.frameCapture || "";
+      copy.replies = reps;
+      return copy;
     });
   }
 
-  async function pngDataUrlToCaptureCanvas(dataUrl) {
-    if (!dataUrl || typeof dataUrl !== "string") return null;
-    try {
-      const { w, h } = await naturalSizeFromDataUrl(dataUrl);
-      if (!w || !h) return null;
-      const im = await new Promise((resolve, reject) => {
-        const i = new Image();
-        i.onload = () => resolve(i);
-        i.onerror = () => reject(new Error("img"));
-        i.src = dataUrl;
-      });
-      const c = document.createElement("canvas");
-      c.width = w;
-      c.height = h;
-      const g = c.getContext("2d");
-      if (!g) return null;
-      g.drawImage(im, 0, 0, w, h);
-      return { canvas: c, w, h };
-    } catch {
-      return null;
+  function pdfExportPreparedByLine(prefs, emailFallback) {
+    const displayName = String(prefs?.displayName || "").trim() || String(emailFallback || "").trim();
+    const companyName = String(prefs?.companyName || "").trim();
+    if (companyName) return `${displayName} · ${companyName}`;
+    return displayName;
+  }
+
+  function closePdfExportModal() {
+    if (!root) return;
+    const overlay = root.querySelector(".mf-pdf-export-overlay");
+    if (overlay) {
+      overlay.classList.add("mf-hidden");
+      overlay.setAttribute("aria-hidden", "true");
+    }
+    if (pdfExportEscapeHandler) {
+      document.removeEventListener("keydown", pdfExportEscapeHandler, true);
+      pdfExportEscapeHandler = null;
+    }
+    const submitBtn = root.querySelector(".mf-pdf-export-submit");
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Generate PDF";
     }
   }
 
-  /** Match content.css —mf-bg / —mf-text / —mf-accent */
-  const NOTCH_PDF_BG = [13, 13, 15];
-  const NOTCH_PDF_ELEVATED = [20, 20, 24];
-  const NOTCH_PDF_TEXT = [224, 224, 226];
-  const NOTCH_PDF_MUTED = [128, 130, 138];
-  const NOTCH_PDF_ACCENT = [0, 229, 255];
-
-  function arrayBufferToBase64ForPdf(buffer) {
-    let binary = "";
-    const bytes = new Uint8Array(buffer);
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-    }
-    return btoa(binary);
-  }
-
-  /** Preserve aspect ratio inside maxW × maxH (fixes “squished” stills). */
-  function pdfFitImageMm(nw, nh, maxW, maxH) {
-    if (!nw || !nh || maxW <= 0 || maxH <= 0) return { w: maxW, h: maxH };
-    const scale = Math.min(maxW / nw, maxH / nh);
-    return { w: nw * scale, h: nh * scale };
-  }
-
-  function pdfFillNotchPageBackground(doc, pageW, pageH) {
-    doc.setFillColor.apply(doc, NOTCH_PDF_BG);
-    doc.rect(0, 0, pageW, pageH, "F");
-  }
-
-  /**
-   * Notch UI uses Roboto (see content.css --mf-font); load from gstatic with Helvetica fallback.
-   * Black = 900 weight for the wordmark (bolder than Bold).
-   */
-  async function registerNotchPdfRobotoFonts(doc) {
-    const regularUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxP.ttf";
-    const boldUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmEU9fChc9.ttf";
-    const blackUrl = "https://fonts.gstatic.com/s/roboto/v30/KFOlCnqEu92Fr1MmWUlfChc9.ttf";
-    const out = { ok: false, black: false };
-    try {
-      const [reg, bol] = await Promise.all([fetch(regularUrl), fetch(boldUrl)]);
-      if (!reg.ok || !bol.ok) return out;
-      const [regBuf, bolBuf] = await Promise.all([reg.arrayBuffer(), bol.arrayBuffer()]);
-      doc.addFileToVFS("Roboto-Regular.ttf", arrayBufferToBase64ForPdf(regBuf));
-      doc.addFont("Roboto-Regular.ttf", "Roboto", "normal");
-      doc.addFileToVFS("Roboto-Bold.ttf", arrayBufferToBase64ForPdf(bolBuf));
-      doc.addFont("Roboto-Bold.ttf", "Roboto", "bold");
-      out.ok = true;
-      try {
-        const bl = await fetch(blackUrl);
-        if (bl.ok) {
-          const blBuf = await bl.arrayBuffer();
-          doc.addFileToVFS("Roboto-Black.ttf", arrayBufferToBase64ForPdf(blBuf));
-          doc.addFont("Roboto-Black.ttf", "Roboto", "black");
-          out.black = true;
-        }
-      } catch (_) {}
-      return out;
-    } catch (e) {
-      return out;
-    }
-  }
-
-  /** 720p landscape pages (matches 16:9 at 1280×720). */
-  const PDF_PAGE_PX = { w: 1280, h: 720 };
-  const PDF_COVER_GAP = {
-    afterBrand: 72,
-    subAfter: 36,
-    ruleAfter: 92,
-    titleAfter: 44,
-    platAfter: 44,
-    genAfter: 36,
-  };
-  /** Tuned for 720px-tall pages under the still. */
-  const PDF_COMMENT_GAP = {
-    head: 28,
-    afterStill: 20,
-    author: 16,
-    line: 14,
-    afterBody: 12,
-  };
-
-  function pdfTitleCoverBlockHeight(doc, face, brandStyle, titleLineCount, lineHTitle) {
-    let h = 0;
-    doc.setFont(face, brandStyle);
-    doc.setFontSize(88);
-    h += doc.internal.getLineHeight() / doc.internal.scaleFactor + PDF_COVER_GAP.afterBrand;
-    doc.setFont(face, "normal");
-    doc.setFontSize(22);
-    h += doc.internal.getLineHeight() / doc.internal.scaleFactor + PDF_COVER_GAP.subAfter + PDF_COVER_GAP.ruleAfter;
-    doc.setFont(face, "bold");
-    doc.setFontSize(28);
-    h += titleLineCount * lineHTitle + PDF_COVER_GAP.titleAfter;
-    doc.setFont(face, "normal");
-    doc.setFontSize(20);
-    const lhMeta = doc.internal.getLineHeight() / doc.internal.scaleFactor;
-    h += lhMeta + PDF_COVER_GAP.platAfter + lhMeta + PDF_COVER_GAP.genAfter + lhMeta;
-    return h;
-  }
-
-  function canvasRoundRectPath(ctx, x, y, w, h, r) {
-    const rr = Math.min(Math.max(0, r), w / 2, h / 2);
-    ctx.beginPath();
-    ctx.moveTo(x + rr, y);
-    ctx.lineTo(x + w - rr, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-    ctx.lineTo(x + w, y + h - rr);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-    ctx.lineTo(x + rr, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-    ctx.lineTo(x, y + rr);
-    ctx.quadraticCurveTo(x, y, x + rr, y);
-    ctx.closePath();
-  }
-
-  /**
-   * Draw source into destW×destH with rounded corners (radiusFrac of min side). Renders at higher
-   * internal res for smooth edges; embed as PNG so corners show in all PDF viewers (PDF clip is flaky).
-   */
-  function rasterToRoundedPngDataUrl(sourceCanvas, destW, destH, radiusFrac) {
-    if (!sourceCanvas || !destW || !destH) return null;
-    const r = Math.max(1, Math.min(destW, destH) * radiusFrac);
-    const dpr = Math.min(2, Math.max(1, Math.floor(1400 / Math.max(destW, destH, 1))));
-    const cw = Math.max(1, Math.round(destW * dpr));
-    const ch = Math.max(1, Math.round(destH * dpr));
-    const c = document.createElement("canvas");
-    c.width = cw;
-    c.height = ch;
-    const g = c.getContext("2d");
-    if (!g) return null;
-    g.clearRect(0, 0, cw, ch);
-    g.save();
-    try {
-      g.scale(dpr, dpr);
-      if (typeof g.roundRect === "function") {
-        g.beginPath();
-        g.roundRect(0, 0, destW, destH, r, r);
-        g.clip();
-      } else {
-        canvasRoundRectPath(g, 0, 0, destW, destH, r);
-        g.clip();
-      }
-      g.drawImage(sourceCanvas, 0, 0, destW, destH);
-      return c.toDataURL("image/png");
-    } catch (e) {
-      return null;
-    } finally {
-      g.restore();
-    }
-  }
-
-  async function dataUrlToRoundedPngDataUrl(dataUrl, destW, destH, radiusFrac) {
-    const im = await new Promise((resolve, reject) => {
-      const i = new Image();
-      i.onload = () => resolve(i);
-      i.onerror = () => reject(new Error("img"));
-      i.src = dataUrl;
-    });
-    const r = Math.max(1, Math.min(destW, destH) * radiusFrac);
-    const dpr = Math.min(2, Math.max(1, Math.floor(1200 / Math.max(destW, destH, 1))));
-    const cw = Math.max(1, Math.round(destW * dpr));
-    const ch = Math.max(1, Math.round(destH * dpr));
-    const c = document.createElement("canvas");
-    c.width = cw;
-    c.height = ch;
-    const g = c.getContext("2d");
-    if (!g) return null;
-    g.clearRect(0, 0, cw, ch);
-    g.save();
-    try {
-      g.scale(dpr, dpr);
-      if (typeof g.roundRect === "function") {
-        g.beginPath();
-        g.roundRect(0, 0, destW, destH, r, r);
-        g.clip();
-      } else {
-        canvasRoundRectPath(g, 0, 0, destW, destH, r);
-        g.clip();
-      }
-      g.drawImage(im, 0, 0, destW, destH);
-      return c.toDataURL("image/png");
-    } finally {
-      g.restore();
-    }
-  }
-
-  /** Flat rounded “frame missing” bitmap for reliable corners in viewers. */
-  function placeholderRoundedPngDataUrl(w, h, r, label) {
-    const dpr = Math.min(2, Math.max(1, Math.floor(900 / Math.max(w, h, 1))));
-    const cw = Math.max(1, Math.round(w * dpr));
-    const ch = Math.max(1, Math.round(h * dpr));
-    const c = document.createElement("canvas");
-    c.width = cw;
-    c.height = ch;
-    const g = c.getContext("2d");
-    if (!g) return null;
-    g.clearRect(0, 0, cw, ch);
-    g.save();
-    g.scale(dpr, dpr);
-    g.fillStyle = "rgb(30,31,36)";
-    if (typeof g.roundRect === "function") {
-      g.beginPath();
-      g.roundRect(0, 0, w, h, r, r);
-      g.fill();
-      g.strokeStyle = "rgb(55,58,65)";
-      g.lineWidth = 1;
-      g.beginPath();
-      g.roundRect(0, 0, w, h, r, r);
-      g.stroke();
-    } else {
-      canvasRoundRectPath(g, 0, 0, w, h, r);
-      g.fill();
-      g.lineWidth = 1;
-      g.strokeStyle = "rgb(55,58,65)";
-      canvasRoundRectPath(g, 0, 0, w, h, r);
-      g.stroke();
-    }
-    g.fillStyle = "rgb(128,130,138)";
-    g.font = `${Math.max(12, Math.min(22, h * 0.06))}px sans-serif`;
-    g.textAlign = "center";
-    g.textBaseline = "middle";
-    g.fillText(label, w / 2, h / 2);
-    g.restore();
-    return c.toDataURL("image/png");
-  }
-
-  function formatPdfPlatformLabel(platform) {
-    const map = {
-      youtube: "YouTube",
-      vimeo: "Vimeo",
-      loom: "Loom",
-      googledrive: "Google Drive",
-      dropbox: "Dropbox",
-    };
-    if (map[platform]) return map[platform];
-    if (!platform) return "Video";
-    return String(platform).replace(/^[a-z]/, (c) => c.toUpperCase());
-  }
-
-  async function generateCommentsPdf() {
+  async function openPdfExportModal() {
+    if (!root) return;
     if (!isProUser()) {
       showToast("Upgrade to Pro to export PDF reports.");
       return;
@@ -6155,297 +6009,156 @@
       showToast("No comments to export.");
       return;
     }
-    const JsPDF = globalThis.NotchJsPDF;
-    if (typeof JsPDF !== "function") {
-      showToast("PDF export unavailable — reload the page.");
-      return;
+    const overlay = root.querySelector(".mf-pdf-export-overlay");
+    if (!overlay) return;
+    await refreshCloudUser(false);
+    const prefs = await loadCachedPreferences();
+    const email = state.cloudUser?.email?.trim() || "";
+    const rawRecord = await getClipRecordForDisplay(clip);
+    const videoTitle = clipDisplayTitleFromRecord(rawRecord, clip);
+    const projectInp = root.querySelector(".mf-pdf-export-project");
+    const preparedByInp = root.querySelector(".mf-pdf-export-prepared-by");
+    const preparedForInp = root.querySelector(".mf-pdf-export-prepared-for");
+    const errEl = root.querySelector(".mf-pdf-export-error");
+    const submitBtn = root.querySelector(".mf-pdf-export-submit");
+    if (!projectInp || !preparedByInp || !preparedForInp || !submitBtn) return;
+    projectInp.value = videoTitle;
+    preparedByInp.value = pdfExportPreparedByLine(prefs, email);
+    preparedForInp.value = "";
+    if (errEl) {
+      errEl.textContent = "";
+      errEl.classList.add("mf-hidden");
     }
-    const media = clip.getVideoElement();
-    if (!media) {
-      showToast("No video found.");
-      return;
-    }
-    const raw = media instanceof HTMLVideoElement ? media : null;
-    const driveEmbedOnly = clip.platform === "googledrive" && raw === null;
-    if (!raw && !driveEmbedOnly) {
-      showToast("Open a video page to include frames.");
-      return;
-    }
-    if (raw && !raw.isConnected) {
-      showToast("No video found.");
-      return;
-    }
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Generate PDF";
+    overlay.classList.remove("mf-hidden");
+    overlay.setAttribute("aria-hidden", "false");
+    pdfExportEscapeHandler = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closePdfExportModal();
+      }
+    };
+    document.addEventListener("keydown", pdfExportEscapeHandler, true);
+    requestAnimationFrame(() => projectInp.focus());
+  }
 
-    const exportBtn = root && root.querySelector('[data-action="export-pdf"]');
-    if (exportBtn) exportBtn.disabled = true;
-
-    showToast("Generating PDF…");
-    const roots = state.comments.filter((c) => !c.parentId).sort((a, b) => a.ts - b.ts);
-    const prevTime = Number.isFinite(media.currentTime) ? media.currentTime : 0;
-    const wasPaused = raw ? raw.paused : false;
-    if (raw) {
-      raw.pause();
-    } else {
-      try {
-        media.pause();
-      } catch (_) {}
+  async function submitPdfExportModal() {
+    if (!root) return;
+    const overlay = root.querySelector(".mf-pdf-export-overlay");
+    if (!overlay || overlay.classList.contains("mf-hidden")) return;
+    if (!isProUser()) {
+      showToast("Upgrade to Pro to export PDF reports.");
+      return;
     }
-
+    const clip = resolveClipContext();
+    if (!clip) {
+      showToast("No video context.");
+      return;
+    }
+    const projectInp = root.querySelector(".mf-pdf-export-project");
+    const preparedByInp = root.querySelector(".mf-pdf-export-prepared-by");
+    const preparedForInp = root.querySelector(".mf-pdf-export-prepared-for");
+    const errEl = root.querySelector(".mf-pdf-export-error");
+    const submitBtn = root.querySelector(".mf-pdf-export-submit");
+    if (!projectInp || !preparedByInp || !preparedForInp || !submitBtn) return;
+    if (submitBtn.textContent === "Generating...") return;
+    const projectTrim = projectInp.value.trim();
+    if (!projectTrim) {
+      projectInp.focus();
+      if (errEl) {
+        errEl.textContent = "Project is required.";
+        errEl.classList.remove("mf-hidden");
+      }
+      return;
+    }
+    if (errEl) {
+      errEl.textContent = "";
+      errEl.classList.add("mf-hidden");
+    }
+    await refreshCloudUser(false);
+    const prefs = await loadCachedPreferences();
+    const currentUser = {
+      displayName: String(prefs.displayName || "").trim() || String(state.cloudUser?.email || "").trim(),
+      companyName: String(prefs.companyName || "").trim(),
+      logoDataUrl: prefs.logoDataUrl || "",
+    };
+    const nestedComments = buildNestedCommentsForPdfExport();
+    const dur = getClipVideoDurationSecondsForExport(clip);
+    const formattedDuration = formatVideoDurationForPdfExport(dur);
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Generating...";
     try {
-      const rawRecord = await getClipRecordForDisplay(clip);
-      const videoTitle = clipDisplayTitleFromRecord(rawRecord, clip);
-      const doc = new JsPDF({
-        unit: "px",
-        format: [PDF_PAGE_PX.w, PDF_PAGE_PX.h],
-        orientation: "landscape",
-      });
-      const pageW = doc.internal.pageSize.getWidth();
-      const pageH = doc.internal.pageSize.getHeight();
-      const margin = Math.round(pageW * 0.028);
-      const maxTextW = pageW - 2 * margin;
-      const cx = pageW / 2;
-
-      pdfFillNotchPageBackground(doc, pageW, pageH);
-      const pdfFonts = await registerNotchPdfRobotoFonts(doc);
-      const face = pdfFonts.ok ? "Roboto" : "helvetica";
-      const brandStyle = pdfFonts.ok && pdfFonts.black ? "black" : "bold";
-
-      let videoPageUrl = "";
-      try {
-        videoPageUrl = typeof clip.openUrl === "function" ? String(clip.openUrl() || "") : "";
-      } catch (_) {}
-      if (!videoPageUrl) videoPageUrl = location.href;
-
-      const titleStr = String(videoTitle);
-      const titleMaxW = Math.min(maxTextW, Math.round(pageW * 0.78));
-      doc.setFont(face, "bold");
-      doc.setFontSize(28);
-      const titleLineCount = doc.splitTextToSize(titleStr, titleMaxW).length;
-      const lineHTitle = doc.internal.getLineHeight() / doc.internal.scaleFactor;
-      const coverBlockH = pdfTitleCoverBlockHeight(doc, face, brandStyle, titleLineCount, lineHTitle);
-      let y = Math.max(margin, Math.round((pageH - coverBlockH) / 2));
-
-      doc.setFont(face, brandStyle);
-      doc.setFontSize(88);
-      doc.setTextColor(255, 255, 255);
-      const wNotch = doc.getTextWidth("Notch");
-      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-      const wDot = doc.getTextWidth(".");
-      const brandX = cx - (wNotch + wDot) / 2;
-      doc.setTextColor(255, 255, 255);
-      doc.text("Notch", brandX, y);
-      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-      doc.text(".", brandX + wNotch, y);
-      y += PDF_COVER_GAP.afterBrand;
-
-      doc.setFont(face, "normal");
-      doc.setFontSize(22);
-      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-      doc.text("Review report", cx, y, { align: "center" });
-      y += PDF_COVER_GAP.subAfter;
-      doc.setDrawColor.apply(doc, NOTCH_PDF_ACCENT);
-      doc.setLineWidth(4);
-      doc.line(cx - 260, y, cx + 260, y);
-      y += PDF_COVER_GAP.ruleAfter;
-
-      doc.setFont(face, "bold");
-      doc.setFontSize(28);
-      doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-      doc.textWithLink(titleStr, cx, y, {
-        url: videoPageUrl,
-        align: "center",
-        maxWidth: titleMaxW,
-      });
-      y += titleLineCount * lineHTitle + PDF_COVER_GAP.titleAfter;
-
-      doc.setFont(face, "normal");
-      doc.setFontSize(20);
-      doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
-      doc.text(formatPdfPlatformLabel(clip.platform), cx, y, { align: "center" });
-      y += PDF_COVER_GAP.platAfter;
-
-      doc.text(`Generated ${new Date().toLocaleString()}`, cx, y, { align: "center" });
-      y += PDF_COVER_GAP.genAfter;
-      doc.text(
-        `${state.comments.length} comment${state.comments.length === 1 ? "" : "s"}`,
-        cx,
-        y,
-        { align: "center" }
+      console.log(
+        "[Notch] PDF export payload:",
+        JSON.stringify({
+          project: projectInp.value,
+          commentCount: nestedComments.length,
+          comments: nestedComments.map((c) => ({
+            id: c.id,
+            text: String(c.text ?? "").substring(0, 30),
+            hasFrameCapture: !!c.frameCapture && c.frameCapture.length > 0,
+            frameCaptureLength: c.frameCapture ? c.frameCapture.length : 0,
+          })),
+        })
       );
-
-      const maxImgW = maxTextW;
-      const radiusFrac = 0.05;
-
-      for (let i = 0; i < roots.length; i++) {
-        const c = roots[i];
-        const reps = repliesSortedForRoot(c.id);
-        doc.addPage();
-        pdfFillNotchPageBackground(doc, pageW, pageH);
-        y = margin;
-
-        let stillCap = null;
-        try {
-          stillCap = await captureVideoFrameCanvasForPdf(clip, c.ts);
-        } catch (e) {}
-
-        const textBlock = (c.text || "").trim() || "(no text)";
-        const commentTextLines = doc.splitTextToSize(textBlock, maxTextW);
-        let markupDims = null;
-        if (c.drawing && typeof c.drawing === "string" && c.drawing.startsWith("data:")) {
-          try {
-            const { w: dw, h: dh } = await naturalSizeFromDataUrl(c.drawing);
-            if (dw > 0 && dh > 0) {
-              markupDims = pdfFitImageMm(dw, dh, Math.min(maxImgW, Math.round(pageW * 0.42)), 140);
-            }
-          } catch {
-            markupDims = null;
-          }
-        }
-
-        const headH = PDF_COMMENT_GAP.head;
-        const gapAfterStill = PDF_COMMENT_GAP.afterStill;
-        const authorBlock = PDF_COMMENT_GAP.author;
-        const afterH = PDF_COMMENT_GAP.afterBody;
-        const markupLabelH = markupDims ? 18 + 12 : 0;
-        const markupExtraH = markupDims ? markupDims.h + 18 : 0;
-        const textH = commentTextLines.length * PDF_COMMENT_GAP.line;
-        let replySectionH = 0;
-        if (reps.length) {
-          doc.setFont(face, "normal");
-          doc.setFontSize(12);
-          const replyW = maxTextW - 24;
-          let replyLines = 0;
-          for (const r of reps) {
-            const replyBlock = `${String(displayNameForComment(r))}: ${((r.text || "").trim() || "(no text)")}`;
-            replyLines += doc.splitTextToSize(replyBlock, replyW).length;
-          }
-          replySectionH = 16 + replyLines * PDF_COMMENT_GAP.line + reps.length * 4 + 8;
-        }
-        const reservedBelowStill =
-          gapAfterStill +
-          authorBlock +
-          textH +
-          afterH +
-          markupLabelH +
-          markupExtraH +
-          replySectionH +
-          12;
-        const maxImgH = Math.max(
-          88,
-          Math.min(
-            Math.round(pageH * 0.48),
-            pageH - margin - headH - margin - reservedBelowStill
-          )
-        );
-
-        const defaultFrame = pdfFitImageMm(1920, 1080, maxImgW, maxImgH);
-        let imgW = defaultFrame.w;
-        let imgH = defaultFrame.h;
-        if (stillCap && stillCap.w > 0 && stillCap.h > 0) {
-          const fit = pdfFitImageMm(stillCap.w, stillCap.h, maxImgW, maxImgH);
-          imgW = fit.w;
-          imgH = fit.h;
-        }
-
-        const stillR = Math.min(imgW, imgH) * radiusFrac;
-
-        doc.setFont(face, "bold");
-        doc.setFontSize(17);
-        doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
-        doc.text(`#${i + 1} · ${formatTime(c.ts)}`, margin, y);
-        y += headH;
-
-        doc.setFont(face, "normal");
-        if (stillCap && stillCap.canvas) {
-          const roundedPng = rasterToRoundedPngDataUrl(stillCap.canvas, imgW, imgH, radiusFrac);
-          if (roundedPng) {
-            try {
-              doc.addImage(roundedPng, "PNG", margin, y, imgW, imgH);
-            } catch (e) {
-              const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
-              if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
-            }
-          } else {
-            const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
-            if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
-          }
-        } else {
-          const ph = placeholderRoundedPngDataUrl(imgW, imgH, stillR, "Frame not available");
-          if (ph) doc.addImage(ph, "PNG", margin, y, imgW, imgH);
-        }
-        y += imgH + gapAfterStill;
-
-        doc.setFontSize(14);
-        doc.setTextColor.apply(doc, NOTCH_PDF_ACCENT);
-        doc.text(String(displayNameForComment(c)), margin, y);
-        y += authorBlock;
-        doc.setFont(face, "normal");
-        doc.setFontSize(13);
-        doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
-        for (const line of commentTextLines) {
-          doc.text(line, margin, y);
-          y += PDF_COMMENT_GAP.line;
-        }
-        y += afterH;
-
-        if (markupDims && c.drawing && typeof c.drawing === "string" && c.drawing.startsWith("data:")) {
-          doc.setFont(face, "bold");
-          doc.setFontSize(12);
-          doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
-          doc.text("Markup", margin, y);
-          y += 18;
-          doc.setFont(face, "normal");
-          try {
-            const mkRounded = await dataUrlToRoundedPngDataUrl(
-              c.drawing,
-              markupDims.w,
-              markupDims.h,
-              radiusFrac
-            );
-            if (mkRounded) doc.addImage(mkRounded, "PNG", margin, y, markupDims.w, markupDims.h);
-            y += markupDims.h + 6;
-          } catch (e) {
-            y += 4;
-          }
-        }
-
-        if (reps.length) {
-          y += 8;
-          doc.setFont(face, "bold");
-          doc.setFontSize(12);
-          doc.setTextColor.apply(doc, NOTCH_PDF_MUTED);
-          doc.text("Replies", margin, y);
-          y += 16;
-          doc.setFont(face, "normal");
-          doc.setFontSize(12);
-          doc.setTextColor.apply(doc, NOTCH_PDF_TEXT);
-          const replyW = maxTextW - 24;
-          for (const r of reps) {
-            const replyBlock = `${String(displayNameForComment(r))}: ${((r.text || "").trim() || "(no text)")}`;
-            for (const line of doc.splitTextToSize(replyBlock, replyW)) {
-              doc.text(line, margin + 18, y);
-              y += PDF_COMMENT_GAP.line;
-            }
-            y += 4;
-          }
-        }
-      }
-
-      const fname = `notch-report_${sanitizeFilenamePart(clip.clipId)}_${formatExportStampForFilename()}.pdf`;
-      doc.save(fname);
-      showToast("PDF downloaded.");
-    } catch (e) {
-      showToast("Could not generate PDF.");
-    } finally {
+      const res = await fetch("https://notch.video/.netlify/functions/generate-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project: projectInp.value,
+          preparedBy: preparedByInp.value,
+          preparedFor: preparedForInp.value,
+          platform: clip.platform,
+          videoDuration: formattedDuration,
+          generatedDate: new Date().toLocaleDateString("en-US", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+          }),
+          studioName: currentUser.companyName || currentUser.displayName,
+          logoDataUrl: currentUser.logoDataUrl || "",
+          comments: nestedComments,
+        }),
+      });
+      let data = null;
       try {
-        media.currentTime = prevTime;
-      } catch (_) {}
-      if (!wasPaused) {
-        try {
-          void media.play();
-        } catch (_) {}
+        data = await res.json();
+      } catch (_) {
+        data = null;
       }
-      updateExportPdfButtonState();
+      if (!res.ok || !data || typeof data.pdf !== "string" || !data.pdf) {
+        if (errEl) {
+          errEl.textContent = "Failed to generate PDF. Please try again.";
+          errEl.classList.remove("mf-hidden");
+        }
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Generate PDF";
+        return;
+      }
+      const bin = atob(data.pdf);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const safeBase = String(projectInp.value || "Review").replace(/[/\\?%*:|"<>]/g, " ").trim() || "Review";
+      a.download = `${safeBase} — Review.pdf`;
+      a.rel = "noopener";
+      document.documentElement.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      closePdfExportModal();
+    } catch (_) {
+      if (errEl) {
+        errEl.textContent = "Failed to generate PDF. Please try again.";
+        errEl.classList.remove("mf-hidden");
+      }
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Generate PDF";
     }
   }
 
