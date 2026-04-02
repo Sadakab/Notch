@@ -1872,6 +1872,14 @@
   width: 100%;
 }
 
+#markframe-root .mf-reaction-bar:has(.mf-comment-delete-confirming) {
+  padding-top: 8px;
+}
+
+#markframe-root .mf-comment.mf-reply .mf-reaction-bar:has(.mf-comment-delete-confirming) {
+  margin-top: 0;
+}
+
 #markframe-root .mf-comment:hover .mf-reaction-picker,
 #markframe-root .mf-comment:focus-within .mf-reaction-picker,
 #markframe-root .mf-reaction-picker[open] {
