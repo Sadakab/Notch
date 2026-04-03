@@ -5410,16 +5410,10 @@
     if (!root) return;
     const copyBtn = root.querySelector('[data-action="copy-link"]');
     if (!copyBtn) return;
-    const hasComments = Array.isArray(state.comments) && state.comments.length > 0;
-    const pro = isProUser();
-    if (pro) {
-      copyBtn.disabled = !hasComments;
-      copyBtn.title = hasComments ? "Copy review link" : "Needs at least 1 comment first";
-    } else {
-      copyBtn.disabled = false;
-      copyBtn.title =
-        "Pro — Copy a shareable link to this review on notch.video. Upgrade to unlock.";
-    }
+    copyBtn.disabled = false;
+    copyBtn.title = isProUser()
+      ? "Copy review link"
+      : "Pro — Copy a shareable link to this review on notch.video. Upgrade to unlock.";
   }
 
   function updateExportPdfButtonState() {
