@@ -17803,6 +17803,14 @@ function commentsFromDb(value) {
   }
   return [];
 }
+function clipReviewRowIncludedInDashboardList(row) {
+  if (!row || !CLIP_PLATFORMS.includes(row.platform)) return false;
+  const commentCount = commentsFromDb(row.comments).length;
+  if (commentCount > 0) return true;
+  const updatedMs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+  if (!Number.isFinite(updatedMs) || updatedMs <= 0) return false;
+  return Date.now() - updatedMs < POPUP_LIST_EMPTY_REVIEW_MAX_AGE_MS;
+}
 function rowToPayload(row) {
   return {
     reviewId: row.id != null ? String(row.id) : "",
@@ -18610,9 +18618,7 @@ function handleRuntimeMessage(msg, sendResponse, sender) {
           sendResponse({ ok: false, items: [] });
           return;
         }
-        const rows = (data || []).filter(
-          (r) => r && CLIP_PLATFORMS.includes(r.platform) && commentsFromDb(r.comments).length > 0
-        );
+        const rows = (data || []).filter((r) => clipReviewRowIncludedInDashboardList(r));
         sendResponse({ ok: true, items: rows.map(rowToDashboardItem) });
       });
     });
@@ -18880,7 +18886,7 @@ async function restoreAuthMarker() {
   } catch (e) {
   }
 }
-var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, PREFERENCE_DEFAULTS, REACTOR_UUID_RE, supabase, clipRealtimeByTabId;
+var AUTH_STORAGE_KEY, AUTH_STATE_KEY, AUTH_CONFIRM_URL, CLIP_PLATFORMS, PREFERENCE_DEFAULTS, REACTOR_UUID_RE, supabase, POPUP_LIST_EMPTY_REVIEW_MAX_AGE_MS, clipRealtimeByTabId;
 var init_sw_cloud = __esm({
   "src/sw-cloud.js"() {
     init_dist4();
@@ -18905,6 +18911,7 @@ var init_sw_cloud = __esm({
     };
     REACTOR_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     supabase = null;
+    POPUP_LIST_EMPTY_REVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
     clipRealtimeByTabId = /* @__PURE__ */ new Map();
   }
 });
@@ -19321,6 +19328,10 @@ var require_sw_main = __commonJS({
           configured: isSupabaseConfigured(),
           url: SUPABASE_URL || ""
         });
+        return false;
+      }
+      if (msg?.type === "NOTCH_POPUP_REVIEWS_UPDATED") {
+        sendResponse({ ok: true });
         return false;
       }
       if (!CLOUD_TYPES.has(msg?.type)) return false;

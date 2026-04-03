@@ -548,6 +548,18 @@ function commentsFromDb(value) {
   return [];
 }
 
+/** Popup list: show rows with notes, or brand-new empty reviews (updated in the last 24h). */
+const POPUP_LIST_EMPTY_REVIEW_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+function clipReviewRowIncludedInDashboardList(row) {
+  if (!row || !CLIP_PLATFORMS.includes(row.platform)) return false;
+  const commentCount = commentsFromDb(row.comments).length;
+  if (commentCount > 0) return true;
+  const updatedMs = row.updated_at ? new Date(row.updated_at).getTime() : 0;
+  if (!Number.isFinite(updatedMs) || updatedMs <= 0) return false;
+  return Date.now() - updatedMs < POPUP_LIST_EMPTY_REVIEW_MAX_AGE_MS;
+}
+
 function rowToPayload(row) {
   return {
     reviewId: row.id != null ? String(row.id) : "",
@@ -1429,12 +1441,7 @@ export function handleRuntimeMessage(msg, sendResponse, sender) {
             sendResponse({ ok: false, items: [] });
             return;
           }
-          const rows = (data || []).filter(
-            (r) =>
-              r &&
-              CLIP_PLATFORMS.includes(r.platform) &&
-              commentsFromDb(r.comments).length > 0
-          );
+          const rows = (data || []).filter((r) => clipReviewRowIncludedInDashboardList(r));
           sendResponse({ ok: true, items: rows.map(rowToDashboardItem) });
         });
     });
