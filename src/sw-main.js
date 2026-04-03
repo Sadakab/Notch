@@ -127,6 +127,16 @@ function buildWatchUrlForSharedReview(platform, clipIdRaw) {
   return "";
 }
 
+function appendNotchReviewSearchParam(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    u.searchParams.set("notch_review", "1");
+    return u.toString();
+  } catch {
+    return urlStr;
+  }
+}
+
 /** Chrome tab `url` match patterns to find an already-open video tab. */
 function tabUrlPatternsForSharedReview(platform, clipIdRaw) {
   const clipId = encodeURIComponent(String(clipIdRaw ?? ""));
@@ -164,9 +174,11 @@ async function focusTab(tab) {
 
 /**
  * Finds an injectable tab for this clip, focuses it, or creates a new tab to the watch URL.
+ * @param {{ revealSidebar?: boolean }} [opts] — popup “open video”: reveal sidebar in that tab.
  * @returns {Promise<number | null>} tab id
  */
-async function findOrOpenTabForSharedReview(platform, clipId) {
+async function findOrOpenTabForSharedReview(platform, clipId, opts) {
+  const revealSidebar = opts?.revealSidebar === true;
   const patterns = tabUrlPatternsForSharedReview(platform, clipId);
   for (const pattern of patterns) {
     try {
@@ -174,14 +186,24 @@ async function findOrOpenTabForSharedReview(platform, clipId) {
       const hit = tabs.find((t) => t.id != null && isInjectableUrl(t.url));
       if (hit) {
         await focusTab(hit);
+        if (revealSidebar && hit.id != null) {
+          try {
+            await chrome.tabs.sendMessage(hit.id, { type: "NOTCH_REVEAL_SIDEBAR" });
+          } catch {
+            /* content script may not be injected yet */
+          }
+        }
         return hit.id;
       }
     } catch {
       /* ignore malformed pattern */
     }
   }
-  const openUrl = buildWatchUrlForSharedReview(platform, clipId);
+  let openUrl = buildWatchUrlForSharedReview(platform, clipId);
   if (!openUrl || !isInjectableUrl(openUrl)) return null;
+  if (revealSidebar) {
+    openUrl = appendNotchReviewSearchParam(openUrl);
+  }
   const created = await chrome.tabs.create({ url: openUrl, active: true });
   return created?.id ?? null;
 }
@@ -362,7 +384,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     void (async () => {
       try {
-        const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId));
+        const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId), {
+          revealSidebar: true,
+        });
         sendResponse({ ok: true, tabId: tabId ?? null });
       } catch (e) {
         sendResponse({ ok: false, error: String(e?.message || e) });

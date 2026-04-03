@@ -19020,6 +19020,15 @@ var require_sw_main = __commonJS({
       }
       return "";
     }
+    function appendNotchReviewSearchParam(urlStr) {
+      try {
+        const u = new URL(urlStr);
+        u.searchParams.set("notch_review", "1");
+        return u.toString();
+      } catch {
+        return urlStr;
+      }
+    }
     function tabUrlPatternsForSharedReview(platform, clipIdRaw) {
       const clipId = encodeURIComponent(String(clipIdRaw ?? ""));
       if (platform === "youtube") {
@@ -19052,7 +19061,8 @@ var require_sw_main = __commonJS({
         await chrome.windows.update(tab.windowId, { focused: true });
       }
     }
-    async function findOrOpenTabForSharedReview(platform, clipId) {
+    async function findOrOpenTabForSharedReview(platform, clipId, opts) {
+      const revealSidebar = opts?.revealSidebar === true;
       const patterns = tabUrlPatternsForSharedReview(platform, clipId);
       for (const pattern of patterns) {
         try {
@@ -19060,13 +19070,22 @@ var require_sw_main = __commonJS({
           const hit = tabs.find((t) => t.id != null && isInjectableUrl(t.url));
           if (hit) {
             await focusTab(hit);
+            if (revealSidebar && hit.id != null) {
+              try {
+                await chrome.tabs.sendMessage(hit.id, { type: "NOTCH_REVEAL_SIDEBAR" });
+              } catch {
+              }
+            }
             return hit.id;
           }
         } catch {
         }
       }
-      const openUrl = buildWatchUrlForSharedReview(platform, clipId);
+      let openUrl = buildWatchUrlForSharedReview(platform, clipId);
       if (!openUrl || !isInjectableUrl(openUrl)) return null;
+      if (revealSidebar) {
+        openUrl = appendNotchReviewSearchParam(openUrl);
+      }
       const created = await chrome.tabs.create({ url: openUrl, active: true });
       return created?.id ?? null;
     }
@@ -19230,7 +19249,9 @@ var require_sw_main = __commonJS({
         }
         void (async () => {
           try {
-            const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId));
+            const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId), {
+              revealSidebar: true
+            });
             sendResponse({ ok: true, tabId: tabId ?? null });
           } catch (e) {
             sendResponse({ ok: false, error: String(e?.message || e) });

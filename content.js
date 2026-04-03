@@ -30,6 +30,11 @@
     isVisible: "isVisible",
     activePanelView: "activePanelView",
   };
+  /** chrome.storage.sync — default true */
+  const SYNC_KEY_AUTO_SHOW_SIDEBAR = "autoShowSidebar";
+  const SESSION_KEY_SIDEBAR_HIDDEN = "notch_sidebar_hidden";
+  const SESSION_KEY_SIDEBAR_POPUP_OPEN = "notch_sidebar_popup_open";
+  const URL_PARAM_NOTCH_REVIEW = "notch_review";
   const PREFS_STORAGE_KEY = "notch_prefs";
   const PREFERENCE_DEFAULTS = {
     displayName: "",
@@ -281,8 +286,6 @@
     if (!root) return;
     const guest = isGuestSharedReviewActive();
     root.dataset.mfGuest = guest ? "1" : "";
-    root.querySelector(".mf-back-dashboard")?.classList.toggle("mf-hidden", !!guest);
-    root.querySelector('[data-action="go-watch-panel"]')?.classList.toggle("mf-hidden", !!guest);
     root.querySelector('[data-action="copy-link"]')?.classList.toggle("mf-hidden", !!guest);
     root.querySelector('[data-action="export-pdf"]')?.classList.toggle("mf-hidden", !!guest);
     const guestFooter = root.querySelector(".mf-guest-footer-row");
@@ -341,7 +344,7 @@
     const headerSub = root.querySelector(".mf-header-sub");
     if (headerSub) headerSub.textContent = "";
     const sub = root.querySelector(".mf-watch-review-owner");
-    if (!sub || root.dataset.mfView !== "watch") return;
+    if (!sub || root.dataset.mfReviewUi !== "active") return;
     const ownerEmail = String(state.reviewOwnerEmail || "").trim();
     const myEmail = String(state.cloudUser?.email || "").trim();
     if (ownerEmail) {
@@ -410,6 +413,12 @@
   let settingsChangeEmailCooldownUntil = 0;
   let settingsChangeEmailCooldownTimer = null;
   let hasSupportedClipOnPage = false;
+  /** Updated each tick before applying sidebar visibility (sync + session + auto-show rules). */
+  let lastSidebarVisibilityContext = {
+    guestInvite: false,
+    shellUnlocked: false,
+    hasClip: false,
+  };
   let globalPanelState = { isVisible: true, activePanelView: "main" };
   let panelDragState = null;
   let pendingReactionSaves = 0;
@@ -438,7 +447,6 @@
   /** When true, shared unsigned user chose "Sign up" — show auth gate instead of guest modal until signed in. */
   let guestAuthRouteGate = false;
   /** Bumps on each dashboard paint; stale async completions skip DOM so concurrent renders cannot duplicate rows. */
-  let dashboardRenderGeneration = 0;
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
   let canvasMountParent = null;
@@ -458,7 +466,6 @@
     collapsedReplyRoots: new Set(),
     hasInk: false,
     /** True while a clip is active but user chose "All reviews" (no navigation). */
-    dashboardForced: false,
     /** When non-null, clip library reads/writes go to Supabase ({ email }). */
     cloudUser: null,
     /** Current review owner email from cloud row source-of-truth. */
@@ -471,6 +478,8 @@
     commentCompleteFilter: null,
     /** `{ isGuest, guestName }` while reviewing a shared link signed out; cleared when not on a shared clip. */
     guestSession: null,
+    /** Signed-in owner: Supabase has no clip_reviews row for this clip yet (not collab-waiting). */
+    noOwnerReviewRow: false,
   };
 
   let cloudAuthCacheValidUntil = 0;
@@ -718,6 +727,45 @@
     }
   }
 
+  async function loadAutoShowSidebarSetting() {
+    try {
+      const got = await chrome.storage.sync.get({ [SYNC_KEY_AUTO_SHOW_SIDEBAR]: true });
+      return got[SYNC_KEY_AUTO_SHOW_SIDEBAR] !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  function hasNotchReviewUrlParam() {
+    try {
+      return new URL(location.href).searchParams.has(URL_PARAM_NOTCH_REVIEW);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Per-tab visibility: respects sessionStorage hidden, autoShowSidebar sync pref, and popup-open flag.
+   * @param {boolean} baseVisible — typically globalPanelState.isVisible
+   */
+  async function resolveEffectiveSidebarVisible(baseVisible, opts) {
+    const hasClip = opts?.hasClip === true;
+    const guestInvite = opts?.guestInvite === true;
+    const shellUnlocked = opts?.shellUnlocked === true;
+    if (guestInvite) {
+      return !!baseVisible && hasClip;
+    }
+    if (!shellUnlocked || !hasClip) return false;
+    if (sessionStorage.getItem(SESSION_KEY_SIDEBAR_HIDDEN) === "true" && !hasNotchReviewUrlParam()) {
+      return false;
+    }
+    const autoShow = await loadAutoShowSidebarSetting();
+    const popupOpen = sessionStorage.getItem(SESSION_KEY_SIDEBAR_POPUP_OPEN) === "1";
+    const urlForce = hasNotchReviewUrlParam();
+    if (!autoShow && !popupOpen && !urlForce) return false;
+    return !!baseVisible;
+  }
+
   function isCloudActive() {
     return !!state.cloudUser;
   }
@@ -727,11 +775,7 @@
     const syncEl = root.querySelector(".mf-header-sync-msg");
     const signOutRow = root.querySelector(".mf-settings-sign-out-row");
     if (syncEl) {
-      if (root.dataset.mfView === "dashboard" && state.cloudUser?.email) {
-        syncEl.textContent = state.cloudUser.email;
-      } else {
-        syncEl.textContent = "";
-      }
+      syncEl.textContent = "";
     }
     if (state.cloudUser?.email) {
       signOutRow?.classList.remove("mf-hidden");
@@ -2349,14 +2393,6 @@
     return "Video";
   }
 
-  /** Display name from a stored clip record (dashboard, library rows — no live page scrape). */
-  function clipDisplayTitleFromStorage(v, platform) {
-    if (v?.title != null && String(v.title).trim()) {
-      return String(v.title).trim();
-    }
-    return defaultClipDisplayTitle({ platform });
-  }
-
   function clipDisplayTitleFromRecord(raw, clip) {
     if (!clip) return "Video";
     let title = "";
@@ -2392,18 +2428,39 @@
     return raw ?? null;
   }
 
+  async function watchTitleResolvedParts(clip) {
+    const raw = await getClipRecordForDisplay(clip);
+    let liveTitle = "";
+    if (clipsMatch(resolveClipContext(), clip)) {
+      const meta = clip.scrapeMetadata(clip.clipId);
+      if (meta.title && String(meta.title).trim()) liveTitle = String(meta.title).trim();
+    }
+    const storedTitle = raw?.title && String(raw.title).trim() ? String(raw.title).trim() : "";
+    const resolved = !!(liveTitle || storedTitle);
+    const text = liveTitle || storedTitle || defaultClipDisplayTitle(clip);
+    return { text, resolved };
+  }
+
   async function refreshWatchVideoTitle(clip) {
     if (!root || !clip) return;
-    const el = root.querySelector(".mf-watch-video-title");
-    if (!el) return;
+    const { text: title, resolved } = await watchTitleResolvedParts(clip);
 
-    const raw = await getClipRecordForDisplay(clip);
-    const title = clipDisplayTitleFromRecord(raw, clip);
-
-    if (el.textContent !== title) {
-      el.textContent = title;
+    const headerTitle = root.querySelector(".mf-watch-header-title");
+    if (headerTitle) {
+      headerTitle.textContent = title;
+      headerTitle.setAttribute("title", title);
     }
-    el.setAttribute("title", title);
+
+    const startTitle = root.querySelector(".mf-start-review-title");
+    const startSkel = root.querySelector(".mf-title-skeleton");
+    if (startTitle) {
+      startTitle.textContent = title;
+      startTitle.setAttribute("title", title);
+      startTitle.classList.toggle("mf-hidden", !resolved);
+    }
+    if (startSkel) {
+      startSkel.classList.toggle("mf-hidden", resolved);
+    }
   }
 
   function formatTime(sec) {
@@ -2691,7 +2748,7 @@
       if (autoPauseCb) autoPauseCb.checked = !!fresh.autoPause;
       const floatCb = root.querySelector(".mf-settings-float-panel");
       if (floatCb) floatCb.checked = !!fresh.floatPanel;
-      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+      if (root && root.dataset.mfReviewUi === "active" && root.dataset.mfLocked !== "1") renderThread();
     });
     cachedTimestampFormat = s.timestampFormat === "long" ? "00:00:39" : "0:39";
     const posLabel = panelCornerToLabel(normalizePanelPosition(s.panelPosition));
@@ -2817,7 +2874,7 @@
     await refreshAuthorPresentationCache();
     await relabelOwnCommentsInActiveClip(previousDisplayName);
     invalidateReactionPublicNamesCache();
-    if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+    if (root && root.dataset.mfReviewUi === "active" && root.dataset.mfLocked !== "1") renderThread();
     scheduleReactionPublicNamesRefresh();
   }
 
@@ -2989,7 +3046,8 @@
       loadGlobalPanelState(),
     ]);
     globalPanelState = shared;
-    applySidebarVisibility(shared.isVisible);
+    const effective = await resolveEffectiveSidebarVisible(shared.isVisible, lastSidebarVisibilityContext);
+    applySidebarDomFromEffective(effective);
     if (shared.activePanelView === "settings") {
       await openSettingsPanel({ persistGlobal: false });
     } else {
@@ -3003,12 +3061,13 @@
   async function setGlobalVisibility(visible) {
     globalPanelState.isVisible = !!visible;
     await requestGlobalStatePatch({ isVisible: !!visible });
-    applySidebarVisibility(visible);
+    const effective = await resolveEffectiveSidebarVisible(!!visible, lastSidebarVisibilityContext);
+    applySidebarDomFromEffective(effective);
   }
 
   /** Refetch review from Supabase and re-render watch UI (panel shown / expanded). */
   async function refreshWatchClipFromSupabase() {
-    if (!root || root.dataset.mfView !== "watch" || root.dataset.mfLocked === "1") return;
+    if (!root || root.dataset.mfReviewUi !== "active" || root.dataset.mfLocked === "1") return;
     await refreshCloudUser(false);
     if (!(await getSupabaseConfigured()) || !isCloudActive()) return;
     const clip = resolveClipContext();
@@ -3017,11 +3076,11 @@
     await mergeClipMetadata(clip);
     await refreshWatchVideoTitle(clip);
     await updateWatchHeaderSub(clip);
+    updateWatchChromeForReviewMode(clip);
     renderThread();
   }
 
-  function applySidebarVisibility(visible) {
-    const effectiveVisible = !!visible && hasSupportedClipOnPage;
+  function applySidebarDomFromEffective(effectiveVisible) {
     const prevHidden = root ? root.classList.contains("mf-hidden") : true;
     if (root) root.classList.toggle("mf-hidden", !effectiveVisible);
     if (!FEATURE_DRAWING) {
@@ -3197,7 +3256,7 @@
       }
       reactionPublicNameByCompareKey = next;
       lastReactionPublicNamesIdsKey = key;
-      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") {
+      if (root && root.dataset.mfReviewUi === "active" && root.dataset.mfLocked !== "1") {
         renderThread();
       }
     } catch {
@@ -3345,6 +3404,7 @@
     state.reviewOwnerEmail = "";
     state.reviewOwnerUserId = "";
     state.currentReviewId = "";
+    state.noOwnerReviewRow = false;
     await refreshCloudUser(false);
     const key = clip.storageKey;
     const hostBindingRaw = await readCollabHostUserIdForClip(clip);
@@ -3428,6 +3488,7 @@
             (!state.cloudUser?.id ||
               normalizeUuidForCompare(collabHost) !== normalizeUuidForCompare(state.cloudUser.id));
           if (sharedBindingActive) {
+            state.noOwnerReviewRow = false;
             await removeLocalClipCacheKeys(clip);
             state.comments = [];
             normalizeCommentsShape();
@@ -3448,6 +3509,7 @@
           await clearCollabHostForClip(clip);
           state.comments = [];
           normalizeCommentsShape();
+          state.noOwnerReviewRow = true;
           notchLog("loadClipData cloud: no row — cleared local cache, empty comments", {
             key,
             sharedReviewTarget,
@@ -3967,211 +4029,6 @@
         resolve(null);
       }
     });
-  }
-
-  async function listVideosWithFeedback() {
-    await refreshCloudUser(false);
-    if (await getSupabaseConfigured()) {
-      const r = await sendExtensionMessage({ type: "MF_CLOUD_LIST_CLIPS" });
-      if (r?.ok && Array.isArray(r.items)) {
-        const out = r.items;
-        for (const row of out) {
-        if (row.thumbnailUrl) continue;
-        if (row.platform === "vimeo") {
-          const o = await fetchVimeoThumbFromBackground(row.clipId);
-          if (!o) continue;
-          row.thumbnailUrl = o;
-          try {
-            await sendExtensionMessage({
-              type: "MF_CLOUD_UPDATE_THUMB",
-              platform: row.platform,
-              clipId: row.clipId,
-              thumbnailUrl: o,
-            });
-          } catch {
-            /* ignore */
-          }
-        } else if (row.platform === "loom") {
-          const o = await fetchLoomThumbFromBackground(row.clipId);
-          if (!o) continue;
-          row.thumbnailUrl = o;
-          try {
-            await sendExtensionMessage({
-              type: "MF_CLOUD_UPDATE_THUMB",
-              platform: row.platform,
-              clipId: row.clipId,
-              thumbnailUrl: o,
-            });
-          } catch {
-            /* ignore */
-          }
-        } else if (row.platform === "googledrive") {
-          const cur = resolveClipContext();
-          if (cur && cur.platform === "googledrive" && cur.clipId === row.clipId) {
-            const o = await fetchGoogleDriveThumbnailDataUrl(row.clipId);
-            if (!o) continue;
-            row.thumbnailUrl = o;
-            try {
-              await sendExtensionMessage({
-                type: "MF_CLOUD_UPDATE_THUMB",
-                platform: row.platform,
-                clipId: row.clipId,
-                thumbnailUrl: o,
-              });
-            } catch {
-              /* ignore */
-            }
-          }
-        }
-        }
-        return out;
-      }
-    }
-
-    const all = await chrome.storage.local.get(null);
-    const out = [];
-    for (const [k, v] of Object.entries(all)) {
-      if (!v || !Array.isArray(v.comments) || v.comments.length === 0) continue;
-
-      let platform = null;
-      let clipId = null;
-      const parsed = parseClipStorageKey(k);
-      if (parsed) {
-        platform = parsed.platform;
-        clipId = parsed.clipId;
-      } else if (k.startsWith(STORAGE_KEYS.dataPrefix)) {
-        platform = "youtube";
-        clipId = k.slice(STORAGE_KEYS.dataPrefix.length);
-      } else {
-        continue;
-      }
-
-      if (!clipId) continue;
-      if (!CLIP_PLATFORMS.includes(platform)) continue;
-
-      let thumb = v.thumbnailUrl || null;
-      if (platform === "youtube") {
-        const thumbVid = thumb ? videoIdFromYtimgUrl(thumb) : null;
-        if (thumbVid && thumbVid !== clipId) thumb = null;
-      }
-
-      let openUrl = "";
-      if (platform === "youtube") {
-        openUrl = "https://www.youtube.com/watch?v=" + encodeURIComponent(clipId);
-      } else if (platform === "vimeo") {
-        openUrl = "https://vimeo.com/" + encodeURIComponent(clipId);
-      } else if (platform === "loom") {
-        openUrl = "https://www.loom.com/share/" + encodeURIComponent(clipId);
-      } else if (platform === "googledrive") {
-        openUrl = "https://drive.google.com/file/d/" + encodeURIComponent(clipId) + "/view";
-      } else if (platform === "dropbox") {
-        openUrl = buildDropboxOpenUrl(clipId);
-      } else {
-        openUrl = "";
-      }
-
-      out.push({
-        storageKey: k,
-        platform,
-        clipId,
-        title: clipDisplayTitleFromStorage(v, platform),
-        thumbnailUrl: thumb || defaultThumbForPlatform(platform, clipId) || "",
-        commentCount: v.comments.length,
-        updatedAt: v.updatedAt || 0,
-        openUrl,
-      });
-    }
-    out.sort((a, b) => b.updatedAt - a.updatedAt);
-    for (const row of out) {
-      if (row.thumbnailUrl) continue;
-      if (row.platform === "vimeo") {
-        const o = await fetchVimeoThumbFromBackground(row.clipId);
-        if (!o) continue;
-        row.thumbnailUrl = o;
-        const sk = row.storageKey;
-        const got = await chrome.storage.local.get(sk);
-        const rec = got[sk];
-        if (rec && !rec.thumbnailUrl) {
-          await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
-          row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
-        }
-      } else if (row.platform === "loom") {
-        const o = await fetchLoomThumbFromBackground(row.clipId);
-        if (!o) continue;
-        row.thumbnailUrl = o;
-        const sk = row.storageKey;
-        const got = await chrome.storage.local.get(sk);
-        const rec = got[sk];
-        if (rec && !rec.thumbnailUrl) {
-          await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
-          row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
-        }
-      } else if (row.platform === "googledrive") {
-        const cur = resolveClipContext();
-        if (cur && cur.platform === "googledrive" && cur.clipId === row.clipId) {
-          const o = await fetchGoogleDriveThumbnailDataUrl(row.clipId);
-          if (!o) continue;
-          row.thumbnailUrl = o;
-          const sk = row.storageKey;
-          const got = await chrome.storage.local.get(sk);
-          const rec = got[sk];
-          if (rec && !rec.thumbnailUrl) {
-            await chrome.storage.local.set({ [sk]: { ...rec, thumbnailUrl: o } });
-            row.title = clipDisplayTitleFromStorage({ ...rec, thumbnailUrl: o }, row.platform);
-          }
-        }
-      }
-    }
-    return out;
-  }
-
-  /** All storage keys that hold the same clip (YouTube has new + legacy keys; deleting one must remove both or migration restores data). */
-  function storageKeysForDashboardItem(item) {
-    if (!item || !item.storageKey) return [];
-    const keys = new Set([item.storageKey]);
-    if (item.platform === "youtube" && item.clipId) {
-      keys.add(clipStorageKey("youtube", item.clipId));
-      keys.add(legacyYoutubeKey(item.clipId));
-    }
-    return [...keys];
-  }
-
-  async function removeClipFromLibrary(item) {
-    if (!item || !item.storageKey) return;
-    await refreshCloudUser(false);
-    const keys = storageKeysForDashboardItem(item);
-    if (await getSupabaseConfigured()) {
-      try {
-        const r = await sendExtensionMessage({
-          type: "MF_CLOUD_DELETE_CLIP",
-          platform: item.platform,
-          clipId: item.clipId,
-        });
-        if (!r?.ok) throw new Error("cloud delete failed");
-      } catch (e) {
-        throw e;
-      }
-    }
-    // Write-through: drop mirrored `markframe_clip_<platform>_<clipId>` keys only after cloud delete succeeds (or when cloud is not configured).
-    await chrome.storage.local.remove(keys);
-
-    const cur = resolveClipContext();
-    const isCurrentPageClip =
-      cur && cur.platform === item.platform && cur.clipId === item.clipId;
-    const hadThisKeyLoaded =
-      activeClipStorageKey != null && keys.includes(activeClipStorageKey);
-
-    if (isCurrentPageClip || hadThisKeyLoaded) {
-      activeClipStorageKey = null;
-      state.comments = [];
-      state.selectedId = null;
-      state.replyTargetId = null;
-      state.collapsedReplyRoots.clear();
-      teardownCanvas();
-      if (root && root.dataset.mfView === "watch") {
-        renderThread();
-      }
-    }
   }
 
   async function decompressFromBase64Url(b64url) {
@@ -5262,6 +5119,7 @@
     const wrap = document.createElement("div");
     wrap.id = "markframe-root";
     wrap.dataset.mfView = "watch";
+    wrap.dataset.mfReviewUi = "active";
     wrap.innerHTML = `
       <div class="mf-gate-pane">
         <p class="mf-gate-title"></p>
@@ -5334,18 +5192,16 @@
       </div>
       <div class="mf-app-shell mf-hidden">
         <div class="mf-header">
-          <div class="mf-header-text">
-            <div class="mf-brand">Notch</div>
-            <div class="mf-header-sub"></div>
+          <div class="mf-header-text mf-header-text--start mf-hidden">
+            <div class="mf-brand">Notch<span class="mf-dot">.</span></div>
+            <p class="mf-header-sync-msg" aria-live="polite"></p>
+          </div>
+          <div class="mf-header-text mf-header-text--active">
+            <span class="mf-watch-header-title" role="status" aria-live="polite"></span>
+            <span class="mf-watch-review-owner" role="status" aria-live="polite"></span>
             <p class="mf-header-sync-msg" aria-live="polite"></p>
           </div>
           <div class="mf-header-actions">
-            <button type="button" class="mf-back-dashboard" data-action="go-dashboard" title="All reviewed videos">
-              ← All reviews
-            </button>
-            <button type="button" class="mf-back-watch" data-action="go-watch-panel" title="Notes for this video">
-              This video
-            </button>
             <button type="button" class="mf-settings-btn" data-action="open-settings" title="Settings" aria-label="Settings">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
@@ -5353,13 +5209,26 @@
               </svg>
             </button>
             <button type="button" class="mf-collapse" data-action="collapse" title="Collapse">▾</button>
+            <button type="button" class="mf-sidebar-close" data-action="close-sidebar" title="Close" aria-label="Close sidebar">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
           </div>
         </div>
         <div class="mf-watch-pane">
-          <div class="mf-watch-video-title-wrap">
-            <span class="mf-watch-video-title" role="status" aria-live="polite"></span>
-            <span class="mf-watch-review-owner" role="status" aria-live="polite"></span>
+          <div class="mf-start-review-pane mf-hidden">
+            <div class="mf-start-review-body">
+              <div class="mf-start-review-title-row">
+                <div class="mf-title-skeleton" aria-hidden="true"></div>
+                <span class="mf-start-review-title mf-hidden" role="status" aria-live="polite"></span>
+              </div>
+              <p class="mf-start-review-sub">No review yet</p>
+              <button type="button" class="mf-btn mf-btn-primary mf-start-review-btn" data-action="start-review">Start review</button>
+            </div>
           </div>
+          <div class="mf-review-active-pane">
           <div class="mf-toolbar">
             <div class="mf-toolbar-draw${FEATURE_DRAWING ? "" : " mf-hidden"}">
               <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
@@ -5445,10 +5314,7 @@
               <input type="text" class="mf-comment-input" placeholder="Comment at current time…" maxlength="2000" />
             </div>
           </div>
-        </div>
-        <div class="mf-dashboard-pane mf-hidden">
-          <div class="mf-offyoutube-banner mf-hidden" role="status"></div>
-          <div class="mf-dashboard-list"></div>
+          </div>
         </div>
       </div>
       <div class="mf-settings-overlay mf-hidden" aria-hidden="true">
@@ -5553,231 +5419,64 @@
     return wrap;
   }
 
-  function setView(mode) {
+  function updateWatchChromeForReviewMode(clip) {
     if (!root) return;
-    root.dataset.mfView = mode;
-    const cur = resolveClipContext();
-    root.dataset.mfOnWatch = mode === "dashboard" && cur ? "1" : "";
-    const watchPane = root.querySelector(".mf-watch-pane");
-    const dashPane = root.querySelector(".mf-dashboard-pane");
-    const sub = root.querySelector(".mf-header-sub");
-    if (watchPane) watchPane.classList.toggle("mf-hidden", mode !== "watch");
-    if (dashPane) dashPane.classList.toggle("mf-hidden", mode !== "dashboard");
-    if (sub) {
-      sub.textContent = "";
-    }
-    void updateSyncBar();
+    const start =
+      !!clip &&
+      state.noOwnerReviewRow &&
+      isCloudActive() &&
+      !isGuestSharedReviewActive();
+    root.dataset.mfReviewUi = start ? "start" : "active";
+    root.querySelector(".mf-header-text--start")?.classList.toggle("mf-hidden", !start);
+    root.querySelector(".mf-header-text--active")?.classList.toggle("mf-hidden", start);
+    root.querySelector(".mf-start-review-pane")?.classList.toggle("mf-hidden", !start);
+    root.querySelector(".mf-review-active-pane")?.classList.toggle("mf-hidden", start);
   }
 
-  function updateOffClipBanner() {
-    if (!root) return;
-    const ban = root.querySelector(".mf-offyoutube-banner");
-    if (!ban) return;
-    const cur = resolveClipContext();
-    const off = !cur;
-    ban.classList.toggle("mf-hidden", !off);
-    root.dataset.mfOffYoutube = off ? "1" : "";
-    if (off) {
-      ban.textContent =
-        "No supported video on this page. Open YouTube, Vimeo, Loom, a Google Drive file, or a Dropbox preview—or pick a saved review below.";
-    }
-  }
-
-  function appendDashboardRow(listEl, item, sharedWithMe) {
-    const row = document.createElement("div");
-    row.className = "mf-dash-row";
-
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "mf-dash-card";
-    card.title = item.title;
-    const thumb = document.createElement("img");
-    thumb.className = "mf-dash-thumb";
-    thumb.src = item.thumbnailUrl;
-    thumb.alt = "";
-    thumb.loading = "lazy";
-    const meta = document.createElement("span");
-    meta.className = "mf-dash-meta";
-    const badge = document.createElement("span");
-    badge.className = "mf-dash-platform";
-    badge.textContent = item.platform;
-    const t = document.createElement("span");
-    t.className = "mf-dash-title";
-    t.textContent = item.title;
-    const c = document.createElement("span");
-    c.className = "mf-dash-count";
-    c.textContent = item.commentCount + " note" + (item.commentCount === 1 ? "" : "s");
-    meta.appendChild(badge);
-    meta.appendChild(t);
-    meta.appendChild(c);
-    card.appendChild(thumb);
-    card.appendChild(meta);
-    card.addEventListener("click", async () => {
-      state.dashboardForced = false;
-      if (sharedWithMe) {
-        const ownerId = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
-        if (ownerId) {
-          await setCollabHostForRedeem(item.platform, item.clipId, ownerId);
-          await patchNotchSharedReviewStorage({
-            uid: ownerId,
-            platform: item.platform,
-            clip: item.clipId,
-            needsDbJoin: !isCloudActive(),
-            receivedAt: Date.now(),
-          });
-        }
-      }
-      const cur = resolveClipContext();
-      let sameClip = cur && cur.platform === item.platform && cur.clipId === item.clipId;
-      if (
-        !sameClip &&
-        item.platform === "dropbox" &&
-        isDropboxSite()
-      ) {
-        const dropId = parseDropboxClipId();
-        if (dropId && dropboxClipIdsEquivalent(item.clipId, dropId)) {
-          sameClip = true;
-        }
-      }
-      if (sameClip) {
-        setDrawModeUi(false);
-        void tick();
-        return;
-      }
-      if (item.openUrl) {
-        location.href = item.openUrl;
-      }
-    });
-
-    const delBtn = document.createElement("button");
-    delBtn.type = "button";
-    delBtn.className = "mf-dash-delete";
-    if (sharedWithMe) {
-      const hostId = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
-      delBtn.classList.add("mf-dash-delete--icon");
-      delBtn.setAttribute("aria-label", "Remove yourself as collaborator — host keeps all notes");
-      delBtn.title = "Remove yourself as collaborator";
-      delBtn.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mf-lucide mf-lucide-log-out" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>';
-      delBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (!hostId) return;
-        if (
-          !confirm(
-            "Remove yourself as a collaborator on this review? The host keeps every note; you will no longer see this in Shared with me."
-          )
-        ) {
-          return;
-        }
-        const ok = await removeSelfAsCollaborator(item.platform, item.clipId, hostId);
-        if (ok) {
-          lastTickSignature = "";
-          showToast("You are no longer a collaborator.");
-          await renderDashboard();
-          void tick();
-        } else {
-          showToast("Could not update — try again.");
-        }
-      });
-    } else {
-      delBtn.setAttribute("aria-label", "Delete saved notes for this video");
-      delBtn.title = "Delete from library";
-      delBtn.addEventListener("click", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (
-          !confirm(
-            "Remove all notes and drawings saved for this video? This cannot be undone."
-          )
-        ) {
-          return;
-        }
-        try {
-          await removeClipFromLibrary(item);
-          showToast("Removed from library.");
-          await renderDashboard();
-        } catch (err) {
-          showToast("Could not remove — try again.");
-        }
-      });
-      delBtn.textContent = "×";
-    }
-
-    row.appendChild(card);
-    row.appendChild(delBtn);
-    listEl.appendChild(row);
-  }
-
-  function partitionDashboardItems(items) {
-    const mine = [];
-    const shared = [];
-    const myId = state.cloudUser?.id && String(state.cloudUser.id).trim();
-    for (const item of items) {
-      const owner = item.reviewOwnerUserId;
-      if (
-        !owner ||
-        !myId ||
-        normalizeUuidForCompare(owner) === normalizeUuidForCompare(myId)
-      ) {
-        mine.push(item);
-      } else {
-        shared.push(item);
-      }
-    }
-    const byUpdated = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
-    mine.sort(byUpdated);
-    shared.sort(byUpdated);
-    return { mine, shared };
-  }
-
-  async function renderDashboard() {
-    if (!root) return;
-    const gen = ++dashboardRenderGeneration;
-    await refreshCloudUser(false);
-    await updateSyncBar();
-    updateOffClipBanner();
-    const listEl = root.querySelector(".mf-dashboard-list");
-    if (!listEl) return;
-    const items = await listVideosWithFeedback();
-    if (gen !== dashboardRenderGeneration) return;
-    listEl.innerHTML = "";
-    if (items.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "mf-dashboard-empty";
-      empty.textContent =
-        "No reviews yet. Open a YouTube, Vimeo, Loom, Google Drive, or Dropbox video and add a note.";
-      listEl.appendChild(empty);
+  async function onStartReviewClicked() {
+    const clip = resolveClipContext();
+    if (!clip || !isCloudActive()) {
+      showToast("Sign in to start a review.");
       return;
     }
-    const { mine, shared } = partitionDashboardItems(items);
-    function appendSection(title, sectionItems, sectionShared) {
-      if (sectionItems.length === 0) return;
-      const h = document.createElement("div");
-      h.className = "mf-dashboard-section-title";
-      h.textContent = title;
-      listEl.appendChild(h);
-      for (const item of sectionItems) appendDashboardRow(listEl, item, sectionShared);
+    const btn = root?.querySelector('[data-action="start-review"]');
+    if (btn) btn.disabled = true;
+    try {
+      await mergeClipMetadata(clip);
+      const ok = await saveClipData(clip);
+      if (!ok) {
+        showToast("Could not create review — try again.");
+        return;
+      }
+      state.noOwnerReviewRow = false;
+      await loadClipData(clip);
+      await mergeClipMetadata(clip);
+      await refreshWatchVideoTitle(clip);
+      await updateWatchHeaderSub(clip);
+      updateWatchChromeForReviewMode(clip);
+      renderThread();
+      refreshProGatedToolbar();
+    } finally {
+      if (btn) btn.disabled = false;
     }
-    appendSection("My reviews", mine, false);
-    appendSection("Shared with me", shared, true);
+  }
+
+  function hideSidebarForThisTab() {
+    try {
+      sessionStorage.setItem(SESSION_KEY_SIDEBAR_HIDDEN, "true");
+    } catch {
+      /* ignore */
+    }
+    applySidebarDomFromEffective(false);
   }
 
   function wireSidebar() {
-    root.querySelector('[data-action="go-dashboard"]').addEventListener("click", async () => {
-      state.dashboardForced = true;
-      setDrawModeUi(false);
-      void tick();
+    root.querySelector('[data-action="close-sidebar"]')?.addEventListener("click", () => {
+      hideSidebarForThisTab();
     });
 
-    root.querySelector('[data-action="go-watch-panel"]').addEventListener("click", async () => {
-      state.dashboardForced = false;
-      setDrawModeUi(false);
-      const clip = resolveClipContext();
-      if (clip) {
-        await clearCollabHostForClip(clip);
-      }
-      void tick();
+    root.querySelector('[data-action="start-review"]')?.addEventListener("click", () => {
+      void onStartReviewClicked();
     });
 
     root.querySelector('[data-action="collapse"]').addEventListener("click", () => {
@@ -6816,28 +6515,6 @@
 
     applyCompactRootLayout();
 
-    if (state.dashboardForced) {
-      setView("dashboard");
-      const clipChanged = activeClipStorageKey !== clip.storageKey;
-      if (clipChanged) {
-        teardownCanvas();
-        activeClipStorageKey = clip.storageKey;
-      } else {
-        teardownCanvas();
-      }
-      // Same clip_id but URL/sig changed (e.g. query params) or cloud session just became valid — refetch.
-      if (clipChanged || isCloudActive()) {
-        await loadClipData(clip);
-        await tryImportFromUrl(clip);
-      }
-      await mergeClipMetadata(clip);
-      root.classList.toggle("mf-collapsed", state.collapsed);
-      await renderDashboard();
-      return;
-    }
-
-    setView("watch");
-
     const clipChanged = activeClipStorageKey !== clip.storageKey;
     if (clipChanged) {
       teardownCanvas();
@@ -6850,6 +6527,7 @@
     await mergeClipMetadata(clip);
     await refreshWatchVideoTitle(clip);
     await updateWatchHeaderSub(clip);
+    updateWatchChromeForReviewMode(clip);
 
     root.classList.toggle("mf-collapsed", state.collapsed);
 
@@ -6916,6 +6594,12 @@
     if (now - openSharedReviewDedupAt < 800) return;
     openSharedReviewDedupAt = now;
 
+    try {
+      sessionStorage.removeItem(SESSION_KEY_SIDEBAR_HIDDEN);
+      sessionStorage.setItem(SESSION_KEY_SIDEBAR_POPUP_OPEN, "1");
+    } catch {
+      /* ignore */
+    }
     await setGlobalVisibility(true);
 
     const clip = resolveClipContext();
@@ -6963,36 +6647,26 @@
     showToast("Loaded shared review.");
   }
 
-  async function initDashboard() {
-    const mount = document.body || document.documentElement;
-    if (!mount) return;
-
-    if (root && root.parentNode !== mount) {
-      mount.appendChild(root);
-    }
-
-    setView("dashboard");
-
-    if (activeClipStorageKey) {
-      teardownCanvas();
-      activeClipStorageKey = null;
-    }
-    applyCompactRootLayout();
-
-    root.classList.toggle("mf-collapsed", state.collapsed);
-    void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
-
-    await renderDashboard();
-  }
-
   function storageOnChanged(changes, area) {
     if (area === "local") {
       if (changes[GLOBAL_STATE_KEYS.isVisible]) {
         globalPanelState.isVisible = changes[GLOBAL_STATE_KEYS.isVisible].newValue !== false;
-        applySidebarVisibility(globalPanelState.isVisible);
+        void (async () => {
+          const effective = await resolveEffectiveSidebarVisible(
+            globalPanelState.isVisible,
+            lastSidebarVisibilityContext
+          );
+          applySidebarDomFromEffective(effective);
+        })();
       } else if (changes[STORAGE_KEYS.sidebarVisible] && !changes[GLOBAL_STATE_KEYS.isVisible]) {
         globalPanelState.isVisible = changes[STORAGE_KEYS.sidebarVisible].newValue !== false;
-        applySidebarVisibility(globalPanelState.isVisible);
+        void (async () => {
+          const effective = await resolveEffectiveSidebarVisible(
+            globalPanelState.isVisible,
+            lastSidebarVisibilityContext
+          );
+          applySidebarDomFromEffective(effective);
+        })();
       }
       if (changes[GLOBAL_STATE_KEYS.activePanelView]) {
         const nextView = normalizeActivePanelView(changes[GLOBAL_STATE_KEYS.activePanelView].newValue);
@@ -7020,7 +6694,7 @@
       if (changes[PREFS_STORAGE_KEY]) {
         void refreshAuthorPresentationCache()
           .then(() => {
-            if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
+            if (root && root.dataset.mfReviewUi === "active" && root.dataset.mfLocked !== "1") renderThread();
           })
           .catch(() => {});
       }
@@ -7038,13 +6712,11 @@
           await tick();
         });
       }
-      const touched = Object.keys(changes).some(
-        (k) => k.startsWith(STORAGE_KEYS.clipPrefix) || k.startsWith(STORAGE_KEYS.dataPrefix)
-      );
-      if (touched && root && root.dataset.mfView === "dashboard" && root.dataset.mfLocked !== "1") {
-        renderDashboard();
-      }
       return;
+    }
+    if (area === "sync" && changes[SYNC_KEY_AUTO_SHOW_SIDEBAR]) {
+      lastTickSignature = "";
+      void tick();
     }
   }
 
@@ -7120,13 +6792,12 @@
 
     const overlaySig = !clip
       ? ""
-      : state.dashboardForced
-        ? "dash"
-        : typeof clip.getOverlayParent === "function" && clip.getOverlayParent()
-          ? "ov1"
-          : "ov0";
+      : typeof clip.getOverlayParent === "function" && clip.getOverlayParent()
+        ? "ov1"
+        : "ov0";
 
     const guestNameSig = String(state.guestSession?.guestName || "").trim();
+    const noOwnerRowSig = clip && shellUnlocked ? (state.noOwnerReviewRow ? "1" : "0") : "";
     const sig = shellUnlocked
       ? !clip
         ? href + "\0no_clip"
@@ -7135,12 +6806,12 @@
           clip.storageKey +
           "\0" +
           collabPart +
-          "\0" +
-          (state.dashboardForced ? "dashboard" : "watch") +
-          "\0" +
+          "\0watch\0" +
           overlaySig +
           "\0" +
-          guestNameSig
+          guestNameSig +
+          "\0nor" +
+          noOwnerRowSig
       : href +
           "\0gate\0" +
           String(supabaseConfigured) +
@@ -7164,6 +6835,7 @@
     updateGateCopy(supabaseConfigured);
 
     if (guestInvite) {
+      lastSidebarVisibilityContext = { guestInvite: true, shellUnlocked: false, hasClip: !!clip };
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       clearGuestSharedPoll();
       teardownDriveYoutubeEmbedBridge();
@@ -7181,6 +6853,11 @@
       return;
     }
 
+    lastSidebarVisibilityContext = {
+      guestInvite: false,
+      shellUnlocked: !!shellUnlocked,
+      hasClip: !!clip,
+    };
     syncRootChromeVisibility({ guestInvite: false, unlocked: shellUnlocked });
 
     await applySidebarLayoutFromStorage();
@@ -7204,8 +6881,15 @@
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       clearGuestSharedPoll();
       teardownDriveYoutubeEmbedBridge();
-      state.dashboardForced = false;
-      await initDashboard();
+      if (activeClipStorageKey) {
+        teardownCanvas();
+        activeClipStorageKey = null;
+      }
+      state.comments = [];
+      state.selectedId = null;
+      state.replyTargetId = null;
+      state.collapsedReplyRoots.clear();
+      state.drawMode = false;
       return;
     }
 
@@ -7231,9 +6915,55 @@
   }
 
   chrome.runtime.onMessage.addListener((msg, _e, sendResponse) => {
+    if (msg && msg.type === "MF_GET_SIDEBAR_STATE") {
+      sendResponse({
+        isVisible: !sessionStorage.getItem(SESSION_KEY_SIDEBAR_HIDDEN),
+      });
+      return false;
+    }
+    if (msg && msg.type === "MF_POPUP_SET_SIDEBAR_TAB_HIDDEN") {
+      const hidden = msg.hidden === true;
+      if (hidden) {
+        hideSidebarForThisTab();
+      } else {
+        try {
+          sessionStorage.removeItem(SESSION_KEY_SIDEBAR_HIDDEN);
+          sessionStorage.setItem(SESSION_KEY_SIDEBAR_POPUP_OPEN, "1");
+        } catch {
+          /* ignore */
+        }
+        void (async () => {
+          const eff = await resolveEffectiveSidebarVisible(
+            globalPanelState.isVisible,
+            lastSidebarVisibilityContext
+          );
+          applySidebarDomFromEffective(eff);
+        })();
+      }
+      sendResponse({ ok: true });
+      return false;
+    }
+    if (msg && msg.type === "NOTCH_REVEAL_SIDEBAR") {
+      try {
+        sessionStorage.removeItem(SESSION_KEY_SIDEBAR_HIDDEN);
+        sessionStorage.setItem(SESSION_KEY_SIDEBAR_POPUP_OPEN, "1");
+      } catch {
+        /* ignore */
+      }
+      void setGlobalVisibility(true).then(() => sendResponse({ ok: true }));
+      return true;
+    }
     if (msg && msg.type === "TOGGLE_SIDEBAR") {
       loadGlobalPanelState().then((s) => {
         const next = !s.isVisible;
+        if (next) {
+          try {
+            sessionStorage.removeItem(SESSION_KEY_SIDEBAR_HIDDEN);
+            sessionStorage.setItem(SESSION_KEY_SIDEBAR_POPUP_OPEN, "1");
+          } catch {
+            /* ignore */
+          }
+        }
         setGlobalVisibility(next).then(() => sendResponse({ ok: true, sidebarVisible: next }));
       });
       return true;
@@ -7244,7 +6974,13 @@
         activePanelView: normalizeActivePanelView(msg.state.activePanelView),
       };
       globalPanelState = incoming;
-      applySidebarVisibility(incoming.isVisible);
+      void (async () => {
+        const effective = await resolveEffectiveSidebarVisible(
+          incoming.isVisible,
+          lastSidebarVisibilityContext
+        );
+        applySidebarDomFromEffective(effective);
+      })();
       if (incoming.activePanelView === "settings") {
         void openSettingsPanel({ persistGlobal: false });
       } else {

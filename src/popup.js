@@ -3,6 +3,7 @@
  */
 
 const PREFS_STORAGE_KEY = "notch_prefs";
+const SYNC_KEY_AUTO_SHOW_SIDEBAR = "autoShowSidebar";
 const PREFERENCE_DEFAULTS = {
   displayName: "",
   companyName: "",
@@ -118,6 +119,23 @@ function sendMessage(type, payload = {}) {
 async function loadCachedPreferences() {
   const got = await chrome.storage.local.get(PREFS_STORAGE_KEY);
   return normalizePreferences({ ...PREFERENCE_DEFAULTS, ...(got[PREFS_STORAGE_KEY] || {}) });
+}
+
+async function loadAutoShowSidebarFromSync() {
+  try {
+    const got = await chrome.storage.sync.get({ [SYNC_KEY_AUTO_SHOW_SIDEBAR]: true });
+    return got[SYNC_KEY_AUTO_SHOW_SIDEBAR] !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function saveAutoShowSidebarToSync(on) {
+  try {
+    await chrome.storage.sync.set({ [SYNC_KEY_AUTO_SHOW_SIDEBAR]: !!on });
+  } catch {
+    /* ignore */
+  }
 }
 
 async function saveCachedPreferences(nextPrefs) {
@@ -342,6 +360,10 @@ async function loadSettingsView() {
     const prefs = await loadCachedPreferences();
     fillSettingsForm(prefs, "");
     document.getElementById("np-timestamp-format").value = prefs.timestampFormat === "long" ? "long" : "short";
+    const autoShowEl = document.getElementById("np-auto-show-sidebar");
+    if (autoShowEl instanceof HTMLInputElement) {
+      autoShowEl.checked = await loadAutoShowSidebarFromSync();
+    }
     return;
   }
   showEl(warn, false);
@@ -349,6 +371,10 @@ async function loadSettingsView() {
   const { user, prefs, pro } = await pullUserAndPreferences();
   setSignedInSectionsVisible(!!user);
   fillSettingsForm(prefs, user?.email || "");
+  const autoShowEl2 = document.getElementById("np-auto-show-sidebar");
+  if (autoShowEl2 instanceof HTMLInputElement) {
+    autoShowEl2.checked = await loadAutoShowSidebarFromSync();
+  }
   updatePlanUi(pro);
   applyProRowsLocked(pro);
   if (!pro) {
@@ -522,6 +548,12 @@ function wireSettingsHandlers() {
     if (!r?.ok) showToast(r?.error || "Could not save.");
   });
 
+  document.getElementById("np-auto-show-sidebar")?.addEventListener("change", async () => {
+    const el = document.getElementById("np-auto-show-sidebar");
+    const on = el instanceof HTMLInputElement ? el.checked : true;
+    await saveAutoShowSidebarToSync(on);
+  });
+
   const nids = ["np-notify-comment", "np-notify-reaction", "np-notify-reply"];
   const keys = ["notifyOnComment", "notifyOnReaction", "notifyOnReply"];
   nids.forEach((id, i) => {
@@ -674,6 +706,36 @@ function wireSettingsFormOnce() {
   wireSettingsHandlers();
 }
 
+function setSidebarToggleButtonState(btn, sidebarVisible) {
+  const vis = !!sidebarVisible;
+  btn.dataset.sidebarVisible = vis ? "1" : "0";
+  btn.title = vis ? "Hide sidebar" : "Show sidebar";
+  btn.setAttribute("aria-label", vis ? "Hide sidebar" : "Show sidebar");
+}
+
+let popupHomeChromeWired = false;
+function wirePopupHomeChromeOnce() {
+  if (popupHomeChromeWired) return;
+  popupHomeChromeWired = true;
+  document.getElementById("np-toggle-sidebar-btn")?.addEventListener("click", async () => {
+    const btn = document.getElementById("np-toggle-sidebar-btn");
+    if (!btn) return;
+    try {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = tabs[0];
+      if (tab?.id == null) return;
+      const currentlyVisible = btn.dataset.sidebarVisible === "1";
+      await chrome.tabs.sendMessage(tab.id, {
+        type: "MF_POPUP_SET_SIDEBAR_TAB_HIDDEN",
+        hidden: currentlyVisible,
+      });
+      setSidebarToggleButtonState(btn, !currentlyVisible);
+    } catch {
+      showToast("Could not update sidebar on this tab.");
+    }
+  });
+}
+
 // —— Home view (reviews list) —— //
 
 async function openVideoTab(platform, clipId) {
@@ -691,6 +753,169 @@ function getPopupHomeElements() {
     reviewsEl: document.getElementById("np-reviews"),
     emailEl: document.getElementById("np-email"),
   };
+}
+
+/** Dropbox shared-file preview paths (aligned with content.js `isDropboxShareViewerPath`). */
+function isDropboxShareViewerPathname(pathname) {
+  if (!pathname || typeof pathname !== "string") return false;
+  if (/^\/s\/[^/]+\/.+/i.test(pathname)) return true;
+  if (/^\/scl\/fi\/[^/]+\/.+/i.test(pathname)) return true;
+  if (/^\/scl\/fo\/[^/]+\/[^/]+\/.+/i.test(pathname)) return true;
+  return false;
+}
+
+/** URL-only: YouTube video id (watch, live, shorts, embed, youtu.be) — same rules as content.js `parseYoutubeVideoId`. */
+function parseYoutubeVideoIdFromUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return null;
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    const ytHosts = new Set([
+      "www.youtube.com",
+      "youtube.com",
+      "m.youtube.com",
+      "music.youtube.com",
+      "www.youtube-nocookie.com",
+      "youtube-nocookie.com",
+      "youtu.be",
+    ]);
+    if (!ytHosts.has(h)) return null;
+    if (h === "youtu.be") {
+      const seg = u.pathname.split("/").filter(Boolean)[0];
+      if (seg && /^[A-Za-z0-9_-]{6,}$/.test(seg)) return seg;
+      return null;
+    }
+    const fromQuery = u.searchParams.get("v");
+    if (fromQuery) return fromQuery;
+    const watchPath = u.pathname.match(/^\/watch\/([^/?#]+)/);
+    if (watchPath && watchPath[1]) return watchPath[1];
+    const livePath = u.pathname.match(/^\/live\/([^/?#]+)/);
+    if (livePath && livePath[1]) return livePath[1];
+    const shortsPath = u.pathname.match(/^\/shorts\/([^/?#]+)/);
+    if (shortsPath && shortsPath[1].length >= 6) return shortsPath[1];
+    const m = u.pathname.match(/\/embed\/([A-Za-z0-9_-]{11})(?:\/|$)/);
+    if (m) return m[1];
+    const m2 = u.pathname.match(/\/embed\/([A-Za-z0-9_-]+)(?:\/|$)/);
+    if (m2 && m2[1].length >= 6) return m2[1];
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** URL-only: Vimeo numeric id — aligned with content.js `parseVimeoClipIdFromUrl`. */
+function parseVimeoClipIdFromUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return null;
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    const isPlayer = h === "player.vimeo.com";
+    const isMain = h === "vimeo.com" || h === "www.vimeo.com";
+    if (!isPlayer && !isMain) return null;
+    const path = u.pathname;
+    const parts = path.split("/").filter(Boolean);
+    if (isPlayer) {
+      const vi = parts.indexOf("video");
+      if (vi >= 0 && parts[vi + 1] && /^\d+$/.test(parts[vi + 1])) return parts[vi + 1];
+      const mPath = path.match(/\/(?:video\/)?(\d{5,})(?:\/|$)/);
+      if (mPath) return mPath[1];
+      const num = parts.find((p) => /^\d{5,}$/.test(p));
+      return num || null;
+    }
+    if (parts.length === 1 && /^\d+$/.test(parts[0])) return parts[0];
+    const vi = parts.indexOf("video");
+    if (vi >= 0 && parts[vi + 1] && /^\d+$/.test(parts[vi + 1])) return parts[vi + 1];
+    const vdi = parts.indexOf("videos");
+    if (vdi >= 0 && parts[vdi + 1] && /^\d+$/.test(parts[vdi + 1])) return parts[vdi + 1];
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (/^\d{5,}$/.test(parts[i])) return parts[i];
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** URL-only: Loom share/embed id — aligned with content.js `parseLoomClipIdFromPathname`. */
+function parseLoomClipIdFromUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return null;
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    const onLoom =
+      h === "loom.com" || h === "www.loom.com" || (h.length > 10 && h.endsWith(".loom.com"));
+    if (!onLoom) return null;
+    if (!/\/(?:share|embed)\//i.test(u.pathname)) return null;
+    const m = u.pathname.match(/\/(?:share|embed)\/([a-f0-9]{32})(?:\/|$|\?|#|\.)/i);
+    return m ? m[1].toLowerCase() : null;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** URL-only: Google Drive/Docs file id — aligned with content.js `parseGoogleDriveFileIdFromPathAndSearch`. */
+function parseGoogleDriveFileIdFromUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return null;
+  try {
+    const u = new URL(urlStr);
+    const h = u.hostname.toLowerCase();
+    if (h !== "drive.google.com" && h !== "docs.google.com") return null;
+    const pathname = u.pathname;
+    const sp = u.searchParams;
+    const m = pathname.match(/\/file\/d\/([a-zA-Z0-9_-]+)(?:\/|$)/);
+    if (m) return m[1];
+    if (pathname === "/open") {
+      const id = sp.get("id");
+      if (id && /^[a-zA-Z0-9_-]{10,}$/.test(id)) return id;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/**
+ * True when the tab URL is a specific clip/video page Notch can attach to (URL bar only),
+ * not merely a supported host (e.g. YouTube home). Mirrors content.js URL parsing.
+ */
+function isSupportedNotchVideoUrl(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return false;
+  try {
+    const u = new URL(urlStr);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    if (parseYoutubeVideoIdFromUrl(urlStr)) return true;
+    if (parseVimeoClipIdFromUrl(urlStr)) return true;
+    if (parseLoomClipIdFromUrl(urlStr)) return true;
+    if (parseGoogleDriveFileIdFromUrl(urlStr)) return true;
+    if (
+      (h === "dropbox.com" || h === "www.dropbox.com" || h === "m.dropbox.com") &&
+      isDropboxShareViewerPathname(u.pathname)
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function refreshActiveTabSidebarToggleButton() {
+  const btn = document.getElementById("np-toggle-sidebar-btn");
+  if (!btn) return;
+  showEl(btn, false);
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    if (tab?.id == null || !tab.url || !isSupportedNotchVideoUrl(tab.url)) return;
+    const response = await chrome.tabs.sendMessage(tab.id, { type: "MF_GET_SIDEBAR_STATE" });
+    if (!response || typeof response.isVisible !== "boolean") return;
+    setSidebarToggleButtonState(btn, response.isVisible);
+    showEl(btn, true);
+  } catch {
+    showEl(btn, false);
+  }
 }
 
 function isCompletePopupCache(c) {
@@ -758,58 +983,62 @@ function clearPopupSessionCache() {
 }
 
 async function applyHomeViewRender(els, cfg, user, listRes) {
-  const { gate, empty, errBox, errText, reviewsEl, emailEl } = els;
-  showEl(els.loading, false);
-  showEl(els.skeleton, false);
+  try {
+    const { gate, empty, errBox, errText, reviewsEl, emailEl } = els;
+    showEl(els.loading, false);
+    showEl(els.skeleton, false);
 
-  if (!cfg?.configured) {
-    updateNpGateCopy(false);
-    showEl(gate, true);
-    setHeaderEmail(emailEl, "");
-    setPopupSettingsButtonVisible(false);
-    setPopupGateCompactLayout(true);
-    showEl(empty, false);
+    if (!cfg?.configured) {
+      updateNpGateCopy(false);
+      showEl(gate, true);
+      setHeaderEmail(emailEl, "");
+      setPopupSettingsButtonVisible(false);
+      setPopupGateCompactLayout(true);
+      showEl(empty, false);
+      showEl(errBox, false);
+      showEl(reviewsEl, false);
+      return;
+    }
+
+    setHeaderEmail(emailEl, user?.email || "");
+
+    if (!user?.id) {
+      updateNpGateCopy(true);
+      showEl(gate, true);
+      ensureNpGateWired();
+      setPopupSettingsButtonVisible(false);
+      setPopupGateCompactLayout(true);
+      showEl(empty, false);
+      showEl(errBox, false);
+      showEl(reviewsEl, false);
+      return;
+    }
+
+    setPopupSettingsButtonVisible(true);
+    setPopupGateCompactLayout(false);
+    showEl(gate, false);
+
+    if (!listRes?.ok || !Array.isArray(listRes.items)) {
+      showEl(empty, false);
+      showEl(reviewsEl, false);
+      showEl(errBox, true);
+      if (errText) errText.textContent = "Could not load reviews.";
+      return;
+    }
+
+    const items = listRes.items.slice();
+    const { mine, shared } = partitionDashboardItems(items, user.id);
     showEl(errBox, false);
-    showEl(reviewsEl, false);
-    return;
-  }
-
-  setHeaderEmail(emailEl, user?.email || "");
-
-  if (!user?.id) {
-    updateNpGateCopy(true);
-    showEl(gate, true);
-    ensureNpGateWired();
-    setPopupSettingsButtonVisible(false);
-    setPopupGateCompactLayout(true);
-    showEl(empty, false);
-    showEl(errBox, false);
-    showEl(reviewsEl, false);
-    return;
-  }
-
-  setPopupSettingsButtonVisible(true);
-  setPopupGateCompactLayout(false);
-  showEl(gate, false);
-
-  if (!listRes?.ok || !Array.isArray(listRes.items)) {
-    showEl(empty, false);
-    showEl(reviewsEl, false);
-    showEl(errBox, true);
-    if (errText) errText.textContent = "Could not load reviews.";
-    return;
-  }
-
-  const items = listRes.items.slice();
-  const { mine, shared } = partitionDashboardItems(items, user.id);
-  showEl(errBox, false);
-  if (mine.length === 0 && shared.length === 0) {
-    showEl(empty, true);
-    showEl(reviewsEl, false);
-  } else {
-    showEl(empty, false);
-    showEl(reviewsEl, true);
-    renderReviewSections(reviewsEl, mine, shared);
+    if (mine.length === 0 && shared.length === 0) {
+      showEl(empty, true);
+      showEl(reviewsEl, false);
+    } else {
+      showEl(empty, false);
+      showEl(reviewsEl, true);
+      renderReviewSections(reviewsEl, mine, shared);
+    }
+  } finally {
+    void refreshActiveTabSidebarToggleButton();
   }
 }
 
@@ -1168,11 +1397,13 @@ async function runHomeView() {
     showEl(els.errBox, true);
     if (els.errText) els.errText.textContent = "Something went wrong.";
     setHeaderEmail(els.emailEl, "");
+    void refreshActiveTabSidebarToggleButton();
   }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
   wireSettingsFormOnce();
+  wirePopupHomeChromeOnce();
   void runHomeView().catch(() => {
     const els = getPopupHomeElements();
     showEl(els.loading, false);
@@ -1183,5 +1414,6 @@ document.addEventListener("DOMContentLoaded", () => {
     showEl(els.errBox, true);
     if (els.errText) els.errText.textContent = "Something went wrong.";
     setHeaderEmail(els.emailEl, "");
+    void refreshActiveTabSidebarToggleButton();
   });
 });

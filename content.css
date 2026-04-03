@@ -101,21 +101,7 @@
   font-size: 11px;
 }
 
-#markframe-root[data-mf-compact="1"] .mf-back-dashboard {
-  padding: 4px 6px;
-  font-size: 9px;
-}
-
-#markframe-root[data-mf-compact="1"] .mf-back-watch {
-  padding: 0 6px;
-  font-size: 9px;
-}
-
-#markframe-root[data-mf-compact="1"] .mf-watch-video-title-wrap {
-  padding: 6px 8px 4px;
-}
-
-#markframe-root[data-mf-compact="1"] .mf-watch-video-title {
+#markframe-root[data-mf-compact="1"] .mf-watch-header-title {
   font-size: 11px;
 }
 
@@ -231,57 +217,24 @@
   flex-shrink: 0;
 }
 
-#markframe-root .mf-back-dashboard {
-  display: none;
-  align-items: center;
+#markframe-root .mf-sidebar-close {
   background: transparent;
   border: 1px solid var(--mf-border);
-  color: var(--mf-accent);
+  color: var(--mf-text-muted);
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--mf-font);
-  letter-spacing: 0.02em;
   cursor: pointer;
-  white-space: nowrap;
-}
-
-#markframe-root[data-mf-view="watch"] .mf-back-dashboard {
-  display: inline-flex;
-}
-
-#markframe-root .mf-back-watch {
-  display: none;
+  display: flex;
   align-items: center;
   justify-content: center;
-  box-sizing: border-box;
-  height: 28px;
-  padding: 0 8px;
-  background: transparent;
-  border: 1px solid var(--mf-border);
-  color: var(--mf-accent);
-  border-radius: 6px;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--mf-font);
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  white-space: nowrap;
+  padding: 0;
+  flex-shrink: 0;
 }
 
-#markframe-root[data-mf-on-watch="1"] .mf-back-watch {
-  display: inline-flex;
-}
-
-#markframe-root .mf-back-watch:hover {
-  background: var(--mf-accent-dim);
-  border-color: rgba(0, 229, 255, 0.45);
-}
-
-#markframe-root .mf-back-dashboard:hover {
-  background: var(--mf-accent-dim);
-  border-color: rgba(0, 229, 255, 0.45);
+#markframe-root .mf-sidebar-close:hover {
+  color: var(--mf-text);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 #markframe-root .mf-collapse {
@@ -353,7 +306,6 @@
 /* Focus mode: hide non-settings UI while settings are open. */
 #markframe-root.mf-settings-open .mf-header,
 #markframe-root.mf-settings-open .mf-watch-pane,
-#markframe-root.mf-settings-open .mf-dashboard-pane,
 #markframe-root.mf-settings-open .mf-toast {
   display: none !important;
 }
@@ -896,10 +848,6 @@
 }
 
 #markframe-root.mf-collapsed .mf-watch-pane,
-#markframe-root.mf-collapsed .mf-dashboard-pane {
-  display: none !important;
-}
-
 #markframe-root.mf-collapsed {
   max-height: none;
   min-height: 0;
@@ -927,14 +875,7 @@
   flex-direction: column;
 }
 
-#markframe-root .mf-watch-video-title-wrap {
-  flex-shrink: 0;
-  padding: 8px 12px 6px;
-  border-bottom: 1px solid var(--mf-border);
-  min-width: 0;
-}
-
-#markframe-root .mf-watch-video-title {
+#markframe-root .mf-header-text--active .mf-watch-header-title {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   line-clamp: 2;
@@ -953,9 +894,9 @@
   text-align: left;
 }
 
-#markframe-root .mf-watch-review-owner {
+#markframe-root .mf-header-text--active .mf-watch-review-owner {
   display: block;
-  margin-top: 4px;
+  margin-top: 2px;
   font-size: 11px;
   line-height: 1.35;
   font-weight: 400;
@@ -963,188 +904,86 @@
   text-transform: none;
 }
 
-#markframe-root .mf-watch-review-owner:empty {
+#markframe-root .mf-header-text--active .mf-watch-review-owner:empty {
   display: none;
 }
 
-#markframe-root .mf-dashboard-pane {
+#markframe-root .mf-dot {
+  opacity: 0.95;
+}
+
+#markframe-root .mf-review-active-pane {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  padding: 8px;
-  gap: 8px;
+}
+
+#markframe-root .mf-start-review-pane {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 12px;
   box-sizing: border-box;
 }
 
-#markframe-root .mf-offyoutube-banner {
-  flex-shrink: 0;
+#markframe-root .mf-start-review-body {
+  width: 100%;
+  max-width: 260px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  text-align: center;
+}
+
+#markframe-root .mf-start-review-title-row {
+  position: relative;
+  min-height: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+#markframe-root .mf-title-skeleton {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  height: 14px;
+  width: 60%;
+  animation: mf-title-skel-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mf-title-skel-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+#markframe-root .mf-start-review-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--mf-text);
+  word-break: break-word;
+}
+
+#markframe-root .mf-start-review-sub {
   margin: 0;
-  padding: 8px 10px;
   font-size: 11px;
   line-height: 1.4;
-  color: var(--mf-warn);
-  background: rgba(255, 193, 77, 0.08);
-  border: 1px solid rgba(255, 193, 77, 0.22);
-  border-radius: 8px;
-}
-
-#markframe-root .mf-dashboard-section-title {
-  flex-shrink: 0;
-  margin: 0;
-  padding: 4px 2px 2px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--mf-text-muted);
-  line-height: 1.35;
 }
 
-#markframe-root .mf-dashboard-section-title:not(:first-child) {
-  margin-top: 10px;
-}
-
-#markframe-root .mf-dashboard-list {
-  flex: 1;
-  min-height: 80px;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-#markframe-root .mf-dashboard-list::-webkit-scrollbar {
-  width: 6px;
-}
-
-#markframe-root .mf-dashboard-list::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 3px;
-}
-
-#markframe-root .mf-dashboard-empty {
-  color: var(--mf-text-muted);
-  text-align: center;
-  padding: 8px 4px;
-  font-size: 11px;
-  line-height: 1.45;
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 0;
-}
-
-#markframe-root .mf-dash-row {
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  gap: 6px;
+#markframe-root .mf-start-review-btn {
   width: 100%;
-  margin: 0;
-}
-
-#markframe-root .mf-dash-card {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid var(--mf-border);
-  border-radius: 8px;
-  background: var(--mf-bg-elevated);
-  cursor: pointer;
-  text-align: left;
-  font-family: var(--mf-font);
-  color: var(--mf-text);
-}
-
-#markframe-root .mf-dash-card:hover {
-  border-color: rgba(0, 229, 255, 0.35);
-  background: rgba(0, 229, 255, 0.06);
-}
-
-#markframe-root .mf-dash-delete {
-  flex-shrink: 0;
-  width: 32px;
-  min-height: 100%;
-  align-self: stretch;
-  margin: 0;
-  padding: 0 4px;
-  border: 1px solid var(--mf-border);
-  border-radius: 8px;
-  background: var(--mf-bg-elevated);
-  color: var(--mf-text-muted);
-  font-size: 18px;
-  line-height: 1;
-  font-weight: 300;
-  cursor: pointer;
-  font-family: var(--mf-font);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-#markframe-root .mf-dash-delete.mf-dash-delete--icon {
-  font-size: 0;
-}
-
-#markframe-root .mf-dash-delete.mf-dash-delete--icon svg {
-  flex-shrink: 0;
-}
-
-#markframe-root .mf-dash-delete:hover {
-  border-color: var(--mf-danger);
-  color: var(--mf-danger);
-  background: rgba(255, 107, 107, 0.08);
-}
-
-#markframe-root .mf-dash-thumb {
-  width: 72px;
-  height: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-  flex-shrink: 0;
-  background: var(--mf-bg);
-}
-
-#markframe-root .mf-dash-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-#markframe-root .mf-dash-platform {
-  align-self: flex-start;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--mf-accent);
-  opacity: 0.85;
-}
-
-#markframe-root .mf-dash-title {
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.3;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-#markframe-root .mf-dash-count {
-  font-size: 10px;
-  color: var(--mf-text-muted);
-  font-variant-numeric: tabular-nums;
 }
 
 #markframe-root .mf-toolbar {

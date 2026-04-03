@@ -85,6 +85,13 @@ body.np-popup-gate-only .np-main {
   gap: 10px;
 }
 
+.np-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
 .np-header .np-wordmark {
   flex: 1;
   min-width: 0;
