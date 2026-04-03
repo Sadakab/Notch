@@ -975,13 +975,6 @@
   word-break: break-word;
 }
 
-#markframe-root .mf-start-review-sub {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--mf-text-muted);
-}
-
 #markframe-root .mf-start-review-btn {
   width: 100%;
 }

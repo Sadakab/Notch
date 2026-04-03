@@ -246,6 +246,26 @@
       </div>
     </div>
 
+    <div id="np-confirm" class="np-confirm np-hidden" hidden>
+      <div id="np-confirm-backdrop" class="np-confirm-backdrop" aria-hidden="true"></div>
+      <div
+        id="np-confirm-panel"
+        class="np-confirm-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="np-confirm-title"
+      >
+        <h2 id="np-confirm-title" class="np-confirm-title"></h2>
+        <p id="np-confirm-msg" class="np-confirm-msg"></p>
+        <div class="np-confirm-actions">
+          <button type="button" class="np-btn np-btn-ghost np-confirm-cancel" id="np-confirm-cancel">
+            Cancel
+          </button>
+          <button type="button" class="np-btn np-btn-primary np-confirm-ok" id="np-confirm-ok">OK</button>
+        </div>
+      </div>
+    </div>
+
     <div id="np-toast" class="np-toast np-hidden" hidden role="status" aria-live="polite"></div>
     <script src="popup.js"></script>
   </body>

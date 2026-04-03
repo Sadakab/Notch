@@ -36,6 +36,10 @@
   const SESSION_KEY_SIDEBAR_POPUP_OPEN = "notch_sidebar_popup_open";
   const URL_PARAM_NOTCH_REVIEW = "notch_review";
   const PREFS_STORAGE_KEY = "notch_prefs";
+  /** Toolbar popup home cache (same keys as src/popup.js). */
+  const POPUP_CACHE_KEY_CONFIG = "notch_supabase_config";
+  const POPUP_CACHE_KEY_USER = "notch_popup_user";
+  const POPUP_CACHE_KEY_REVIEWS = "notch_popup_reviews";
   const PREFERENCE_DEFAULTS = {
     displayName: "",
     companyName: "",
@@ -72,7 +76,7 @@
   async function readCollabHostUserIdForClip(clip) {
     if (!clip) return null;
     const keys = collabHostKeysToTry(clip.platform, clip.clipId);
-    const o = await chrome.storage.local.get(keys);
+    const o = await safeStorageLocalGet(keys);
     for (const k of keys) {
       const id = o[k];
       if (id == null || id === "") continue;
@@ -92,13 +96,13 @@
   async function setCollabHostForRedeem(platform, clipId, hostUserId) {
     const hid = String(hostUserId || "").trim();
     if (!hid) return;
-    await chrome.storage.local.set({ [collabHostStorageKey(platform, clipId)]: hid });
+    await safeStorageLocalSet({ [collabHostStorageKey(platform, clipId)]: hid });
   }
 
   async function clearCollabHostForClip(clip) {
     if (!clip) return;
     const keys = collabHostKeysToTry(clip.platform, clip.clipId);
-    await chrome.storage.local.remove(keys);
+    await safeStorageLocalRemove(keys);
   }
 
   /** Removes current user from clip_review_collaborators only; host clip_reviews data unchanged. */
@@ -121,9 +125,9 @@
   }
 
   async function clearAllCollabHostBindings() {
-    const all = await chrome.storage.local.get(null);
+    const all = await safeStorageLocalGet(null);
     const removals = Object.keys(all).filter((k) => k.startsWith("markframe_collab_host_"));
-    if (removals.length) await chrome.storage.local.remove(removals);
+    if (removals.length) await safeStorageLocalRemove(removals);
   }
 
   async function getCloudLoadSaveHostUserId(clip) {
@@ -449,6 +453,12 @@
   /** Bumps on each dashboard paint; stale async completions skip DOM so concurrent renders cannot duplicate rows. */
   /** Full storage key for the clip currently loaded in the review panel (e.g. markframe_clip_youtube_…). */
   let activeClipStorageKey = null;
+  /** State 1 (start review): poll until page meta title is readable or timeout. */
+  const STATE1_TITLE_POLL_MAX_RETRIES = 20;
+  const STATE1_TITLE_POLL_INTERVAL_MS = 500;
+  let state1TitleRetryTimer = null;
+  let state1TitleRetryCount = 0;
+  let state1TitleRetryClipStorageKey = null;
   let canvasMountParent = null;
 
   let state = {
@@ -530,7 +540,7 @@
   }
 
   async function loadCachedPreferences() {
-    const got = await chrome.storage.local.get(PREFS_STORAGE_KEY);
+    const got = await safeStorageLocalGet(PREFS_STORAGE_KEY);
     const prefs = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...(got[PREFS_STORAGE_KEY] || {}) });
     cachedPreferences = prefs;
     return prefs;
@@ -539,7 +549,7 @@
   async function saveCachedPreferences(nextPrefs) {
     const normalized = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...(nextPrefs || {}) });
     cachedPreferences = normalized;
-    await chrome.storage.local.set({ [PREFS_STORAGE_KEY]: normalized });
+    await safeStorageLocalSet({ [PREFS_STORAGE_KEY]: normalized });
     return normalized;
   }
 
@@ -600,6 +610,44 @@
         reject(e);
       }
     });
+  }
+
+  /** Avoid unhandled rejections after extension reload while content script async work is in flight. */
+  async function safeStorageLocalGet(keys) {
+    try {
+      return await chrome.storage.local.get(keys);
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return {};
+      throw e;
+    }
+  }
+
+  async function safeStorageLocalSet(items) {
+    try {
+      await chrome.storage.local.set(items);
+      return true;
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return false;
+      throw e;
+    }
+  }
+
+  async function safeStorageLocalRemove(keys) {
+    try {
+      await chrome.storage.local.remove(keys);
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return;
+      throw e;
+    }
+  }
+
+  async function safeStorageSyncGet(keys) {
+    try {
+      return await chrome.storage.sync.get(keys);
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return {};
+      throw e;
+    }
   }
 
   async function refreshCloudUser(force) {
@@ -680,7 +728,7 @@
     setUpgradeStatusMessage("");
     let storageSession = null;
     try {
-      const authBlob = await chrome.storage.local.get("sb-notch-auth");
+      const authBlob = await safeStorageLocalGet("sb-notch-auth");
       const raw = authBlob?.["sb-notch-auth"];
       if (typeof raw === "string") {
         storageSession = JSON.parse(raw);
@@ -729,7 +777,7 @@
 
   async function loadAutoShowSidebarSetting() {
     try {
-      const got = await chrome.storage.sync.get({ [SYNC_KEY_AUTO_SHOW_SIDEBAR]: true });
+      const got = await safeStorageSyncGet({ [SYNC_KEY_AUTO_SHOW_SIDEBAR]: true });
       return got[SYNC_KEY_AUTO_SHOW_SIDEBAR] !== false;
     } catch {
       return true;
@@ -913,8 +961,16 @@
     return m ? m[1] : null;
   }
 
+  function stripYoutubeWatchPageTitleSuffix(raw) {
+    let t = String(raw || "").trim();
+    t = t.replace(/\s*[-–—]\s*YouTube\s*$/i, "").trim();
+    return t;
+  }
+
   /**
-   * Only return title/thumb when page signals match `expectedVideoId` (SPA often leaves stale og tags).
+   * Watch-page metadata. Trusted path: og:url / canonical `v=` matches `expectedVideoId` → use og:title (then
+   * document.title) + og:image. SPA fallback: when og tags still reference the previous video, read the live
+   * title from ytd-watch-metadata h1, then document.title (`trusted: false`).
    */
   function scrapeWatchPageMetadata(expectedVideoId) {
     if (!expectedVideoId) {
@@ -936,33 +992,47 @@
       } catch (_) {}
     }
 
-    if (!pageVid || pageVid !== expectedVideoId) {
-      return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
-    }
-
     const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute("content");
     const ogImage = document.querySelector('meta[property="og:image"]')?.getAttribute("content");
 
-    let thumbnailUrl = null;
-    let staleThumb = false;
-    if (ogImage && /^https?:/i.test(ogImage)) {
-      const imgVid = videoIdFromYtimgUrl(ogImage);
-      if (imgVid && imgVid !== expectedVideoId) {
-        staleThumb = true;
-      } else {
-        thumbnailUrl = ogImage;
+    if (pageVid && pageVid === expectedVideoId) {
+      let thumbnailUrl = null;
+      let staleThumb = false;
+      if (ogImage && /^https?:/i.test(ogImage)) {
+        const imgVid = videoIdFromYtimgUrl(ogImage);
+        if (imgVid && imgVid !== expectedVideoId) {
+          staleThumb = true;
+        } else {
+          thumbnailUrl = ogImage;
+        }
       }
+
+      let title = stripYoutubeWatchPageTitleSuffix(ogTitle || document.title || "");
+      return {
+        title: title || null,
+        thumbnailUrl,
+        trusted: true,
+        staleThumb,
+      };
     }
 
-    let title = (ogTitle || document.title || "").trim();
-    title = title.replace(/\s*[-–—]\s*YouTube\s*$/i, "").trim();
+    const h1El =
+      document.querySelector("h1.ytd-watch-metadata yt-formatted-string") ||
+      document.querySelector("#title h1 yt-formatted-string");
+    let spaTitle = stripYoutubeWatchPageTitleSuffix(h1El?.textContent || "");
+    if (!spaTitle || isGenericDisplayTitle(spaTitle)) {
+      spaTitle = stripYoutubeWatchPageTitleSuffix(document.title || "");
+    }
+    if (spaTitle && !isGenericDisplayTitle(spaTitle)) {
+      return {
+        title: spaTitle,
+        thumbnailUrl: null,
+        trusted: false,
+        staleThumb: false,
+      };
+    }
 
-    return {
-      title: title || null,
-      thumbnailUrl,
-      trusted: true,
-      staleThumb,
-    };
+    return { title: null, thumbnailUrl: null, trusted: false, staleThumb: false };
   }
 
   function defaultYoutubeThumbnail(videoId) {
@@ -1253,8 +1323,7 @@
       if (imgVid && imgVid !== expectedVideoId) staleThumb = true;
       else thumbnailUrl = ogImage;
     }
-    let title = (ogTitle || document.title || "").trim();
-    title = title.replace(/\s*[-–—]\s*YouTube\s*$/i, "").trim();
+    let title = stripYoutubeWatchPageTitleSuffix(ogTitle || document.title || "");
     return {
       title: title || null,
       thumbnailUrl,
@@ -1265,7 +1334,9 @@
 
   function scrapeYoutubeClipMetadata(expectedVideoId) {
     const watchMeta = scrapeWatchPageMetadata(expectedVideoId);
-    if (watchMeta.trusted) return watchMeta;
+    if (watchMeta.trusted || (watchMeta.title && String(watchMeta.title).trim())) {
+      return watchMeta;
+    }
     return scrapeYoutubeEmbedMetadata(expectedVideoId);
   }
 
@@ -2393,6 +2464,37 @@
     return "Video";
   }
 
+  /** Treat as unresolved for State 1 title polling until we have a real page-specific title. */
+  const GENERIC_VIDEO_DISPLAY_TITLES = new Set(
+    [
+      "",
+      "youtube",
+      "youtube video",
+      "vimeo",
+      "vimeo video",
+      "loom",
+      "loom video",
+      "watch",
+      "google drive file",
+      "dropbox file",
+      "video",
+    ].map((s) => s.toLowerCase())
+  );
+
+  function isGenericDisplayTitle(str) {
+    const t = String(str || "").trim().toLowerCase();
+    return GENERIC_VIDEO_DISPLAY_TITLES.has(t);
+  }
+
+  /** Prefer first specific (non-placeholder) title; otherwise fall back to live then stored. */
+  function preferredClipTitleCandidate(liveRaw, storedRaw) {
+    const lt = liveRaw && String(liveRaw).trim() ? String(liveRaw).trim() : "";
+    const st = storedRaw && String(storedRaw).trim() ? String(storedRaw).trim() : "";
+    if (lt && !isGenericDisplayTitle(lt)) return lt;
+    if (st && !isGenericDisplayTitle(st)) return st;
+    return lt || st;
+  }
+
   function clipDisplayTitleFromRecord(raw, clip) {
     if (!clip) return "Video";
     let title = "";
@@ -2424,7 +2526,7 @@
     if (configured && !isCloudActive()) {
       return null;
     }
-    const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+    const { [clip.storageKey]: raw } = await safeStorageLocalGet(clip.storageKey);
     return raw ?? null;
   }
 
@@ -2433,17 +2535,36 @@
     let liveTitle = "";
     if (clipsMatch(resolveClipContext(), clip)) {
       const meta = clip.scrapeMetadata(clip.clipId);
+      /** Title counts whenever non-empty (trusted og path or SPA h1/document.title fallback); `trusted` only gates stale og:image elsewhere. */
       if (meta.title && String(meta.title).trim()) liveTitle = String(meta.title).trim();
     }
     const storedTitle = raw?.title && String(raw.title).trim() ? String(raw.title).trim() : "";
-    const resolved = !!(liveTitle || storedTitle);
-    const text = liveTitle || storedTitle || defaultClipDisplayTitle(clip);
+    const trimmedCandidate = preferredClipTitleCandidate(liveTitle, storedTitle);
+    const resolved = !!trimmedCandidate && !isGenericDisplayTitle(trimmedCandidate);
+    const text = trimmedCandidate || defaultClipDisplayTitle(clip);
+    console.log("watchTitleResolvedParts", {
+      text,
+      resolved,
+      liveTitle,
+      storedTitle,
+      trimmedCandidate,
+      clipId: clip?.clipId,
+    });
     return { text, resolved };
   }
 
-  async function refreshWatchVideoTitle(clip) {
+  async function refreshWatchVideoTitle(clip, opts) {
     if (!root || !clip) return;
-    const { text: title, resolved } = await watchTitleResolvedParts(clip);
+    let title;
+    let resolved;
+    try {
+      ({ text: title, resolved } = await watchTitleResolvedParts(clip));
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return;
+      throw e;
+    }
+    const forceStartTitleResolved = opts?.forceStartTitleResolved === true;
+    const startTitleResolved = forceStartTitleResolved || resolved;
 
     const headerTitle = root.querySelector(".mf-watch-header-title");
     if (headerTitle) {
@@ -2456,10 +2577,107 @@
     if (startTitle) {
       startTitle.textContent = title;
       startTitle.setAttribute("title", title);
-      startTitle.classList.toggle("mf-hidden", !resolved);
+      startTitle.classList.toggle("mf-hidden", !startTitleResolved);
     }
     if (startSkel) {
-      startSkel.classList.toggle("mf-hidden", resolved);
+      startSkel.classList.toggle("mf-hidden", startTitleResolved);
+    }
+  }
+
+  function clearState1TitleRetryPoll() {
+    if (state1TitleRetryTimer != null) {
+      clearTimeout(state1TitleRetryTimer);
+      state1TitleRetryTimer = null;
+    }
+    state1TitleRetryCount = 0;
+    state1TitleRetryClipStorageKey = null;
+  }
+
+  function sidebarState1StartReview(clip) {
+    return (
+      !!clip &&
+      state.noOwnerReviewRow &&
+      isCloudActive() &&
+      !isGuestSharedReviewActive()
+    );
+  }
+
+  /** False if this poll generation was superseded or the clip is no longer State 1 (does not clear when key mismatches — a newer poll may own the key). */
+  function state1TitleRetryPollClipStillActive(clip) {
+    if (!root || !clip || clip.storageKey !== state1TitleRetryClipStorageKey) return false;
+    if (!sidebarState1StartReview(clip)) {
+      clearState1TitleRetryPoll();
+      return false;
+    }
+    return true;
+  }
+
+  async function pollState1TitleRetryTick(clip) {
+    try {
+      state1TitleRetryTimer = null;
+      if (!state1TitleRetryPollClipStillActive(clip)) return;
+
+      const parts = await watchTitleResolvedParts(clip);
+      console.log("[Notch title poll] pollState1TitleRetryTick", {
+        retryCount: state1TitleRetryCount,
+        title: parts.text,
+        resolved: parts.resolved,
+      });
+      if (!state1TitleRetryPollClipStillActive(clip)) return;
+
+      if (parts.resolved) {
+        await refreshWatchVideoTitle(clip);
+        clearState1TitleRetryPoll();
+        return;
+      }
+      state1TitleRetryCount++;
+      if (state1TitleRetryCount >= STATE1_TITLE_POLL_MAX_RETRIES) {
+        if (!state1TitleRetryPollClipStillActive(clip)) return;
+        console.log("[Notch title poll] pollState1TitleRetryTick max retries", {
+          retryCount: state1TitleRetryCount,
+          title: parts.text,
+        });
+        await refreshWatchVideoTitle(clip, { forceStartTitleResolved: true });
+        clearState1TitleRetryPoll();
+        return;
+      }
+      if (!state1TitleRetryPollClipStillActive(clip)) return;
+      state1TitleRetryTimer = setTimeout(() => {
+        void pollState1TitleRetryTick(clip);
+      }, STATE1_TITLE_POLL_INTERVAL_MS);
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) {
+        clearState1TitleRetryPoll();
+        return;
+      }
+      throw e;
+    }
+  }
+
+  async function maybeStartState1TitleRetryPoll(clip) {
+    try {
+      clearState1TitleRetryPoll();
+      if (!root || !clip) {
+        console.log("[Notch title poll] maybeStartState1TitleRetryPoll skipped", { reason: "!root || !clip" });
+        return;
+      }
+      if (!sidebarState1StartReview(clip)) {
+        console.log("[Notch title poll] maybeStartState1TitleRetryPoll skipped", { reason: "!sidebarState1StartReview" });
+        return;
+      }
+      const initialParts = await watchTitleResolvedParts(clip);
+      console.log("[Notch title poll] maybeStartState1TitleRetryPoll", {
+        retryCount: state1TitleRetryCount,
+        title: initialParts.text,
+        resolved: initialParts.resolved,
+      });
+      if (initialParts.resolved) return;
+      state1TitleRetryClipStorageKey = clip.storageKey;
+      state1TitleRetryCount = 0;
+      void pollState1TitleRetryTick(clip);
+    } catch (e) {
+      if (isExtensionContextInvalidated(e)) return;
+      throw e;
     }
   }
 
@@ -2501,7 +2719,7 @@
   }
 
   async function removeLocalClipCacheKeys(clip) {
-    await chrome.storage.local.remove(localClipCacheKeys(clip));
+    await safeStorageLocalRemove(localClipCacheKeys(clip));
   }
 
   async function loadAuthorOverride() {
@@ -2893,14 +3111,14 @@
       const corner = normalizePanelPosition(panelPosition);
       const next = await updateCachedPreferences({ panelPosition });
       queueSupabasePreferenceSync(next);
-      await chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: corner });
+      await safeStorageLocalSet({ [STORAGE_KEYS.panelCorner]: corner });
       applyPanelCorner(corner);
       return;
     }
   }
 
   async function loadGlobalPanelState() {
-    const got = await chrome.storage.local.get([
+    const got = await safeStorageLocalGet([
       GLOBAL_STATE_KEYS.isVisible,
       GLOBAL_STATE_KEYS.activePanelView,
       STORAGE_KEYS.sidebarVisible,
@@ -2999,7 +3217,7 @@
     const prefs = await loadCachedPreferences();
     const fromPrefs = normalizePanelPosition(prefs.panelPosition);
     if (fromPrefs) return fromPrefs;
-    const local = await chrome.storage.local.get(STORAGE_KEYS.panelCorner);
+    const local = await safeStorageLocalGet(STORAGE_KEYS.panelCorner);
     return normalizePanelCorner(local[STORAGE_KEYS.panelCorner]);
   }
 
@@ -3041,7 +3259,7 @@
 
   async function applySidebarLayoutFromStorage() {
     const [gotLocal, prefs, shared] = await Promise.all([
-      chrome.storage.local.get([STORAGE_KEYS.panelCorner, STORAGE_KEYS.autoPauseCommentTyping]),
+      safeStorageLocalGet([STORAGE_KEYS.panelCorner, STORAGE_KEYS.autoPauseCommentTyping]),
       loadCachedPreferences(),
       loadGlobalPanelState(),
     ]);
@@ -3088,8 +3306,15 @@
     } else if (canvasHost && !state.drawMode) {
       canvasHost.style.visibility = effectiveVisible ? "visible" : "hidden";
     }
+    if (!effectiveVisible) {
+      clearState1TitleRetryPoll();
+    }
     if (effectiveVisible && prevHidden) {
-      void refreshWatchClipFromSupabase();
+      void (async () => {
+        await refreshWatchClipFromSupabase();
+        const c = resolveClipContext();
+        if (c) await maybeStartState1TitleRetryPoll(c);
+      })();
     }
   }
 
@@ -3386,9 +3611,9 @@
       platform: clip.platform,
       clipId: clip.clipId,
     };
-    await chrome.storage.local.set({ [key]: payload });
+    await safeStorageLocalSet({ [key]: payload });
     if (clip.platform === "youtube") {
-      await chrome.storage.local.remove(legacyYoutubeKey(clip.clipId));
+      await safeStorageLocalRemove(legacyYoutubeKey(clip.clipId));
     }
     notchLog("loadClipData mirrored cloud row to chrome.storage.local", {
       key,
@@ -3606,13 +3831,13 @@
       return;
     }
 
-    let { [key]: raw } = await chrome.storage.local.get(key);
+    let { [key]: raw } = await safeStorageLocalGet(key);
     if (!raw && clip.platform === "youtube") {
       const leg = legacyYoutubeKey(clip.clipId);
-      const got = await chrome.storage.local.get(leg);
+      const got = await safeStorageLocalGet(leg);
       raw = got[leg];
       if (raw && coerceIncomingComments(raw)) {
-        await chrome.storage.local.set({ [key]: raw });
+        await safeStorageLocalSet({ [key]: raw });
       }
     }
     const list = coerceIncomingComments(raw);
@@ -3648,7 +3873,7 @@
     }
 
     const key = clip.storageKey;
-    const { [key]: prev } = await chrome.storage.local.get(key);
+    const { [key]: prev } = await safeStorageLocalGet(key);
     let title = prev?.title ?? null;
     let thumbnailUrl = prev?.thumbnailUrl ?? null;
     const cur = resolveClipContext();
@@ -3747,7 +3972,7 @@
         if (result.sharedReview && result.hostUserId && result.reviewId && isLikelyNewComment) {
           let storageSession = null;
           try {
-            const authBlob = await chrome.storage.local.get(SUPABASE_AUTH_STORAGE_KEY);
+            const authBlob = await safeStorageLocalGet(SUPABASE_AUTH_STORAGE_KEY);
             const raw = authBlob?.[SUPABASE_AUTH_STORAGE_KEY];
             if (typeof raw === "string") storageSession = JSON.parse(raw);
             else if (raw && typeof raw === "object") storageSession = raw;
@@ -3781,12 +4006,12 @@
         showToast("Could not save to cloud — check your connection.");
         return false;
       }
-      await chrome.storage.local.set({ [key]: payload });
+      await safeStorageLocalSet({ [key]: payload });
       notchLog("saveClipData mirrored to chrome.storage.local after cloud ok", {
         key,
         commentCount: payload.comments.length,
       });
-      void chrome.storage.local.remove(["notch_popup_reviews"]);
+      void safeStorageLocalRemove(["notch_popup_reviews"]);
       return true;
     }
 
@@ -3823,8 +4048,8 @@
           showToast("Could not save — check your connection.");
           return false;
         }
-        await chrome.storage.local.set({ [key]: payload });
-        void chrome.storage.local.remove(["notch_popup_reviews"]);
+        await safeStorageLocalSet({ [key]: payload });
+        void safeStorageLocalRemove(["notch_popup_reviews"]);
         return true;
       }
       showToast("Sign in to save notes to the cloud.");
@@ -3832,12 +4057,98 @@
     }
 
     state.currentReviewId = "";
-    await chrome.storage.local.set({ [key]: payload });
+    await safeStorageLocalSet({ [key]: payload });
     notchLog("saveClipData local-only (no Supabase project)", {
       key,
       commentCount: payload.comments.length,
     });
     return true;
+  }
+
+  /** Dashboard row shape for popup list (mirrors src/sw-cloud.js `rowToDashboardItem`). */
+  function buildPopupDashboardItemFromClip(clip, row) {
+    const platform = clip.platform;
+    const clipId = clip.clipId;
+    const storageKey = clip.storageKey;
+    const comments = Array.isArray(row?.comments) ? row.comments : [];
+    let thumb =
+      row?.thumbnailUrl && String(row.thumbnailUrl).trim() ? String(row.thumbnailUrl).trim() : null;
+    if (platform === "youtube" && thumb) {
+      const m = thumb.match(/\/vi\/([^/?#]+)\//);
+      const thumbVid = m ? m[1] : null;
+      if (thumbVid && thumbVid !== clipId) thumb = null;
+    }
+    const title =
+      row?.title && String(row.title).trim() ? String(row.title).trim() : clipId || "Video";
+    const defaultThumb =
+      platform === "youtube" && clipId
+        ? "https://i.ytimg.com/vi/" + encodeURIComponent(clipId) + "/hqdefault.jpg"
+        : platform === "googledrive" && clipId
+          ? "https://drive.google.com/thumbnail?id=" + encodeURIComponent(clipId) + "&sz=w320"
+          : "";
+    const openUrl = typeof clip.openUrl === "function" ? clip.openUrl() : "";
+    const updatedAt = Number(row?.updatedAt);
+    return {
+      storageKey,
+      platform,
+      clipId,
+      title,
+      thumbnailUrl: thumb || defaultThumb || "",
+      commentCount: comments.length,
+      updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+      openUrl,
+      reviewOwnerUserId: currentCloudUserId() || null,
+    };
+  }
+
+  /**
+   * After creating a review, repopulate popup cache. `saveClipData` clears `notch_popup_reviews` on cloud save,
+   * so pass the previous `{ ok, items }` snapshot taken before that save to preserve existing rows.
+   */
+  async function mergeNewReviewIntoPopupReviewsCache(clip, prevReviewsCacheEntry) {
+    if (!clip || !isCloudActive()) return;
+    await refreshCloudUser(false);
+    const uid = currentCloudUserId();
+    if (!uid) return;
+
+    const { [clip.storageKey]: row } = await safeStorageLocalGet(clip.storageKey);
+    const item = buildPopupDashboardItemFromClip(clip, row || {});
+
+    let items = [];
+    if (prevReviewsCacheEntry?.ok === true && Array.isArray(prevReviewsCacheEntry.items)) {
+      items = prevReviewsCacheEntry.items.filter(
+        (i) => !(i.platform === item.platform && i.clipId === item.clipId)
+      );
+    }
+    items.unshift(item);
+
+    const prevRaw = await safeStorageLocalGet([POPUP_CACHE_KEY_CONFIG, POPUP_CACHE_KEY_USER]);
+    let cfgEntry = prevRaw[POPUP_CACHE_KEY_CONFIG];
+    if (!cfgEntry || typeof cfgEntry !== "object" || typeof cfgEntry.configured !== "boolean") {
+      const cfg = await sendExtensionMessage({ type: "MF_SUPABASE_CONFIG" });
+      cfgEntry = {
+        ok: true,
+        configured: !!cfg?.configured,
+        url: String(cfg?.url || ""),
+      };
+    }
+    let userEntry = prevRaw[POPUP_CACHE_KEY_USER];
+    if (!userEntry || typeof userEntry !== "object") {
+      userEntry = { id: uid, email: String(state.cloudUser?.email || "") };
+    } else {
+      userEntry = {
+        id: String(userEntry.id || uid || "").trim() || uid,
+        email: String(userEntry.email ?? state.cloudUser?.email ?? ""),
+      };
+    }
+
+    await safeStorageLocalSet({
+      [POPUP_CACHE_KEY_CONFIG]: cfgEntry,
+      [POPUP_CACHE_KEY_USER]: userEntry,
+      [POPUP_CACHE_KEY_REVIEWS]: { ok: true, items },
+    });
+
+    void sendExtensionMessage({ type: "NOTCH_POPUP_REVIEWS_UPDATED" }).catch(() => {});
   }
 
   /** After a reaction is saved to Supabase: notify comment author on shared reviews (fire-and-forget). */
@@ -3861,7 +4172,7 @@
       const prefs = await loadCachedPreferences();
       const reactorName =
         String(prefs.displayName || "").trim() || String(state.cloudUser?.email || "").trim() || "Someone";
-      const { [clip.storageKey]: raw } = await chrome.storage.local.get(clip.storageKey);
+      const { [clip.storageKey]: raw } = await safeStorageLocalGet(clip.storageKey);
       const videoTitle = clipDisplayTitleFromRecord(raw, clip);
       void fetch("https://notch.video/.netlify/functions/notify-comment", {
         method: "POST",
@@ -3904,7 +4215,7 @@
     } else if (configured && !isCloudActive()) {
       return;
     } else {
-      const got = await chrome.storage.local.get(key);
+      const got = await safeStorageLocalGet(key);
       prev = got[key];
     }
 
@@ -3970,7 +4281,7 @@
       }
     }
 
-    await chrome.storage.local.set({ [key]: next });
+    await safeStorageLocalSet({ [key]: next });
   }
 
   function defaultLoomThumbnail(_loomId) {
@@ -5224,7 +5535,6 @@
                 <div class="mf-title-skeleton" aria-hidden="true"></div>
                 <span class="mf-start-review-title mf-hidden" role="status" aria-live="polite"></span>
               </div>
-              <p class="mf-start-review-sub">No review yet</p>
               <button type="button" class="mf-btn mf-btn-primary mf-start-review-btn" data-action="start-review">Start review</button>
             </div>
           </div>
@@ -5443,12 +5753,15 @@
     if (btn) btn.disabled = true;
     try {
       await mergeClipMetadata(clip);
+      const prevPopupReviews = (await safeStorageLocalGet(POPUP_CACHE_KEY_REVIEWS))[POPUP_CACHE_KEY_REVIEWS];
       const ok = await saveClipData(clip);
       if (!ok) {
         showToast("Could not create review — try again.");
         return;
       }
+      await mergeNewReviewIntoPopupReviewsCache(clip, prevPopupReviews);
       state.noOwnerReviewRow = false;
+      clearState1TitleRetryPoll();
       await loadClipData(clip);
       await mergeClipMetadata(clip);
       await refreshWatchVideoTitle(clip);
@@ -5570,7 +5883,7 @@
         void updateCachedPreferences({ autoPause: !!autoPauseToggle.checked }).then((next) =>
           queueSupabasePreferenceSync(next)
         );
-        void chrome.storage.local.set({ [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseToggle.checked });
+        void safeStorageLocalSet({ [STORAGE_KEYS.autoPauseCommentTyping]: !!autoPauseToggle.checked });
         applyAutoPauseCommentTypingPref(autoPauseToggle.checked);
       });
     }
@@ -6509,6 +6822,8 @@
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
+    clearState1TitleRetryPoll();
+
     if (root && root.parentNode !== mount) {
       mount.appendChild(root);
     }
@@ -6528,6 +6843,7 @@
     await refreshWatchVideoTitle(clip);
     await updateWatchHeaderSub(clip);
     updateWatchChromeForReviewMode(clip);
+    await maybeStartState1TitleRetryPoll(clip);
 
     root.classList.toggle("mf-collapsed", state.collapsed);
 
@@ -6578,10 +6894,10 @@
   }
 
   async function patchNotchSharedReviewStorage(patch) {
-    const curRaw = await chrome.storage.local.get("notch_shared_review");
+    const curRaw = await safeStorageLocalGet("notch_shared_review");
     const cur = curRaw.notch_shared_review;
     const base = cur && typeof cur === "object" ? { ...cur } : {};
-    await chrome.storage.local.set({ notch_shared_review: { ...base, ...patch } });
+    await safeStorageLocalSet({ notch_shared_review: { ...base, ...patch } });
   }
 
   async function handleOpenSharedReview(msg) {
@@ -6652,20 +6968,32 @@
       if (changes[GLOBAL_STATE_KEYS.isVisible]) {
         globalPanelState.isVisible = changes[GLOBAL_STATE_KEYS.isVisible].newValue !== false;
         void (async () => {
-          const effective = await resolveEffectiveSidebarVisible(
-            globalPanelState.isVisible,
-            lastSidebarVisibilityContext
-          );
-          applySidebarDomFromEffective(effective);
+          try {
+            const effective = await resolveEffectiveSidebarVisible(
+              globalPanelState.isVisible,
+              lastSidebarVisibilityContext
+            );
+            applySidebarDomFromEffective(effective);
+          } catch (e) {
+            if (!isExtensionContextInvalidated(e) && typeof console !== "undefined" && console.error) {
+              console.error(e);
+            }
+          }
         })();
       } else if (changes[STORAGE_KEYS.sidebarVisible] && !changes[GLOBAL_STATE_KEYS.isVisible]) {
         globalPanelState.isVisible = changes[STORAGE_KEYS.sidebarVisible].newValue !== false;
         void (async () => {
-          const effective = await resolveEffectiveSidebarVisible(
-            globalPanelState.isVisible,
-            lastSidebarVisibilityContext
-          );
-          applySidebarDomFromEffective(effective);
+          try {
+            const effective = await resolveEffectiveSidebarVisible(
+              globalPanelState.isVisible,
+              lastSidebarVisibilityContext
+            );
+            applySidebarDomFromEffective(effective);
+          } catch (e) {
+            if (!isExtensionContextInvalidated(e) && typeof console !== "undefined" && console.error) {
+              console.error(e);
+            }
+          }
         })();
       }
       if (changes[GLOBAL_STATE_KEYS.activePanelView]) {
@@ -6705,12 +7033,18 @@
       ) {
         cloudAuthCacheValidUntil = 0;
         lastTickSignature = "";
-        void refreshCloudUser(true).then(async () => {
-          await refreshPreferencesFromSupabase();
-          await refreshTimestampFormatCache();
-          await refreshAuthorPresentationCache();
-          await tick();
-        });
+        void refreshCloudUser(true)
+          .then(async () => {
+            await refreshPreferencesFromSupabase();
+            await refreshTimestampFormatCache();
+            await refreshAuthorPresentationCache();
+            await tick();
+          })
+          .catch((e) => {
+            if (!isExtensionContextInvalidated(e) && typeof console !== "undefined" && console.error) {
+              console.error(e);
+            }
+          });
       }
       return;
     }
@@ -6772,7 +7106,7 @@
       collabPart = collabHostOnClip || "";
     }
 
-    const { notch_shared_review: nsr } = await chrome.storage.local.get("notch_shared_review");
+    const { notch_shared_review: nsr } = await safeStorageLocalGet("notch_shared_review");
     if (
       unlocked &&
       clip &&
@@ -6838,6 +7172,7 @@
       lastSidebarVisibilityContext = { guestInvite: true, shellUnlocked: false, hasClip: !!clip };
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       clearGuestSharedPoll();
+      clearState1TitleRetryPoll();
       teardownDriveYoutubeEmbedBridge();
       teardownCanvas();
       activeClipStorageKey = null;
@@ -6866,6 +7201,7 @@
     if (!shellUnlocked) {
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       clearGuestSharedPoll();
+      clearState1TitleRetryPoll();
       teardownDriveYoutubeEmbedBridge();
       teardownCanvas();
       activeClipStorageKey = null;
@@ -6880,6 +7216,7 @@
     if (!clip) {
       void sendExtensionMessage({ type: "MF_CLOUD_UNSUBSCRIBE_CLIP_REACTIONS" }).catch(() => {});
       clearGuestSharedPoll();
+      clearState1TitleRetryPoll();
       teardownDriveYoutubeEmbedBridge();
       if (activeClipStorageKey) {
         teardownCanvas();
@@ -6900,6 +7237,50 @@
     await initReview(clip);
   }
 
+  /** Clear watch/start title UI so the previous video's label does not linger during SPA transitions. */
+  function resetYoutubeWatchTitleChromeForSpaNavigation() {
+    if (!root || !isYoutubeSite()) return;
+    const clip = resolveClipContext();
+    const placeholder = clip ? defaultClipDisplayTitle(clip) : "Video";
+    const headerTitle = root.querySelector(".mf-watch-header-title");
+    if (headerTitle) {
+      headerTitle.textContent = placeholder;
+      headerTitle.setAttribute("title", placeholder);
+    }
+    const startTitle = root.querySelector(".mf-start-review-title");
+    const startSkel = root.querySelector(".mf-title-skeleton");
+    if (!startTitle || !startSkel) return;
+    startTitle.textContent = placeholder;
+    startTitle.setAttribute("title", placeholder);
+    if (root.dataset.mfReviewUi === "start") {
+      startTitle.classList.add("mf-hidden");
+      startSkel.classList.remove("mf-hidden");
+    }
+  }
+
+  let youtubeWatchPipelineResyncTid = null;
+
+  /**
+   * YouTube watch is an SPA: URL and DOM/meta update without a full reload. Invalidate tick dedupe,
+   * drop cached active clip so initReview reloads row + metadata, reset visible titles, and rerun tick
+   * after a short delay so og:url / og:title match the new video.
+   */
+  function scheduleYoutubeWatchPipelineResync() {
+    if (!isYoutubeSite()) return;
+    console.log("pipeline resync scheduled", location.href);
+    lastTickSignature = "";
+    clearState1TitleRetryPoll();
+    activeClipStorageKey = null;
+    resetYoutubeWatchTitleChromeForSpaNavigation();
+    if (youtubeWatchPipelineResyncTid != null) {
+      clearTimeout(youtubeWatchPipelineResyncTid);
+    }
+    youtubeWatchPipelineResyncTid = setTimeout(() => {
+      youtubeWatchPipelineResyncTid = null;
+      void tick();
+    }, 120);
+  }
+
   function startUrlWatcher() {
     let last = location.href;
     const check = () => {
@@ -6909,9 +7290,18 @@
       }
     };
     setInterval(check, 800);
-    document.addEventListener("yt-navigate-finish", () => {
-      setTimeout(() => void tick(), 100);
-    });
+    const onYtNavigateFinish = () => {
+      console.log("yt-navigate-finish fired", location.href);
+      last = location.href;
+      scheduleYoutubeWatchPipelineResync();
+    };
+    const onYtPageDataUpdated = () => {
+      console.log("yt-page-data-updated fired", location.href);
+      last = location.href;
+      scheduleYoutubeWatchPipelineResync();
+    };
+    document.addEventListener("yt-navigate-finish", onYtNavigateFinish);
+    document.addEventListener("yt-page-data-updated", onYtPageDataUpdated);
   }
 
   chrome.runtime.onMessage.addListener((msg, _e, sendResponse) => {

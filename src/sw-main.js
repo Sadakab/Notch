@@ -486,6 +486,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  /** Content script refreshed `notch_popup_reviews`; popup listens via chrome.storage.onChanged. */
+  if (msg?.type === "NOTCH_POPUP_REVIEWS_UPDATED") {
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (!CLOUD_TYPES.has(msg?.type)) return false;
 
   try {

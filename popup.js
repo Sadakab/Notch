@@ -44,6 +44,13 @@
       function collabHostStorageKey(platform, clipId) {
         return "markframe_collab_host_" + platform + "_" + encodeURIComponent(clipId);
       }
+      function collabHostKeysToTry(platform, clipId) {
+        const keys = [collabHostStorageKey(platform, clipId)];
+        if (platform === "dropbox" && typeof clipId === "string" && clipId.indexOf("?") !== -1) {
+          keys.push(collabHostStorageKey(platform, clipId.slice(0, clipId.indexOf("?"))));
+        }
+        return keys;
+      }
       function normalizeCommentAvatarUrl(v) {
         if (typeof v !== "string") return "";
         const s = v.trim();
@@ -220,6 +227,56 @@
           window.clearTimeout(showToast._t);
           showToast._t = window.setTimeout(() => showEl(el, false), 2800);
         }
+      }
+      var npConfirmResolve = null;
+      function onNpConfirmKeydown(e) {
+        if (e.key !== "Escape") return;
+        if (!npConfirmResolve) return;
+        e.preventDefault();
+        finishNpConfirm(false);
+      }
+      function finishNpConfirm(value) {
+        const fn = npConfirmResolve;
+        npConfirmResolve = null;
+        document.removeEventListener("keydown", onNpConfirmKeydown);
+        const root = document.getElementById("np-confirm");
+        if (root) showEl(root, false);
+        if (fn) fn(value);
+      }
+      var npConfirmWired = false;
+      function wireNpConfirmDialogOnce() {
+        if (npConfirmWired) return;
+        npConfirmWired = true;
+        const root = document.getElementById("np-confirm");
+        const backdrop = document.getElementById("np-confirm-backdrop");
+        const panel = document.getElementById("np-confirm-panel");
+        const cancel = document.getElementById("np-confirm-cancel");
+        const ok = document.getElementById("np-confirm-ok");
+        if (!root || !backdrop || !panel || !cancel || !ok) return;
+        backdrop.addEventListener("click", () => finishNpConfirm(false));
+        panel.addEventListener("click", (e) => e.stopPropagation());
+        cancel.addEventListener("click", () => finishNpConfirm(false));
+        ok.addEventListener("click", () => finishNpConfirm(true));
+      }
+      function openNpConfirm(opts) {
+        wireNpConfirmDialogOnce();
+        const root = document.getElementById("np-confirm");
+        const titleEl = document.getElementById("np-confirm-title");
+        const msgEl = document.getElementById("np-confirm-msg");
+        const okBtn = document.getElementById("np-confirm-ok");
+        const cancelBtn = document.getElementById("np-confirm-cancel");
+        if (!root || !titleEl || !msgEl || !okBtn || !cancelBtn) return Promise.resolve(false);
+        if (npConfirmResolve) finishNpConfirm(false);
+        return new Promise((resolve) => {
+          npConfirmResolve = resolve;
+          titleEl.textContent = opts.title || "";
+          msgEl.textContent = opts.message || "";
+          okBtn.textContent = opts.confirmLabel || "OK";
+          okBtn.classList.toggle("np-confirm-ok--danger", !!opts.danger);
+          document.addEventListener("keydown", onNpConfirmKeydown);
+          showEl(root, true);
+          cancelBtn.focus();
+        });
       }
       function applyAvatarPreview(src, fallbackLabel) {
         const img = document.getElementById("np-avatar-preview");
@@ -651,9 +708,45 @@
         btn.setAttribute("aria-label", vis ? "Hide sidebar" : "Show sidebar");
       }
       var popupHomeChromeWired = false;
+      var popupReviewsCacheListenerWired = false;
+      function isPopupHomeViewActive() {
+        const home = document.getElementById("np-view-home");
+        if (!home) return false;
+        return !home.hidden && !home.classList.contains("np-hidden");
+      }
+      function wirePopupReviewsCacheListenerOnce() {
+        if (popupReviewsCacheListenerWired) return;
+        popupReviewsCacheListenerWired = true;
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area !== "local" || !Object.prototype.hasOwnProperty.call(changes, POPUP_CACHE_KEY_REVIEWS)) return;
+          void refreshPopupHomeFromReviewsCacheOnly();
+        });
+      }
+      async function refreshPopupHomeFromReviewsCacheOnly() {
+        if (!isPopupHomeViewActive()) return;
+        const els = getPopupHomeElements();
+        let cache = {};
+        try {
+          cache = await chrome.storage.local.get([
+            POPUP_CACHE_KEY_CONFIG,
+            POPUP_CACHE_KEY_USER,
+            POPUP_CACHE_KEY_REVIEWS
+          ]);
+        } catch {
+          return;
+        }
+        if (!isCompletePopupCache(cache)) return;
+        const cfg = cache[POPUP_CACHE_KEY_CONFIG];
+        const userObj = cache[POPUP_CACHE_KEY_USER];
+        const uid = String(userObj?.id || "").trim();
+        const user = uid ? { id: uid, email: userObj?.email || "" } : null;
+        const listRes = uid && cache[POPUP_CACHE_KEY_REVIEWS] ? cache[POPUP_CACHE_KEY_REVIEWS] : { ok: true, items: [] };
+        await applyHomeViewRender(els, cfg, user, listRes);
+      }
       function wirePopupHomeChromeOnce() {
         if (popupHomeChromeWired) return;
         popupHomeChromeWired = true;
+        wirePopupReviewsCacheListenerOnce();
         document.getElementById("np-toggle-sidebar-btn")?.addEventListener("click", async () => {
           const btn = document.getElementById("np-toggle-sidebar-btn");
           if (!btn) return;
@@ -1022,6 +1115,99 @@
           }
         });
       }
+      async function reloadPopupReviewList() {
+        const els = getPopupHomeElements();
+        try {
+          const [cfg, sess, listRes] = await Promise.all([
+            sendMessage("MF_SUPABASE_CONFIG"),
+            sendMessage("MF_SUPABASE_SESSION"),
+            sendMessage("MF_CLOUD_LIST_CLIPS")
+          ]);
+          const user = sess?.user ?? null;
+          const rawItems = listRes?.ok && Array.isArray(listRes.items) ? listRes.items.slice() : [];
+          await enrichClipThumbnails(rawItems);
+          const enrichedList = { ok: listRes?.ok === true, items: rawItems };
+          await writePopupCache(cfg, user, enrichedList);
+          await applyHomeViewRender(els, cfg, user, enrichedList);
+        } catch {
+          showToast("Could not refresh list.");
+        }
+      }
+      async function clearCollabLocalBindingsForItem(item) {
+        const keys = collabHostKeysToTry(item.platform, item.clipId);
+        try {
+          await chrome.storage.local.remove(keys);
+        } catch {
+        }
+        try {
+          const curRaw = await chrome.storage.local.get("notch_shared_review");
+          const cur = curRaw.notch_shared_review;
+          if (!cur || typeof cur !== "object") return;
+          const uid = String(cur.uid || "").trim();
+          const owner = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
+          if (owner && uid && normalizeUuidForCompare(uid) === normalizeUuidForCompare(owner) && cur.platform === item.platform && cur.clip === item.clipId) {
+            await chrome.storage.local.remove("notch_shared_review");
+          }
+        } catch {
+        }
+      }
+      async function handleDeleteOwnReviewFromPopup(item, actionBtn) {
+        const title = String(item.title || "this video").trim() || "this video";
+        const confirmed = await openNpConfirm({
+          title: "Delete this review?",
+          message: `This removes your review for "${title}" and all notes. This cannot be undone.`,
+          confirmLabel: "Delete",
+          danger: true
+        });
+        if (!confirmed) return;
+        if (actionBtn) actionBtn.disabled = true;
+        try {
+          const r = await sendMessage("MF_CLOUD_DELETE_CLIP", {
+            platform: item.platform,
+            clipId: item.clipId
+          });
+          if (!r?.ok) {
+            showToast("Could not delete review.");
+            return;
+          }
+          showToast("Review deleted.");
+          await reloadPopupReviewList();
+        } finally {
+          if (actionBtn) actionBtn.disabled = false;
+        }
+      }
+      async function handleLeaveSharedReviewFromPopup(item, actionBtn) {
+        const hostId = item.reviewOwnerUserId && String(item.reviewOwnerUserId).trim();
+        if (!hostId) {
+          showToast("Could not leave review.");
+          return;
+        }
+        const title = String(item.title || "this review").trim() || "this review";
+        const confirmed = await openNpConfirm({
+          title: "Leave this shared review?",
+          message: `You will lose access until you open the share link again. Leave "${title}"?`,
+          confirmLabel: "Leave",
+          danger: false
+        });
+        if (!confirmed) return;
+        if (actionBtn) actionBtn.disabled = true;
+        try {
+          const r = await sendMessage("MF_COLLAB_LEAVE", {
+            platform: item.platform,
+            clipId: item.clipId,
+            hostUserId: hostId
+          });
+          if (!r?.ok) {
+            showToast("Could not leave review.");
+            return;
+          }
+          await clearCollabLocalBindingsForItem(item);
+          showToast("Left shared review.");
+          await reloadPopupReviewList();
+        } finally {
+          if (actionBtn) actionBtn.disabled = false;
+        }
+      }
       async function enrichClipThumbnails(items) {
         for (const row of items) {
           if (row.thumbnailUrl) continue;
@@ -1065,6 +1251,8 @@
           for (const item of sectionItems) {
             const li = document.createElement("li");
             li.className = "np-dash-li";
+            const row = document.createElement("div");
+            row.className = "np-dash-row";
             const btn = document.createElement("button");
             btn.type = "button";
             btn.className = "np-dash-card";
@@ -1098,7 +1286,31 @@
             btn.appendChild(thumb);
             btn.appendChild(meta);
             btn.addEventListener("click", () => void openReviewFromPopup(item, sharedWithMe));
-            li.appendChild(btn);
+            const action = document.createElement("button");
+            action.type = "button";
+            action.className = sharedWithMe ? "np-dash-action np-dash-action--leave" : "np-dash-action np-dash-action--delete";
+            if (sharedWithMe) {
+              action.title = "Leave shared review";
+              action.setAttribute("aria-label", "Leave shared review");
+              action.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>';
+              action.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void handleLeaveSharedReviewFromPopup(item, action);
+              });
+            } else {
+              action.title = "Delete review";
+              action.setAttribute("aria-label", "Delete review");
+              action.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>';
+              action.addEventListener("click", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void handleDeleteOwnReviewFromPopup(item, action);
+              });
+            }
+            row.appendChild(btn);
+            row.appendChild(action);
+            li.appendChild(row);
             ul.appendChild(li);
           }
           container.appendChild(ul);
@@ -1262,6 +1474,7 @@
       document.addEventListener("DOMContentLoaded", () => {
         wireSettingsFormOnce();
         wirePopupHomeChromeOnce();
+        wireNpConfirmDialogOnce();
         void runHomeView().catch(() => {
           const els = getPopupHomeElements();
           showEl(els.loading, false);
