@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Notch",
   "version": "0.3.0",
-  "description": "FrameIO-style video review for YouTube, Vimeo, Loom, Google Drive, and Dropbox. Comment and draw on any supported video.",
+  "description": "FrameIO-style video review for YouTube, Vimeo, Loom, Google Drive, and Dropbox. Comment on any supported video.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
