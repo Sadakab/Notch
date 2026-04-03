@@ -27,6 +27,7 @@
       var POPUP_CACHE_KEY_CONFIG = "notch_supabase_config";
       var POPUP_CACHE_KEY_USER = "notch_popup_user";
       var POPUP_CACHE_KEY_REVIEWS = "notch_popup_reviews";
+      var POPUP_CACHE_KEY_SETTINGS = "notch_popup_settings";
       var settingsSession = {
         user: (
           /** @type {{ id?: string; email?: string; plan?: string; billingPortalUrl?: string } | null} */
@@ -335,10 +336,56 @@
         const logoBtn = document.getElementById("np-pick-logo");
         if (logoBtn) logoBtn.disabled = !pro;
       }
+      async function writePopupSettingsCacheFromGetUser(r) {
+        if (!r || r.configured === false) return;
+        const at = Date.now();
+        if (!r.ok) return;
+        if (!r.user?.id) {
+          const prefs = await loadCachedPreferences();
+          await chrome.storage.local.set({
+            [POPUP_CACHE_KEY_SETTINGS]: { at, ok: true, user: null, prefs }
+          });
+          return;
+        }
+        const merged = { ...PREFERENCE_DEFAULTS, ...normalizePreferences(r.user.preferences || {}) };
+        const cur = await loadCachedPreferences();
+        if (JSON.stringify(cur) !== JSON.stringify(merged)) {
+          await saveCachedPreferences(merged);
+        }
+        await chrome.storage.local.set({
+          [POPUP_CACHE_KEY_SETTINGS]: {
+            at,
+            ok: true,
+            user: {
+              id: r.user.id,
+              email: String(r.user.email || ""),
+              plan: String(r.user.plan || ""),
+              billingPortalUrl: String(r.user.billingPortalUrl || "")
+            },
+            prefs: merged
+          }
+        });
+      }
+      function settingsViewFingerprint(user, prefs, pro) {
+        const p = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...prefs });
+        return JSON.stringify({
+          uid: user?.id || null,
+          email: user?.email || null,
+          pro: !!pro,
+          prefs: p
+        });
+      }
+      function isUsablePopupSettingsCache(entry) {
+        if (!entry || typeof entry !== "object" || !entry.prefs || typeof entry.prefs !== "object") return false;
+        if (entry.user === null) return true;
+        if (entry.user && typeof entry.user === "object" && String(entry.user.id || "").trim()) return true;
+        return false;
+      }
       async function pullUserAndPreferences() {
         const r = await sendMessage("MF_SUPABASE_GET_USER");
         if (!r?.ok || !r?.user?.id) {
           settingsSession = { user: null, pro: false };
+          if (r?.ok) await writePopupSettingsCacheFromGetUser(r);
           return { user: null, prefs: await loadCachedPreferences(), pro: false };
         }
         const incoming = normalizePreferences(r.user.preferences || {});
@@ -349,6 +396,7 @@
         }
         const pro = String(r.user.plan || "").trim().toLowerCase() === "pro";
         settingsSession = { user: r.user, pro };
+        await writePopupSettingsCacheFromGetUser(r);
         return { user: r.user, prefs: merged, pro };
       }
       function fillSettingsForm(prefs, email) {
@@ -374,24 +422,7 @@
         if (up) showEl(up, !pro);
         if (bill) showEl(bill, !!pro);
       }
-      async function loadSettingsView() {
-        const warn = document.getElementById("np-settings-config-warn");
-        const cfg = await sendMessage("MF_SUPABASE_CONFIG");
-        if (!cfg?.configured) {
-          showEl(warn, true);
-          warn.textContent = "Add your Supabase key in src/supabase-config.js, run npm run build, and reload the extension.";
-          setSignedInSectionsVisible(false);
-          const prefs2 = await loadCachedPreferences();
-          fillSettingsForm(prefs2, "");
-          document.getElementById("np-timestamp-format").value = prefs2.timestampFormat === "long" ? "long" : "short";
-          const autoShowEl = document.getElementById("np-auto-show-sidebar");
-          if (autoShowEl instanceof HTMLInputElement) {
-            autoShowEl.checked = await loadAutoShowSidebarFromSync();
-          }
-          return;
-        }
-        showEl(warn, false);
-        const { user, prefs, pro } = await pullUserAndPreferences();
+      async function applySettingsViewUi(user, prefs, pro) {
         setSignedInSectionsVisible(!!user);
         fillSettingsForm(prefs, user?.email || "");
         const autoShowEl2 = document.getElementById("np-auto-show-sidebar");
@@ -409,6 +440,79 @@
         const openChange = document.getElementById("np-open-change-email");
         if (openChange) openChange.disabled = !user?.email;
         updateChangeEmailButton();
+      }
+      async function refreshSettingsViewFromNetwork(prevFp) {
+        try {
+          const cfg = await sendMessage("MF_SUPABASE_CONFIG");
+          if (!cfg?.configured) return;
+          const r = await sendMessage("MF_SUPABASE_GET_USER");
+          if (!r?.ok) return;
+          await writePopupSettingsCacheFromGetUser(r);
+          const view = document.getElementById("np-view-settings");
+          if (!view || view.hidden || view.classList.contains("np-hidden")) return;
+          let user;
+          let prefs;
+          let pro;
+          if (!r.user?.id) {
+            settingsSession = { user: null, pro: false };
+            user = null;
+            prefs = await loadCachedPreferences();
+            pro = false;
+          } else {
+            const merged = { ...PREFERENCE_DEFAULTS, ...normalizePreferences(r.user.preferences || {}) };
+            pro = String(r.user.plan || "").trim().toLowerCase() === "pro";
+            settingsSession = { user: r.user, pro };
+            user = r.user;
+            prefs = merged;
+          }
+          const nextFp = settingsViewFingerprint(user, prefs, pro);
+          if (nextFp === prevFp) return;
+          await applySettingsViewUi(user, prefs, pro);
+        } catch {
+        }
+      }
+      async function loadSettingsView() {
+        const warn = document.getElementById("np-settings-config-warn");
+        const cfg = await sendMessage("MF_SUPABASE_CONFIG");
+        if (!cfg?.configured) {
+          showEl(warn, true);
+          warn.textContent = "Add your Supabase key in src/supabase-config.js, run npm run build, and reload the extension.";
+          setSignedInSectionsVisible(false);
+          const prefs2 = await loadCachedPreferences();
+          fillSettingsForm(prefs2, "");
+          document.getElementById("np-timestamp-format").value = prefs2.timestampFormat === "long" ? "long" : "short";
+          const autoShowEl = document.getElementById("np-auto-show-sidebar");
+          if (autoShowEl instanceof HTMLInputElement) {
+            autoShowEl.checked = await loadAutoShowSidebarFromSync();
+          }
+          return;
+        }
+        showEl(warn, false);
+        let cacheEntry = null;
+        try {
+          const got = await chrome.storage.local.get(POPUP_CACHE_KEY_SETTINGS);
+          cacheEntry = got[POPUP_CACHE_KEY_SETTINGS];
+        } catch {
+          cacheEntry = null;
+        }
+        if (isUsablePopupSettingsCache(cacheEntry)) {
+          const prefs2 = normalizePreferences({ ...PREFERENCE_DEFAULTS, ...cacheEntry.prefs });
+          const cachedUser = cacheEntry.user;
+          const user2 = cachedUser && cachedUser.id ? {
+            id: cachedUser.id,
+            email: cachedUser.email,
+            plan: cachedUser.plan,
+            billingPortalUrl: cachedUser.billingPortalUrl
+          } : null;
+          const pro2 = user2 ? String(user2.plan || "").trim().toLowerCase() === "pro" : false;
+          settingsSession = { user: user2, pro: pro2 };
+          const prevFp = settingsViewFingerprint(user2, prefs2, pro2);
+          await applySettingsViewUi(user2, prefs2, pro2);
+          void refreshSettingsViewFromNetwork(prevFp);
+          return;
+        }
+        const { user, prefs, pro } = await pullUserAndPreferences();
+        await applySettingsViewUi(user, prefs, pro);
       }
       function stopProPoll() {
         if (proPollTimer) {
@@ -969,7 +1073,7 @@
         }
       }
       function clearPopupSessionCache() {
-        return chrome.storage.local.remove([POPUP_CACHE_KEY_REVIEWS, POPUP_CACHE_KEY_USER]);
+        return chrome.storage.local.remove([POPUP_CACHE_KEY_REVIEWS, POPUP_CACHE_KEY_USER, POPUP_CACHE_KEY_SETTINGS]);
       }
       async function applyHomeViewRender(els, cfg, user, listRes) {
         try {
@@ -1026,14 +1130,15 @@
       }
       async function refreshPopupHomeFromNetwork(els, prevFp) {
         try {
-          const [cfg, sess, listRes] = await Promise.all([
+          const [cfg, sess, listRes, getUserRes] = await Promise.all([
             sendMessage("MF_SUPABASE_CONFIG"),
             sendMessage("MF_SUPABASE_SESSION"),
-            sendMessage("MF_CLOUD_LIST_CLIPS")
+            sendMessage("MF_CLOUD_LIST_CLIPS"),
+            sendMessage("MF_SUPABASE_GET_USER")
           ]);
           const user = sess?.user ?? null;
           const rawItems = listRes?.ok && Array.isArray(listRes.items) ? listRes.items.slice() : [];
-          await enrichClipThumbnails(rawItems);
+          await Promise.all([enrichClipThumbnails(rawItems), writePopupSettingsCacheFromGetUser(getUserRes)]);
           const enrichedList = { ok: listRes?.ok === true, items: rawItems };
           const nextFp = popupHomeFingerprint(cfg, user, enrichedList);
           await writePopupCache(cfg, user, enrichedList);
@@ -1452,14 +1557,15 @@
         showEl(els.loading, false);
         showEl(els.skeleton, true);
         try {
-          const [cfg, sess, listRes] = await Promise.all([
+          const [cfg, sess, listRes, getUserRes] = await Promise.all([
             sendMessage("MF_SUPABASE_CONFIG"),
             sendMessage("MF_SUPABASE_SESSION"),
-            sendMessage("MF_CLOUD_LIST_CLIPS")
+            sendMessage("MF_CLOUD_LIST_CLIPS"),
+            sendMessage("MF_SUPABASE_GET_USER")
           ]);
           const user = sess?.user ?? null;
           const rawItems = listRes?.ok && Array.isArray(listRes.items) ? listRes.items.slice() : [];
-          await enrichClipThumbnails(rawItems);
+          await Promise.all([enrichClipThumbnails(rawItems), writePopupSettingsCacheFromGetUser(getUserRes)]);
           const enrichedList = { ok: listRes?.ok === true, items: rawItems };
           await writePopupCache(cfg, user, enrichedList);
           await applyHomeViewRender(els, cfg, user, enrichedList);
