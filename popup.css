@@ -691,7 +691,7 @@ body.np-popup-gate-only .np-main {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
-  padding: 8px 0 28px;
+  padding: 8px 0 12px;
   overscroll-behavior: contain;
 }
 
@@ -1001,6 +1001,7 @@ body.np-popup-gate-only .np-main {
 
 .np-set-sec--danger {
   padding-top: 16px;
+  padding-bottom: 8px;
 }
 
 .np-toast {

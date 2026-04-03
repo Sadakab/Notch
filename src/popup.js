@@ -879,7 +879,13 @@ function wireSettingsHandlers() {
   });
 
   document.getElementById("np-delete-account")?.addEventListener("click", async () => {
-    if (!window.confirm("Delete your account and cloud data? This cannot be undone.")) return;
+    const confirmed = await openNpConfirm({
+      title: "Delete your account?",
+      message: "This permanently deletes your account and all cloud data. You cannot undo this.",
+      confirmLabel: "Delete account",
+      danger: true,
+    });
+    if (!confirmed) return;
     const r = await sendMessage("MF_SUPABASE_DELETE_USER");
     showToast(r?.ok ? "Account deleted." : r?.error || "Could not delete account.");
     if (r?.ok) {
@@ -959,6 +965,14 @@ function wirePopupHomeChromeOnce() {
       const tab = tabs[0];
       if (tab?.id == null) return;
       const currentlyVisible = btn.dataset.sidebarVisible === "1";
+      const nextGlobalVisible = !currentlyVisible;
+      const globalR = await sendMessage("NOTCH_SET_GLOBAL_STATE", {
+        patch: { isVisible: nextGlobalVisible },
+      });
+      if (!globalR?.ok) {
+        showToast("Could not update sidebar visibility.");
+        return;
+      }
       await chrome.tabs.sendMessage(tab.id, {
         type: "MF_POPUP_SET_SIDEBAR_TAB_HIDDEN",
         hidden: currentlyVisible,

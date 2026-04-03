@@ -655,6 +655,7 @@
     if (!force && now < cloudAuthCacheValidUntil) {
       state.cloudUser = cloudAuthCachedUser;
       refreshProGatedToolbar();
+      console.log("[Notch debug] refreshCloudUser result (cache hit)", state.cloudUser);
       return;
     }
     try {
@@ -681,6 +682,7 @@
       state.cloudUser = null;
       cloudAuthCacheValidUntil = 0;
     }
+    console.log("[Notch debug] refreshCloudUser result", state.cloudUser);
     refreshProGatedToolbar();
   }
 
@@ -800,18 +802,39 @@
     const hasClip = opts?.hasClip === true;
     const guestInvite = opts?.guestInvite === true;
     const shellUnlocked = opts?.shellUnlocked === true;
+    const autoShowSidebar = await loadAutoShowSidebarSetting();
+    const sessionStorageHideKey = sessionStorage.getItem(SESSION_KEY_SIDEBAR_HIDDEN);
+    const logResolve = (returnValue) => {
+      console.log("[Notch debug] resolveEffectiveSidebarVisible", {
+        returnValue,
+        globalPanelStateIsVisible: globalPanelState.isVisible,
+        baseVisible,
+        sessionStorageHideKey,
+        autoShowSidebar,
+      });
+    };
     if (guestInvite) {
-      return !!baseVisible && hasClip;
+      const out = !!baseVisible && hasClip;
+      logResolve(out);
+      return out;
     }
-    if (!shellUnlocked || !hasClip) return false;
-    if (sessionStorage.getItem(SESSION_KEY_SIDEBAR_HIDDEN) === "true" && !hasNotchReviewUrlParam()) {
+    if (!shellUnlocked || !hasClip) {
+      logResolve(false);
       return false;
     }
-    const autoShow = await loadAutoShowSidebarSetting();
+    if (sessionStorageHideKey === "true" && !hasNotchReviewUrlParam()) {
+      logResolve(false);
+      return false;
+    }
     const popupOpen = sessionStorage.getItem(SESSION_KEY_SIDEBAR_POPUP_OPEN) === "1";
     const urlForce = hasNotchReviewUrlParam();
-    if (!autoShow && !popupOpen && !urlForce) return false;
-    return !!baseVisible;
+    if (!autoShowSidebar && !popupOpen && !urlForce) {
+      logResolve(false);
+      return false;
+    }
+    const out = !!baseVisible;
+    logResolve(out);
+    return out;
   }
 
   function isCloudActive() {
@@ -2573,7 +2596,8 @@
     }
 
     const startTitle = root.querySelector(".mf-start-review-title");
-    const startSkel = root.querySelector(".mf-title-skeleton");
+    /** Scoped: other `.mf-title-skeleton` nodes live under `.mf-review-loading-pane`. */
+    const startSkel = root.querySelector(".mf-start-review-title-row .mf-title-skeleton");
     if (startTitle) {
       startTitle.textContent = title;
       startTitle.setAttribute("title", title);
@@ -3124,10 +3148,13 @@
       STORAGE_KEYS.sidebarVisible,
     ]);
     const visibleFromLegacy = got[STORAGE_KEYS.sidebarVisible];
-    const visible =
-      typeof got[GLOBAL_STATE_KEYS.isVisible] === "boolean"
-        ? got[GLOBAL_STATE_KEYS.isVisible]
-        : visibleFromLegacy !== false;
+    /** No `isVisible` key yet (new profile): default to showing the sidebar. */
+    let visible;
+    if (Object.prototype.hasOwnProperty.call(got, GLOBAL_STATE_KEYS.isVisible)) {
+      visible = got[GLOBAL_STATE_KEYS.isVisible] !== false;
+    } else {
+      visible = true;
+    }
     const view = normalizeActivePanelView(got[GLOBAL_STATE_KEYS.activePanelView]);
     return { isVisible: !!visible, activePanelView: view };
   }
@@ -3290,11 +3317,18 @@
     if (!(await getSupabaseConfigured()) || !isCloudActive()) return;
     const clip = resolveClipContext();
     if (!clip) return;
-    await loadClipData(clip);
-    await mergeClipMetadata(clip);
-    await refreshWatchVideoTitle(clip);
-    await updateWatchHeaderSub(clip);
-    updateWatchChromeForReviewMode(clip);
+    applyWatchReviewUiPhase("loading", clip);
+    try {
+      await loadClipData(clip);
+      updateWatchChromeForReviewMode(clip);
+      await mergeClipMetadata(clip);
+      await refreshWatchVideoTitle(clip);
+      await updateWatchHeaderSub(clip);
+    } finally {
+      if (root && root.dataset.mfReviewUi === "loading") {
+        updateWatchChromeForReviewMode(clip);
+      }
+    }
     renderThread();
   }
 
@@ -3728,6 +3762,11 @@
                 void tick();
               }, 500);
             }
+            console.log("[Notch debug] loadClipData result", {
+              rOk: r?.ok,
+              rRecord: r?.record,
+              noOwnerReviewRow: state.noOwnerReviewRow,
+            });
             return;
           }
           await removeLocalClipCacheKeys(clip);
@@ -3738,6 +3777,11 @@
           notchLog("loadClipData cloud: no row — cleared local cache, empty comments", {
             key,
             sharedReviewTarget,
+          });
+          console.log("[Notch debug] loadClipData result", {
+            rOk: r?.ok,
+            rRecord: r?.record,
+            noOwnerReviewRow: state.noOwnerReviewRow,
           });
           return;
         }
@@ -3765,12 +3809,22 @@
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
         invalidateReactionPublicNamesCache();
         scheduleReactionPublicNamesRefresh();
+        console.log("[Notch debug] loadClipData result", {
+          rOk: r?.ok,
+          rRecord: r?.record,
+          noOwnerReviewRow: state.noOwnerReviewRow,
+        });
         return;
       }
       state.comments = [];
       normalizeCommentsShape();
       showToast("Could not load notes from the cloud. Check your connection and try again.");
       notchLog("loadClipData cloud fetch failed — not using local clip cache");
+      console.log("[Notch debug] loadClipData result", {
+        rOk: r?.ok,
+        rRecord: r?.record,
+        noOwnerReviewRow: state.noOwnerReviewRow,
+      });
       return;
     }
 
@@ -3805,6 +3859,11 @@
           invalidateReactionPublicNamesCache();
           scheduleReactionPublicNamesRefresh();
           notchLog("loadClipData guest cloud ok", { commentCount: state.comments.length });
+          console.log("[Notch debug] loadClipData result", {
+            rOk: r?.ok,
+            rRecord: r?.record,
+            noOwnerReviewRow: state.noOwnerReviewRow,
+          });
           return;
         }
         if (r?.ok === true && r.record == null) {
@@ -3818,16 +3877,31 @@
               void tick();
             }, 500);
           }
+          console.log("[Notch debug] loadClipData result", {
+            rOk: r?.ok,
+            rRecord: r?.record,
+            noOwnerReviewRow: state.noOwnerReviewRow,
+          });
           return;
         }
         state.comments = [];
         normalizeCommentsShape();
         showToast("Could not load this shared review. Check your connection.");
+        console.log("[Notch debug] loadClipData result", {
+          rOk: r?.ok,
+          rRecord: r?.record,
+          noOwnerReviewRow: state.noOwnerReviewRow,
+        });
         return;
       }
       state.comments = [];
       normalizeCommentsShape();
       notchLog("loadClipData: Supabase configured but not signed in — skip local clip cache");
+      console.log("[Notch debug] loadClipData result", {
+        rOk: undefined,
+        rRecord: undefined,
+        noOwnerReviewRow: state.noOwnerReviewRow,
+      });
       return;
     }
 
@@ -3856,6 +3930,11 @@
     invalidateReactionPublicNamesCache();
     scheduleReactionPublicNamesRefresh();
     notchLog("loadClipData end (local)", { commentCount: state.comments.length });
+    console.log("[Notch debug] loadClipData result", {
+      rOk: undefined,
+      rRecord: undefined,
+      noOwnerReviewRow: state.noOwnerReviewRow,
+    });
   }
 
   /**
@@ -5430,7 +5509,7 @@
     const wrap = document.createElement("div");
     wrap.id = "markframe-root";
     wrap.dataset.mfView = "watch";
-    wrap.dataset.mfReviewUi = "active";
+    wrap.dataset.mfReviewUi = "loading";
     wrap.innerHTML = `
       <div class="mf-gate-pane">
         <p class="mf-gate-title"></p>
@@ -5503,11 +5582,16 @@
       </div>
       <div class="mf-app-shell mf-hidden">
         <div class="mf-header">
+          <div class="mf-header-text mf-header-text--loading">
+            <div class="mf-brand">Notch<span class="mf-dot">.</span></div>
+            <p class="mf-header-loading-msg" aria-live="polite">Loading review…</p>
+            <p class="mf-header-sync-msg" aria-live="polite"></p>
+          </div>
           <div class="mf-header-text mf-header-text--start mf-hidden">
             <div class="mf-brand">Notch<span class="mf-dot">.</span></div>
             <p class="mf-header-sync-msg" aria-live="polite"></p>
           </div>
-          <div class="mf-header-text mf-header-text--active">
+          <div class="mf-header-text mf-header-text--active mf-hidden">
             <span class="mf-watch-header-title" role="status" aria-live="polite"></span>
             <span class="mf-watch-review-owner" role="status" aria-live="polite"></span>
             <p class="mf-header-sync-msg" aria-live="polite"></p>
@@ -5529,6 +5613,13 @@
           </div>
         </div>
         <div class="mf-watch-pane">
+          <div class="mf-review-loading-pane" aria-busy="true" aria-label="Loading review">
+            <div class="mf-review-loading-body">
+              <div class="mf-review-loading-line mf-title-skeleton"></div>
+              <div class="mf-review-loading-line mf-review-loading-line--short mf-title-skeleton"></div>
+              <div class="mf-review-loading-line mf-review-loading-line--toolbar mf-title-skeleton"></div>
+            </div>
+          </div>
           <div class="mf-start-review-pane mf-hidden">
             <div class="mf-start-review-body">
               <div class="mf-start-review-title-row">
@@ -5538,7 +5629,7 @@
               <button type="button" class="mf-btn mf-btn-primary mf-start-review-btn" data-action="start-review">Start review</button>
             </div>
           </div>
-          <div class="mf-review-active-pane">
+          <div class="mf-review-active-pane mf-hidden">
           <div class="mf-toolbar">
             <div class="mf-toolbar-draw${FEATURE_DRAWING ? "" : " mf-hidden"}">
               <button type="button" class="mf-btn" data-action="toggle-draw">Draw</button>
@@ -5729,6 +5820,49 @@
     return wrap;
   }
 
+  /**
+   * Watch body UI phase: `loading` (no start/active yet), `start` (no cloud row), or `active` (has review row).
+   * Hides all phase panes/headers then shows only the current phase — avoids toggle() getting out of sync with the DOM.
+   */
+  function applyWatchReviewUiPhase(phase, _clip) {
+    if (!root) return;
+    const loading = phase === "loading";
+    const start = phase === "start";
+    root.dataset.mfReviewUi = loading ? "loading" : start ? "start" : "active";
+
+    const hdrLoad = root.querySelector(".mf-header-text--loading");
+    const hdrStart = root.querySelector(".mf-header-text--start");
+    const hdrActive = root.querySelector(".mf-header-text--active");
+    const paneLoad = root.querySelector(".mf-review-loading-pane");
+    const paneStart = root.querySelector(".mf-start-review-pane");
+    const paneActive = root.querySelector(".mf-review-active-pane");
+
+    const hideEl = (el) => {
+      if (el) el.classList.add("mf-hidden");
+    };
+    const showEl = (el) => {
+      if (el) el.classList.remove("mf-hidden");
+    };
+
+    hideEl(hdrLoad);
+    hideEl(hdrStart);
+    hideEl(hdrActive);
+    hideEl(paneLoad);
+    hideEl(paneStart);
+    hideEl(paneActive);
+
+    if (loading) {
+      showEl(hdrLoad);
+      showEl(paneLoad);
+    } else if (start) {
+      showEl(hdrStart);
+      showEl(paneStart);
+    } else {
+      showEl(hdrActive);
+      showEl(paneActive);
+    }
+  }
+
   function updateWatchChromeForReviewMode(clip) {
     if (!root) return;
     const start =
@@ -5736,11 +5870,7 @@
       state.noOwnerReviewRow &&
       isCloudActive() &&
       !isGuestSharedReviewActive();
-    root.dataset.mfReviewUi = start ? "start" : "active";
-    root.querySelector(".mf-header-text--start")?.classList.toggle("mf-hidden", !start);
-    root.querySelector(".mf-header-text--active")?.classList.toggle("mf-hidden", start);
-    root.querySelector(".mf-start-review-pane")?.classList.toggle("mf-hidden", !start);
-    root.querySelector(".mf-review-active-pane")?.classList.toggle("mf-hidden", start);
+    applyWatchReviewUiPhase(start ? "start" : "active", clip);
   }
 
   async function onStartReviewClicked() {
@@ -5762,11 +5892,18 @@
       await mergeNewReviewIntoPopupReviewsCache(clip, prevPopupReviews);
       state.noOwnerReviewRow = false;
       clearState1TitleRetryPoll();
-      await loadClipData(clip);
-      await mergeClipMetadata(clip);
-      await refreshWatchVideoTitle(clip);
-      await updateWatchHeaderSub(clip);
-      updateWatchChromeForReviewMode(clip);
+      applyWatchReviewUiPhase("loading", clip);
+      try {
+        await loadClipData(clip);
+        updateWatchChromeForReviewMode(clip);
+        await mergeClipMetadata(clip);
+        await refreshWatchVideoTitle(clip);
+        await updateWatchHeaderSub(clip);
+      } finally {
+        if (root && root.dataset.mfReviewUi === "loading") {
+          updateWatchChromeForReviewMode(clip);
+        }
+      }
       renderThread();
       refreshProGatedToolbar();
     } finally {
@@ -6835,14 +6972,25 @@
       teardownCanvas();
       activeClipStorageKey = clip.storageKey;
     }
-    if (clipChanged || isCloudActive() || isGuestSharedReviewActive()) {
-      await loadClipData(clip);
-      await tryImportFromUrl(clip);
+    const willLoadClipData =
+      clipChanged || isCloudActive() || isGuestSharedReviewActive();
+    if (willLoadClipData) {
+      applyWatchReviewUiPhase("loading", clip);
     }
-    await mergeClipMetadata(clip);
-    await refreshWatchVideoTitle(clip);
-    await updateWatchHeaderSub(clip);
-    updateWatchChromeForReviewMode(clip);
+    try {
+      if (clipChanged || isCloudActive() || isGuestSharedReviewActive()) {
+        await loadClipData(clip);
+        await tryImportFromUrl(clip);
+      }
+      updateWatchChromeForReviewMode(clip);
+      await mergeClipMetadata(clip);
+      await refreshWatchVideoTitle(clip);
+      await updateWatchHeaderSub(clip);
+    } finally {
+      if (root && root.dataset.mfReviewUi === "loading") {
+        updateWatchChromeForReviewMode(clip);
+      }
+    }
     await maybeStartState1TitleRetryPoll(clip);
 
     root.classList.toggle("mf-collapsed", state.collapsed);
@@ -7098,6 +7246,17 @@
       !guestAuthRouteGate;
     const shellUnlocked = unlocked || guestUnlocked;
 
+    console.log(
+      "[Notch debug] tickInner: shellUnlocked=" +
+        shellUnlocked +
+        " cloudUser=" +
+        !!state.cloudUser +
+        " clip=" +
+        !!clip +
+        " supabaseConfigured=" +
+        supabaseConfigured
+    );
+
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
@@ -7241,6 +7400,16 @@
   function resetYoutubeWatchTitleChromeForSpaNavigation() {
     if (!root || !isYoutubeSite()) return;
     const clip = resolveClipContext();
+    const shell = root.querySelector(".mf-app-shell");
+    if (
+      clip &&
+      shell &&
+      !shell.classList.contains("mf-hidden") &&
+      root.dataset.mfLocked !== "1" &&
+      root.dataset.mfGuestInviteOpen !== "1"
+    ) {
+      applyWatchReviewUiPhase("loading", clip);
+    }
     const placeholder = clip ? defaultClipDisplayTitle(clip) : "Video";
     const headerTitle = root.querySelector(".mf-watch-header-title");
     if (headerTitle) {
@@ -7248,7 +7417,7 @@
       headerTitle.setAttribute("title", placeholder);
     }
     const startTitle = root.querySelector(".mf-start-review-title");
-    const startSkel = root.querySelector(".mf-title-skeleton");
+    const startSkel = root.querySelector(".mf-start-review-title-row .mf-title-skeleton");
     if (!startTitle || !startSkel) return;
     startTitle.textContent = placeholder;
     startTitle.setAttribute("title", placeholder);

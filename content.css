@@ -912,6 +912,49 @@
   opacity: 0.95;
 }
 
+#markframe-root .mf-review-loading-pane {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 16px;
+  box-sizing: border-box;
+}
+
+#markframe-root .mf-review-loading-body {
+  width: 100%;
+  max-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: stretch;
+}
+
+#markframe-root .mf-review-loading-line {
+  height: 12px;
+  border-radius: 4px;
+  width: 72%;
+}
+
+#markframe-root .mf-review-loading-line--short {
+  width: 48%;
+}
+
+#markframe-root .mf-review-loading-line--toolbar {
+  margin-top: 8px;
+  height: 28px;
+  width: 100%;
+  border-radius: 6px;
+}
+
+#markframe-root .mf-header-loading-msg {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--mf-text-muted);
+  line-height: 1.35;
+}
+
 #markframe-root .mf-review-active-pane {
   flex: 1;
   min-height: 0;
