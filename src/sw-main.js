@@ -290,15 +290,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   void syncAuthMarkerFromChromeStorage();
 });
 
-chrome.action.onClicked.addListener((tab) => {
-  if (!tab?.id || !isInjectableUrl(tab.url)) return;
-  void (async () => {
-    const current = await getGlobalNotchState();
-    const next = await setGlobalNotchStatePatch({ isVisible: !current.isVisible });
-    await broadcastNotchStateUpdate(next);
-  })().catch(() => {});
-});
-
 chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
   if (msg && typeof msg === "object" && msg.session) {
     void (async () => {
@@ -346,7 +337,7 @@ chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
           await chrome.action.openPopup();
         }
       } catch {
-        /* No default_popup in manifest — expected. Primary UI is the sidebar on the video tab. */
+        /* openPopup may fail without a user gesture or if the popup cannot be shown. */
       }
       const tabId = await findOrOpenTabForSharedReview(stored.platform, stored.clip);
       if (tabId != null) {
@@ -362,6 +353,37 @@ chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "NOTCH_OPEN_VIDEO_TAB") {
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    if (platform == null || String(platform).trim() === "" || clipId == null || String(clipId) === "") {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    void (async () => {
+      try {
+        const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId));
+        sendResponse({ ok: true, tabId: tabId ?? null });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "MF_OPEN_TAB") {
+    const url = String(msg.url || "").trim();
+    if (!url || !isInjectableUrl(url)) {
+      sendResponse({ ok: false, error: "invalid_url" });
+      return false;
+    }
+    void chrome.tabs
+      .create({ url, active: true })
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
   if (msg?.type === "NOTCH_SET_GLOBAL_STATE") {
     void (async () => {
       try {

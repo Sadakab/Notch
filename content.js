@@ -656,7 +656,8 @@
         const plan = String(r?.user?.plan || "").trim().toLowerCase();
         if (plan !== "pro") return;
         await refreshCloudUser(true);
-        await hydrateSettingsUi();
+        await refreshPreferencesFromSupabase();
+        await refreshTimestampFormatCache();
         refreshProGatedToolbar();
         setUpgradeStatusMessage("");
         stopProUpgradePolling();
@@ -2676,75 +2677,31 @@
     if (!root) return;
     closePdfExportModal();
     const overlay = root.querySelector(".mf-settings-overlay");
-    const inp = root.querySelector(".mf-settings-display-name");
-    if (!overlay || !inp) return;
+    if (!overlay) return;
     if (!overlay.classList.contains("mf-hidden")) return;
     await refreshCloudUser(true);
-    const email = state.cloudUser?.email?.trim() || "";
     const s = await loadCachedPreferences();
     void refreshPreferencesFromSupabase().then((fresh) => {
       if (!root || root.dataset.mfLocked === "1") return;
       cachedTimestampFormat = fresh.timestampFormat === "long" ? "00:00:39" : "0:39";
-      const currentEmail = state.cloudUser?.email?.trim() || "";
-      const nameInp = root.querySelector(".mf-settings-display-name");
-      if (nameInp && !document.activeElement?.isSameNode(nameInp)) {
-        nameInp.value = fresh.displayName || currentEmail;
-      }
-      const company = root.querySelector(".mf-settings-company-name");
-      if (company) company.value = fresh.companyName;
-      applySettingsCompanyLogoPreview(fresh.logoDataUrl || "");
+      const posLabel = panelCornerToLabel(normalizePanelPosition(fresh.panelPosition));
+      const posValue = root.querySelector(".mf-settings-panel-position-value");
+      if (posValue) posValue.textContent = posLabel;
+      const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
+      if (autoPauseCb) autoPauseCb.checked = !!fresh.autoPause;
+      const floatCb = root.querySelector(".mf-settings-float-panel");
+      if (floatCb) floatCb.checked = !!fresh.floatPanel;
+      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
     });
     cachedTimestampFormat = s.timestampFormat === "long" ? "00:00:39" : "0:39";
-    const fallbackName = s.displayName || email;
-    inp.value = fallbackName;
-    inp.placeholder = email || "Display name";
-    const company = root.querySelector(".mf-settings-company-name");
-    if (company) company.value = s.companyName;
     const posLabel = panelCornerToLabel(normalizePanelPosition(s.panelPosition));
     const posValue = root.querySelector(".mf-settings-panel-position-value");
     if (posValue) posValue.textContent = posLabel;
-    const tsValue = root.querySelector(".mf-settings-timestamp-format-value");
-    if (tsValue) tsValue.textContent = s.timestampFormat === "long" ? "00:00:39" : "0:39";
     const autoPauseCb = root.querySelector(".mf-settings-auto-pause-comments");
     if (autoPauseCb) autoPauseCb.checked = !!s.autoPause;
     const floatCb = root.querySelector(".mf-settings-float-panel");
     if (floatCb) floatCb.checked = !!s.floatPanel;
-    const notifyComment = root.querySelector(".mf-settings-notify-comment");
-    const notifyReaction = root.querySelector(".mf-settings-notify-reaction");
-    const notifyReply = root.querySelector(".mf-settings-notify-reply");
-    const pro = isProUser();
-    if (notifyComment) notifyComment.checked = pro ? !!s.notifyOnComment : false;
-    if (notifyReaction) notifyReaction.checked = pro ? !!s.notifyOnReaction : false;
-    if (notifyReply) notifyReply.checked = pro ? !!s.notifyOnReply : false;
     refreshProGatedToolbar();
-    const avSrc = await loadStoredAvatar();
-    applySettingsAvatarPreview(avSrc, inp.value.trim() || email || "You");
-    const accountEmail = root.querySelector(".mf-settings-account-email");
-    if (accountEmail) accountEmail.textContent = email || "Not signed in";
-    const changeEmailBtn = root.querySelector('[data-action="open-change-email"]');
-    if (changeEmailBtn) changeEmailBtn.disabled = !email;
-    const changeEmailForm = root.querySelector(".mf-settings-change-email-form");
-    if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
-    const changeEmailInput = root.querySelector(".mf-settings-change-email-input");
-    if (changeEmailInput) changeEmailInput.value = "";
-    const changeEmailStatus = root.querySelector(".mf-settings-change-email-status");
-    if (changeEmailStatus) {
-      changeEmailStatus.textContent = "";
-      changeEmailStatus.className = "mf-settings-change-email-status";
-    }
-    const changeEmailNotice = root.querySelector(".mf-settings-change-email-notice");
-    if (changeEmailNotice) {
-      changeEmailNotice.textContent = "";
-      changeEmailNotice.classList.add("mf-hidden");
-    }
-    updateSettingsChangeEmailButton();
-    const planBadge = root.querySelector(".mf-settings-plan-badge");
-    if (planBadge) planBadge.textContent = pro ? "PRO" : "Free";
-    applySettingsCompanyLogoPreview(s.logoDataUrl || "");
-    const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
-    const billingBtn = root.querySelector('[data-action="manage-billing"]');
-    if (upgradeBtn) upgradeBtn.classList.toggle("mf-hidden", pro);
-    if (billingBtn) billingBtn.classList.toggle("mf-hidden", !pro);
     syncSettingsGuestModeSections();
     overlay.classList.remove("mf-hidden");
     overlay.setAttribute("aria-hidden", "false");
@@ -2777,7 +2734,11 @@
           } catch (_) {}
         }
       } else {
-        inp.focus();
+        const focusTarget =
+          root.querySelector(".mf-settings-dropdown-btn") || root.querySelector(".mf-settings-dialog");
+        try {
+          focusTarget?.focus();
+        } catch (_) {}
       }
     });
     if (persistGlobal) {
@@ -2877,14 +2838,6 @@
       queueSupabasePreferenceSync(next);
       await chrome.storage.local.set({ [STORAGE_KEYS.panelCorner]: corner });
       applyPanelCorner(corner);
-      return;
-    }
-    if (target === "timestampFormat") {
-      const fmt = normalizeTimestampFormat(value) === "00:00:39" ? "long" : "short";
-      const next = await updateCachedPreferences({ timestampFormat: fmt });
-      queueSupabasePreferenceSync(next);
-      cachedTimestampFormat = fmt === "long" ? "00:00:39" : "0:39";
-      if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") renderThread();
       return;
     }
   }
@@ -3771,6 +3724,7 @@
         key,
         commentCount: payload.comments.length,
       });
+      void chrome.storage.local.remove(["notch_popup_reviews"]);
       return true;
     }
 
@@ -3808,6 +3762,7 @@
           return false;
         }
         await chrome.storage.local.set({ [key]: payload });
+        void chrome.storage.local.remove(["notch_popup_reviews"]);
         return true;
       }
       showToast("Sign in to save notes to the cloud.");
@@ -5309,7 +5264,6 @@
     wrap.dataset.mfView = "watch";
     wrap.innerHTML = `
       <div class="mf-gate-pane">
-        <div class="mf-gate-brand">Notch</div>
         <p class="mf-gate-title"></p>
         <p class="mf-gate-msg"></p>
         <div class="mf-gate-form mf-hidden">
@@ -5518,24 +5472,6 @@
                 <button type="button" class="mf-guest-footer-not-you">Not you?</button>
               </div>
             </section>
-            <section class="mf-settings-section mf-settings-signed-in-only">
-              <div class="mf-settings-section-heading">Profile</div>
-              <div class="mf-settings-profile-row">
-                <input type="file" class="mf-settings-profile-avatar-file" accept="image/*" tabindex="-1" aria-hidden="true" />
-                <button
-                  type="button"
-                  class="mf-settings-avatar-btn"
-                  data-action="pick-profile-avatar"
-                  title="Change profile photo"
-                  aria-label="Change profile photo"
-                >
-                  <img class="mf-settings-avatar-preview mf-hidden" alt="" />
-                  <span class="mf-settings-avatar-preview-fallback" aria-hidden="true">N</span>
-                </button>
-                <input type="text" class="mf-settings-display-name" maxlength="80" autocomplete="nickname" spellcheck="false" />
-              </div>
-              <input type="text" class="mf-settings-company-name" maxlength="120" placeholder="Company / studio name" spellcheck="false" />
-            </section>
             <section class="mf-settings-section">
               <div class="mf-settings-section-heading">Panel</div>
               <div class="mf-settings-row">
@@ -5550,61 +5486,9 @@
               <label class="mf-settings-row mf-settings-signed-in-only"><span>Auto-pause when typing</span><input type="checkbox" class="mf-settings-auto-pause-comments mf-settings-toggle" /></label>
               <label class="mf-settings-row"><span>Float panel</span><input type="checkbox" class="mf-settings-float-panel mf-settings-toggle" /></label>
             </section>
-            <section class="mf-settings-section">
-              <div class="mf-settings-section-heading">Comments</div>
-              <div class="mf-settings-row">
-                <span>Timestamp format</span>
-                <div class="mf-settings-dropdown" data-key="timestampFormat">
-                  <button type="button" class="mf-settings-dropdown-btn"><span class="mf-settings-dropdown-value mf-settings-timestamp-format-value">0:39</span><span class="mf-settings-chevron">▾</span></button>
-                  <div class="mf-settings-dropdown-menu">
-                    <button type="button" data-value="0:39">0:39</button><button type="button" data-value="00:00:39">00:00:39</button>
-                  </div>
-                </div>
-              </div>
-            </section>
-            <section class="mf-settings-section mf-settings-signed-in-only">
-              <div class="mf-settings-section-heading-row"><span class="mf-settings-section-heading">Notifications <span class="mf-pro-badge">Pro</span></span><span class="mf-settings-via-email">via email</span></div>
-              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone comments on my review</span><input type="checkbox" class="mf-settings-notify-comment mf-settings-toggle" /></label>
-              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone reacts to my comment</span><input type="checkbox" class="mf-settings-notify-reaction mf-settings-toggle" /></label>
-              <label class="mf-settings-row mf-settings-pro-disabled"><span>Someone replies to my comment</span><input type="checkbox" class="mf-settings-notify-reply mf-settings-toggle" /></label>
-            </section>
-            <section class="mf-settings-section mf-settings-signed-in-only">
-              <div class="mf-settings-section-heading">PDF Export <span class="mf-pro-badge">Pro</span></div>
-              <div class="mf-settings-row mf-settings-pro-disabled">
-                <span>Company logo</span>
-                <input type="file" class="mf-settings-avatar-file" accept="image/*" tabindex="-1" />
-                <button type="button" class="mf-settings-company-logo-btn" data-action="upload-logo" aria-label="Upload company logo">
-                  <img class="mf-settings-company-logo-preview mf-hidden" alt="Company logo preview" />
-                </button>
-              </div>
-            </section>
-            <section class="mf-settings-section mf-settings-signed-in-only">
-              <div class="mf-settings-section-heading">Account</div>
-              <div class="mf-settings-account-row">
-                <span class="mf-settings-account-email"></span>
-                <button type="button" class="mf-settings-inline-link" data-action="open-change-email">Change</button>
-              </div>
-              <div class="mf-settings-change-email-form mf-hidden">
-                <input type="email" class="mf-settings-change-email-input" autocomplete="email" maxlength="320" placeholder="New email address" />
-                <div class="mf-settings-change-email-status" aria-live="polite"></div>
-                <div class="mf-settings-change-email-actions">
-                  <button type="button" class="mf-settings-cta-btn" data-action="submit-change-email">Send confirmation</button>
-                  <button type="button" class="mf-settings-inline-link" data-action="cancel-change-email">Cancel</button>
-                </div>
-              </div>
-              <div class="mf-settings-change-email-notice mf-hidden" aria-live="polite"></div>
-            </section>
-            <section class="mf-settings-section mf-settings-signed-in-only">
-              <div class="mf-settings-section-heading">Plan</div>
-              <div class="mf-settings-row"><span>Current plan</span><span class="mf-settings-plan-badge">Free</span></div>
-              <button type="button" class="mf-settings-cta-btn" data-action="upgrade-pro">Upgrade to Pro</button>
-              <button type="button" class="mf-settings-ghost-btn mf-hidden" data-action="manage-billing">Manage billing</button>
-              <div class="mf-settings-upgrade-status mf-hidden" aria-live="polite"></div>
-            </section>
-            <div class="mf-settings-footer-row mf-settings-signed-in-only">
-              <button type="button" class="mf-settings-link-btn" data-action="sign-out">Sign out</button>
-              <button type="button" class="mf-settings-link-btn mf-settings-link-danger" data-action="delete-account">Delete account</button>
-            </div>
+            <p class="mf-settings-popup-hint mf-settings-signed-in-only">
+              Profile, notifications, PDF logo, account, and plan are in the extension toolbar popup (gear on the Notch icon).
+            </p>
             <div class="mf-settings-guest-footer mf-settings-guest-only mf-hidden">
               <button type="button" class="mf-settings-cta-btn" data-action="guest-settings-sign-in">Sign in to Notch</button>
             </div>
@@ -5963,67 +5847,6 @@
     if (pdfSubmit) {
       pdfSubmit.addEventListener("click", () => void submitPdfExportModal());
     }
-    const settingsNameInp = root.querySelector(".mf-settings-display-name");
-    if (settingsNameInp) {
-      settingsNameInp.addEventListener("input", () => {
-        const fb = root.querySelector(".mf-settings-avatar-preview-fallback");
-        if (fb) fb.textContent = avatarFallbackLetter(settingsNameInp.value || "You");
-      });
-      settingsNameInp.addEventListener("change", () => void applyDisplayNameSetting());
-    }
-    const companyInp = root.querySelector(".mf-settings-company-name");
-    if (companyInp) {
-      companyInp.addEventListener("change", () => {
-        void updateCachedPreferences({ companyName: companyInp.value.trim() }).then((next) =>
-          queueSupabasePreferenceSync(next)
-        );
-      });
-    }
-    const pickProfileAvatarBtn = root.querySelector('[data-action="pick-profile-avatar"]');
-    const profileAvatarFileInp = root.querySelector(".mf-settings-profile-avatar-file");
-    if (pickProfileAvatarBtn && profileAvatarFileInp) {
-      pickProfileAvatarBtn.addEventListener("click", () => profileAvatarFileInp.click());
-      profileAvatarFileInp.addEventListener("change", () => {
-        const f = profileAvatarFileInp.files && profileAvatarFileInp.files[0];
-        if (!f) return;
-        const previousDisplayName = cachedEffectiveDisplayName;
-        compressAvatarFile(f)
-          .then(async (dataUrl) => {
-            const next = await updateCachedPreferences({ avatar: dataUrl });
-            queueSupabasePreferenceSync(next);
-            await refreshAuthorPresentationCache();
-            await relabelOwnCommentsInActiveClip(previousDisplayName);
-            const nameInp = root.querySelector(".mf-settings-display-name");
-            const email = state.cloudUser?.email?.trim() || "";
-            const label = (nameInp?.value || "").trim() || email || "You";
-            applySettingsAvatarPreview(dataUrl, label);
-            if (root && root.dataset.mfView === "watch" && root.dataset.mfLocked !== "1") {
-              renderThread();
-            }
-            showToast("Profile photo updated.");
-          })
-          .catch((err) => showToast(err.message || "Could not use that image."));
-        profileAvatarFileInp.value = "";
-      });
-    }
-
-    const pickAvatarBtn = root.querySelector('[data-action="upload-logo"]');
-    const avatarFileInp = root.querySelector(".mf-settings-avatar-file");
-    if (pickAvatarBtn && avatarFileInp) {
-      pickAvatarBtn.addEventListener("click", () => avatarFileInp.click());
-      avatarFileInp.addEventListener("change", () => {
-        const f = avatarFileInp.files && avatarFileInp.files[0];
-        if (!f) return;
-        compressCompanyLogoFile(f)
-          .then((dataUrl) => saveCompanyLogoSetting(dataUrl))
-          .then(() => loadCachedPreferences())
-          .then((s) => applySettingsCompanyLogoPreview(s.logoDataUrl || ""))
-          .then(() => showToast("Logo saved."))
-          .catch((err) => showToast(err.message || "Could not use that image."));
-        avatarFileInp.value = "";
-      });
-    }
-
     root.querySelectorAll(".mf-settings-dropdown-btn").forEach((btn) => {
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -6061,136 +5884,6 @@
         applyFloatPanelPref(floatToggle.checked);
       });
     }
-    const notifyComment = root.querySelector(".mf-settings-notify-comment");
-    if (notifyComment) {
-      notifyComment.addEventListener("change", () => {
-        if (!isProUser()) return;
-        void updateCachedPreferences({ notifyOnComment: !!notifyComment.checked }).then((next) =>
-          queueSupabasePreferenceSync(next)
-        );
-      });
-    }
-    const notifyReaction = root.querySelector(".mf-settings-notify-reaction");
-    if (notifyReaction) {
-      notifyReaction.addEventListener("change", () => {
-        if (!isProUser()) return;
-        void updateCachedPreferences({ notifyOnReaction: !!notifyReaction.checked }).then((next) =>
-          queueSupabasePreferenceSync(next)
-        );
-      });
-    }
-    const notifyReply = root.querySelector(".mf-settings-notify-reply");
-    if (notifyReply) {
-      notifyReply.addEventListener("change", () => {
-        if (!isProUser()) return;
-        void updateCachedPreferences({ notifyOnReply: !!notifyReply.checked }).then((next) =>
-          queueSupabasePreferenceSync(next)
-        );
-      });
-    }
-
-    const deleteAccountBtn = root.querySelector('[data-action="delete-account"]');
-    if (deleteAccountBtn) {
-      deleteAccountBtn.addEventListener("click", async () => {
-        if (!window.confirm("Delete your account and cloud data? This cannot be undone.")) return;
-        const r = await sendExtensionMessage({ type: "MF_SUPABASE_DELETE_USER" });
-        showToast(r?.ok ? "Account deleted." : (r?.error || "Could not delete account."));
-        if (r?.ok) void tick();
-      });
-    }
-    const openChangeEmailBtn = root.querySelector('[data-action="open-change-email"]');
-    const cancelChangeEmailBtn = root.querySelector('[data-action="cancel-change-email"]');
-    const submitChangeEmailBtn = root.querySelector('[data-action="submit-change-email"]');
-    const changeEmailForm = root.querySelector(".mf-settings-change-email-form");
-    const changeEmailInput = root.querySelector(".mf-settings-change-email-input");
-    const changeEmailStatus = root.querySelector(".mf-settings-change-email-status");
-    const changeEmailNotice = root.querySelector(".mf-settings-change-email-notice");
-    const setChangeEmailStatus = (text, kind) => {
-      if (!changeEmailStatus) return;
-      changeEmailStatus.textContent = text || "";
-      changeEmailStatus.className =
-        "mf-settings-change-email-status" +
-        (kind === "err" ? " mf-settings-change-email-status-err" : "") +
-        (kind === "ok" ? " mf-settings-change-email-status-ok" : "");
-    };
-    if (openChangeEmailBtn) {
-      openChangeEmailBtn.addEventListener("click", () => {
-        if (!root || !changeEmailForm) return;
-        changeEmailForm.classList.remove("mf-hidden");
-        if (changeEmailNotice) changeEmailNotice.classList.add("mf-hidden");
-        setChangeEmailStatus("", "");
-        if (changeEmailInput) {
-          changeEmailInput.value = "";
-          requestAnimationFrame(() => changeEmailInput.focus());
-        }
-      });
-    }
-    if (cancelChangeEmailBtn) {
-      cancelChangeEmailBtn.addEventListener("click", () => {
-        if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
-        if (changeEmailInput) changeEmailInput.value = "";
-        setChangeEmailStatus("", "");
-      });
-    }
-    const submitChangeEmail = async () => {
-      if (!(submitChangeEmailBtn instanceof HTMLButtonElement)) return;
-      const newEmail = String(changeEmailInput?.value || "").trim();
-      if (!newEmail) {
-        setChangeEmailStatus("Enter a new email address.", "err");
-        return;
-      }
-      const currentEmail = String(state.cloudUser?.email || "").trim();
-      if (currentEmail && newEmail.toLowerCase() === currentEmail.toLowerCase()) {
-        setChangeEmailStatus("Use a different email address.", "err");
-        return;
-      }
-      submitChangeEmailBtn.disabled = true;
-      setChangeEmailStatus("", "");
-      try {
-        const r = await sendExtensionMessage({ type: "MF_SUPABASE_CHANGE_EMAIL", email: newEmail });
-        if (!r?.ok) {
-          setChangeEmailStatus(r?.error || "Could not send confirmation email.", "err");
-          return;
-        }
-        if (changeEmailForm) changeEmailForm.classList.add("mf-hidden");
-        if (changeEmailInput) changeEmailInput.value = "";
-        if (changeEmailNotice) {
-          changeEmailNotice.textContent = "Check your new inbox for a confirmation link";
-          changeEmailNotice.classList.remove("mf-hidden");
-        }
-        startSettingsChangeEmailCooldown();
-      } catch (e) {
-        setChangeEmailStatus(String(e?.message || e || "Could not send confirmation email."), "err");
-      } finally {
-        submitChangeEmailBtn.disabled = false;
-      }
-    };
-    if (submitChangeEmailBtn) {
-      submitChangeEmailBtn.addEventListener("click", () => void submitChangeEmail());
-    }
-    if (changeEmailInput) {
-      changeEmailInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          void submitChangeEmail();
-        }
-      });
-    }
-    const upgradeBtn = root.querySelector('[data-action="upgrade-pro"]');
-    if (upgradeBtn) {
-      upgradeBtn.addEventListener("click", () => {
-        void startUpgradeCheckoutFlow();
-      });
-    }
-    const manageBillingBtn = root.querySelector('[data-action="manage-billing"]');
-    if (manageBillingBtn) {
-      manageBillingBtn.addEventListener("click", async () => {
-        const r = await sendExtensionMessage({ type: "MF_SUPABASE_GET_USER" });
-        const url = String(r?.user?.billingPortalUrl || "").trim() || "https://notch.video/billing";
-        window.open(url, "_blank", "noopener");
-      });
-    }
-
     const gateGoogle = root.querySelector('[data-action="gate-google-auth"]');
     if (gateGoogle) {
       gateGoogle.addEventListener("click", () => void submitGateGoogleAuth());
@@ -6205,24 +5898,6 @@
         if (e.key === "Enter") {
           e.preventDefault();
           void submitGateMagicLink();
-        }
-      });
-    }
-
-    const signOutBtn = root.querySelector('[data-action="sign-out"]');
-    if (signOutBtn) {
-      signOutBtn.addEventListener("click", async () => {
-        try {
-          await clearAllCollabHostBindings();
-          await sendExtensionMessage({ type: "MF_SUPABASE_SIGN_OUT" });
-          cloudAuthCacheValidUntil = 0;
-          lastTickSignature = "";
-          await refreshCloudUser(true);
-          await closeSettingsPanel({ persistGlobal: true });
-          showToast("Signed out.");
-          void tick();
-        } catch (e) {
-          showToast("Sign out failed — try again.");
         }
       });
     }

@@ -4,7 +4,7 @@
   "description": "",
   "main": "background.js",
   "scripts": {
-    "build": "npx esbuild src/sw-main.js --bundle --format=esm --outfile=background.js --platform=browser && npx esbuild src/auth-page.js --bundle --outfile=auth-page.js --format=iife --platform=browser",
+    "build": "npx esbuild src/sw-main.js --bundle --format=esm --outfile=background.js --platform=browser && npx esbuild src/auth-page.js --bundle --outfile=auth-page.js --format=iife --platform=browser && npx esbuild src/popup.js --bundle --outfile=popup.js --format=iife --platform=browser",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {

@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Notch</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div id="np-view-home">
+      <header class="np-header">
+        <div class="np-header-row">
+          <div class="np-wordmark" aria-label="Notch">Notch<span class="np-dot">.</span></div>
+          <button
+            type="button"
+            class="np-icon-btn np-hidden"
+            id="np-open-settings"
+            title="Settings"
+            aria-label="Settings"
+            hidden
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1Z"
+                stroke="currentColor"
+                stroke-width="1.25"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+        </div>
+        <div class="np-email np-hidden" id="np-email" hidden aria-live="polite"></div>
+      </header>
+
+      <main class="np-main" id="np-main">
+        <div class="np-loading" id="np-loading">Loading…</div>
+        <div id="np-home-skeleton" class="np-home-skeleton np-hidden" hidden aria-hidden="true">
+          <div class="np-skel-line np-skel-line--title"></div>
+          <div class="np-skel-line np-skel-line--sub"></div>
+          <div class="np-skel-card">
+            <div class="np-skel-thumb"></div>
+            <div class="np-skel-meta">
+              <div class="np-skel-line np-skel-line--sm"></div>
+              <div class="np-skel-line np-skel-line--md"></div>
+            </div>
+          </div>
+          <div class="np-skel-card">
+            <div class="np-skel-thumb"></div>
+            <div class="np-skel-meta">
+              <div class="np-skel-line np-skel-line--sm"></div>
+              <div class="np-skel-line np-skel-line--md"></div>
+            </div>
+          </div>
+        </div>
+        <div id="np-gate" class="np-gate-pane np-hidden" hidden>
+          <p class="np-gate-title" id="np-gate-title"></p>
+          <p class="np-gate-msg" id="np-gate-msg"></p>
+          <div id="np-gate-form" class="np-gate-form np-hidden" hidden>
+            <div class="np-gate-actions">
+              <button type="button" class="np-btn np-btn-primary np-gate-btn-google" id="np-gate-google">
+                Continue with Google
+              </button>
+            </div>
+            <div class="np-gate-or-wrap" aria-hidden="true">
+              <span class="np-gate-or-line"></span>
+              <span class="np-gate-or-label">or</span>
+              <span class="np-gate-or-line"></span>
+            </div>
+            <div class="np-gate-fields">
+              <label class="np-gate-label"
+                >Email
+                <input
+                  type="email"
+                  class="np-gate-input"
+                  id="np-gate-email"
+                  autocomplete="username"
+                  maxlength="320"
+                />
+              </label>
+            </div>
+            <p class="np-gate-status" id="np-gate-status" aria-live="polite"></p>
+            <div class="np-gate-actions">
+              <button type="button" class="np-btn np-gate-btn-magic-link" id="np-gate-magic-link">
+                Send magic link
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="np-empty" class="np-empty np-hidden" hidden>
+          <p>
+            No reviews yet. Open a YouTube, Vimeo, Loom, Google Drive, or Dropbox video and add a note.
+          </p>
+        </div>
+        <div id="np-error" class="np-center np-hidden" hidden>
+          <p id="np-error-text"></p>
+        </div>
+        <div id="np-reviews" class="np-hidden" hidden></div>
+      </main>
+    </div>
+
+    <div id="np-view-settings" class="np-hidden" hidden>
+      <header class="np-settings-header">
+        <button type="button" class="np-back-btn" id="np-settings-back">← Reviews</button>
+        <span class="np-settings-title">Settings</span>
+      </header>
+      <div class="np-settings-scroll">
+        <div id="np-settings-config-warn" class="np-banner np-hidden" hidden></div>
+
+        <section class="np-set-sec np-settings-signed-in">
+          <h3 class="np-set-h">Profile</h3>
+          <div class="np-profile-row">
+            <input
+              type="file"
+              id="np-profile-avatar-file"
+              class="np-file-hidden"
+              accept="image/*"
+              tabindex="-1"
+              aria-hidden="true"
+            />
+            <button type="button" class="np-avatar-btn" id="np-pick-profile-avatar" title="Change profile photo">
+              <img id="np-avatar-preview" class="np-avatar-preview np-hidden" alt="" />
+              <span id="np-avatar-fallback" class="np-avatar-fallback">N</span>
+            </button>
+            <div class="np-profile-fields">
+              <label class="np-label" for="np-display-name">Display name</label>
+              <input type="text" id="np-display-name" class="np-input" maxlength="80" autocomplete="nickname" spellcheck="false" />
+              <label class="np-label" for="np-company-name">Company / studio</label>
+              <input
+                type="text"
+                id="np-company-name"
+                class="np-input"
+                maxlength="120"
+                placeholder="Company / studio name"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+        </section>
+
+        <section class="np-set-sec">
+          <h3 class="np-set-h">Comments</h3>
+          <label class="np-label" for="np-timestamp-format">Timestamp format</label>
+          <select id="np-timestamp-format" class="np-select">
+            <option value="short">0:39</option>
+            <option value="long">00:00:39</option>
+          </select>
+        </section>
+
+        <section class="np-set-sec np-settings-signed-in">
+          <h3 class="np-set-h">Notifications <span class="np-pro-pill">Pro</span></h3>
+          <p class="np-set-sub">via email</p>
+          <label class="np-check np-pro-row" id="np-wrap-notify-comment">
+            <input type="checkbox" id="np-notify-comment" />
+            <span>Someone comments on my review</span>
+          </label>
+          <label class="np-check np-pro-row" id="np-wrap-notify-reaction">
+            <input type="checkbox" id="np-notify-reaction" />
+            <span>Someone reacts to my comment</span>
+          </label>
+          <label class="np-check np-pro-row" id="np-wrap-notify-reply">
+            <input type="checkbox" id="np-notify-reply" />
+            <span>Someone replies to my comment</span>
+          </label>
+        </section>
+
+        <section class="np-set-sec np-settings-signed-in">
+          <h3 class="np-set-h">PDF export <span class="np-pro-pill">Pro</span></h3>
+          <p class="np-set-sub">Company logo</p>
+          <input type="file" id="np-logo-file" class="np-file-hidden" accept="image/*" tabindex="-1" aria-hidden="true" />
+          <button type="button" class="np-logo-btn" id="np-pick-logo" aria-label="Upload company logo">
+            <img id="np-logo-preview" class="np-logo-preview np-hidden" alt="" />
+            <span id="np-logo-placeholder" class="np-logo-placeholder">Upload logo</span>
+          </button>
+        </section>
+
+        <section class="np-set-sec np-settings-signed-in">
+          <h3 class="np-set-h">Account</h3>
+          <div class="np-account-row">
+            <span id="np-account-email" class="np-account-email"></span>
+            <button type="button" class="np-link-btn" id="np-open-change-email">Change</button>
+          </div>
+          <div id="np-change-email-form" class="np-change-email-form np-hidden" hidden>
+            <input type="email" id="np-new-email" class="np-input" autocomplete="email" maxlength="320" placeholder="New email address" />
+            <div id="np-change-email-status" class="np-status" aria-live="polite"></div>
+            <div class="np-inline-actions">
+              <button type="button" class="np-btn np-btn-primary np-btn-sm" id="np-submit-change-email">Send confirmation</button>
+              <button type="button" class="np-link-btn" id="np-cancel-change-email">Cancel</button>
+            </div>
+          </div>
+          <div id="np-change-email-notice" class="np-notice np-hidden" hidden aria-live="polite"></div>
+        </section>
+
+        <section class="np-set-sec np-settings-signed-in">
+          <h3 class="np-set-h">Plan</h3>
+          <div class="np-plan-row">
+            <span>Current plan</span>
+            <span id="np-plan-badge" class="np-plan-badge">Free</span>
+          </div>
+          <button type="button" class="np-btn np-btn-primary np-btn-block" id="np-upgrade-pro">Upgrade to Pro</button>
+          <button type="button" class="np-btn np-btn-ghost np-btn-block np-hidden" id="np-manage-billing" hidden>
+            Manage billing
+          </button>
+          <div id="np-upgrade-status" class="np-status np-muted np-hidden" hidden aria-live="polite"></div>
+        </section>
+
+        <section class="np-set-sec np-settings-signed-in np-set-sec--danger">
+          <button type="button" class="np-link-btn np-link-btn-block" id="np-sign-out">Sign out</button>
+          <button type="button" class="np-link-btn np-link-danger np-link-btn-block" id="np-delete-account">
+            Delete account
+          </button>
+        </section>
+      </div>
+    </div>
+
+    <div id="np-toast" class="np-toast np-hidden" hidden role="status" aria-live="polite"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

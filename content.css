@@ -452,6 +452,13 @@
   font-size: 10px;
   color: rgba(255, 255, 255, 0.35);
 }
+#markframe-root .mf-settings-popup-hint {
+  margin: 0 0 8px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--mf-text-muted);
+}
 #markframe-root .mf-settings-profile-row,
 #markframe-root .mf-settings-row,
 #markframe-root .mf-settings-account-actions,
@@ -2118,14 +2125,6 @@
   justify-content: center;
   padding: 18px 14px 20px;
   gap: 10px;
-}
-
-#markframe-root .mf-gate-brand {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  color: var(--mf-accent);
-  margin: 0 0 4px;
 }
 
 #markframe-root .mf-gate-title {

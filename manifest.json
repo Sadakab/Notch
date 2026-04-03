@@ -9,7 +9,8 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "Toggle Notch sidebar",
+    "default_title": "Notch",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
