@@ -26455,14 +26455,6 @@
             n3 = d(unescape(encodeURIComponent(r3)));
           }
           return "data:application/pdf;filename=" + e3.filename + ";base64," + n3;
-        case "pdfobjectnewwindow":
-          if ("[object Window]" === Object.prototype.toString.call(i2)) {
-            var a4 = "https://cdnjs.cloudflare.com/ajax/libs/pdfobject/2.1.1/pdfobject.min.js", s4 = ' integrity="sha512-4ze/a9/4jqu+tX9dfOqJYSvyYd5M6qum/3HpCLr+/Jqf0whc37VUbkpNGHR7/8pSnCFw47T1fmIpwBV7UySh3g==" crossorigin="anonymous"';
-            e3.pdfObjectUrl && (a4 = e3.pdfObjectUrl, s4 = "");
-            var u4 = '<html><style>html, body { padding: 0; margin: 0; } iframe { width: 100%; height: 100%; border: 0;}  </style><body><script src="' + a4 + '"' + s4 + '><\/script><script >PDFObject.embed("' + this.output("dataurlstring") + '", ' + JSON.stringify(e3) + ");<\/script></body></html>", c5 = i2.open();
-            return null !== c5 && c5.document.write(u4), c5;
-          }
-          throw new Error("The option pdfobjectnewwindow just works in a browser-environment.");
         case "pdfjsnewwindow":
           if ("[object Window]" === Object.prototype.toString.call(i2)) {
             var l3 = '<html><style>html, body { padding: 0; margin: 0; } iframe { width: 100%; height: 100%; border: 0;}  </style><body><iframe id="pdfViewer" src="' + (e3.pdfJsUrl || "examples/PDF.js/web/viewer.html") + "?file=&downloadName=" + e3.filename + '" width="500px" height="400px" /></body></html>', h3 = i2.open();
