@@ -4,7 +4,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./supabase-config.js";
 
 const AUTH_STORAGE_KEY = "sb-notch-auth";
 const AUTH_STATE_KEY = "markframe_auth_state";
-const AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
+const AUTH_CONFIRM_URL = `https://notch.video/auth/confirm.html?extid=${chrome.runtime.id}`;
 
 const CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
 

@@ -3,6 +3,23 @@
 
   if (window !== window.top) return;
 
+  /** Captured at script init before host SPAs (e.g. YouTube) can strip query params. */
+  const HAD_NOTCH_REVIEW_PARAM = new URL(location.href).searchParams.has("notch_review");
+
+  /** Skip next N YouTube SPA pipeline resyncs after pending share load so shared state is not wiped. */
+  let pendingSharedReviewResyncSkipsRemaining = 0;
+
+  const existingExtensionMarker = document.getElementById("notch-extension-present");
+  if (existingExtensionMarker) {
+    existingExtensionMarker.dataset.extensionId = chrome.runtime.id;
+  } else {
+    const el = document.createElement("div");
+    el.id = "notch-extension-present";
+    el.hidden = true;
+    el.dataset.extensionId = chrome.runtime.id;
+    (document.documentElement || document.body || document).appendChild(el);
+  }
+
   const ACCENT = "#00E5FF";
   /** Set true to show Draw / color / save, overlay canvas, and drawing thumbnails. */
   const FEATURE_DRAWING = false;
@@ -787,10 +804,52 @@
   }
 
   function hasNotchReviewUrlParam() {
+    return HAD_NOTCH_REVIEW_PARAM;
+  }
+
+  async function loadPendingSharedReviewFromStorage() {
+    console.log(
+      "[Notch debug] loadPendingSharedReviewFromStorage HAD_NOTCH_REVIEW_PARAM",
+      HAD_NOTCH_REVIEW_PARAM
+    );
+    const got = await safeStorageLocalGet("notch_pending_share");
+    console.log(
+      "[Notch debug] loadPendingSharedReviewFromStorage notch_pending_share (always, full storage get)",
+      got?.notch_pending_share,
+      got
+    );
+    if (!HAD_NOTCH_REVIEW_PARAM) return;
+    const pending = got?.notch_pending_share;
+    const uid = String(pending?.uid || "").trim();
+    const platform = String(pending?.platform || "").trim();
+    const clip = pending?.clip != null ? String(pending.clip) : "";
+    if (!uid || !platform || !clip) return;
     try {
-      return new URL(location.href).searchParams.has(URL_PARAM_NOTCH_REVIEW);
-    } catch {
-      return false;
+      const loadMsg = {
+        action: "load-shared-review",
+        uid,
+        platform,
+        clip,
+      };
+      console.log(
+        "[Notch debug] loadPendingSharedReviewFromStorage sending load-shared-review",
+        loadMsg
+      );
+      const loadResp = await sendExtensionMessage(loadMsg);
+      console.log(
+        "[Notch debug] loadPendingSharedReviewFromStorage load-shared-review response",
+        JSON.stringify(loadResp)
+      );
+      if (loadResp && loadResp.ok === true) {
+        pendingSharedReviewResyncSkipsRemaining = 2;
+      }
+    } catch (e) {
+      console.log(
+        "[Notch debug] loadPendingSharedReviewFromStorage load-shared-review error (no response)",
+        e
+      );
+    } finally {
+      await safeStorageLocalRemove(["notch_pending_share"]);
     }
   }
 
@@ -6890,6 +6949,7 @@
         platform: String(r.platform),
         clip: String(r.clipId),
       });
+      qs.set("extid", chrome.runtime.id);
       const url = `https://notch.video/review?${qs.toString()}`;
       try {
         await navigator.clipboard.writeText(url);
@@ -7430,6 +7490,10 @@
    */
   function scheduleYoutubeWatchPipelineResync() {
     if (!isYoutubeSite()) return;
+    if (pendingSharedReviewResyncSkipsRemaining > 0) {
+      pendingSharedReviewResyncSkipsRemaining--;
+      return;
+    }
     console.log("pipeline resync scheduled", location.href);
     lastTickSignature = "";
     clearState1TitleRetryPoll();
@@ -7587,5 +7651,6 @@
   });
 
   startUrlWatcher();
+  void loadPendingSharedReviewFromStorage();
   void tick();
 })();

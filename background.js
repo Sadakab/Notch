@@ -18894,7 +18894,7 @@ var init_sw_cloud = __esm({
     init_supabase_config();
     AUTH_STORAGE_KEY = "sb-notch-auth";
     AUTH_STATE_KEY = "markframe_auth_state";
-    AUTH_CONFIRM_URL = "https://notch.so/auth/confirm";
+    AUTH_CONFIRM_URL = `https://notch.video/auth/confirm.html?extid=${chrome.runtime.id}`;
     CLIP_PLATFORMS = ["youtube", "vimeo", "loom", "googledrive", "dropbox"];
     PREFERENCE_DEFAULTS = {
       displayName: "",
@@ -18994,6 +18994,7 @@ var require_sw_main = __commonJS({
       );
     }
     var NOTCH_SHARED_REVIEW_STORAGE_KEY = "notch_shared_review";
+    var NOTCH_PENDING_SHARE_STORAGE_KEY = "notch_pending_share";
     function buildWatchUrlForSharedReview(platform, clipIdRaw) {
       if (clipIdRaw == null) return "";
       const clipId = String(clipIdRaw);
@@ -19101,11 +19102,12 @@ var require_sw_main = __commonJS({
       for (let i = 0; i < 25; i++) {
         try {
           await sendOnce();
-          return;
+          return true;
         } catch {
           await new Promise((r) => setTimeout(r, 400));
         }
       }
+      return false;
     }
     function sendCloudFallback(msg, sendResponse) {
       if (!sendResponse) return;
@@ -19193,6 +19195,28 @@ var require_sw_main = __commonJS({
       void syncAuthMarkerFromChromeStorage();
     });
     chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
+      if (msg?.type === "NOTCH_STORE_PENDING_SHARE") {
+        console.log("NOTCH_STORE_PENDING_SHARE received", {
+          uid: msg?.uid,
+          platform: msg?.platform,
+          clip: msg?.clip
+        });
+        const uidRaw2 = msg.uid;
+        const platformRaw2 = msg.platform;
+        const clipRaw2 = msg.clip;
+        if (uidRaw2 == null || String(uidRaw2).trim() === "" || platformRaw2 == null || String(platformRaw2).trim() === "" || clipRaw2 == null || String(clipRaw2).trim() === "") {
+          sendResponse({ ok: false, error: "invalid_args" });
+          return false;
+        }
+        const pending = {
+          uid: String(uidRaw2).trim(),
+          platform: String(platformRaw2).trim(),
+          clip: String(clipRaw2),
+          receivedAt: Date.now()
+        };
+        void chrome.storage.local.set({ [NOTCH_PENDING_SHARE_STORAGE_KEY]: pending }).then(() => sendResponse({ ok: true })).catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+        return true;
+      }
       if (msg && typeof msg === "object" && msg.session) {
         void (async () => {
           try {
@@ -19226,6 +19250,11 @@ var require_sw_main = __commonJS({
       };
       void (async () => {
         try {
+          console.log("[Notch debug] load-shared-review (external) received", {
+            uid: stored.uid,
+            platform: stored.platform,
+            clip: stored.clip
+          });
           await chrome.storage.local.set({ [NOTCH_SHARED_REVIEW_STORAGE_KEY]: stored });
           try {
             if (typeof chrome.action?.openPopup === "function") {
@@ -19234,19 +19263,93 @@ var require_sw_main = __commonJS({
           } catch {
           }
           const tabId = await findOrOpenTabForSharedReview(stored.platform, stored.clip);
-          if (tabId != null) {
-            await dispatchOpenSharedReviewToTab(tabId, internal);
-          }
-          chrome.runtime.sendMessage(internal).catch(() => {
+          console.log("[Notch debug] load-shared-review (external) tab lookup", {
+            tabId: tabId ?? null,
+            foundOrOpened: tabId != null
           });
+          if (tabId != null) {
+            const delivered = await dispatchOpenSharedReviewToTab(tabId, internal);
+            if (delivered) {
+              console.log(
+                "[Notch debug] load-shared-review (external) dispatchOpenSharedReviewToTab finished",
+                { tabId }
+              );
+            } else {
+              console.log(
+                "[Notch debug] load-shared-review (external) dispatchOpenSharedReviewToTab failed after retries",
+                { tabId }
+              );
+            }
+          } else {
+            console.log(
+              "[Notch debug] load-shared-review (external) no injectable tab; skipped tab dispatch"
+            );
+          }
+          try {
+            await chrome.runtime.sendMessage(internal);
+            console.log("[Notch debug] load-shared-review (external) chrome.runtime.sendMessage OK");
+          } catch (e) {
+            console.log(
+              "[Notch debug] load-shared-review (external) chrome.runtime.sendMessage failed",
+              String(e?.message || e)
+            );
+          }
           sendResponse({ ok: true, tabId: tabId ?? null });
         } catch (e) {
+          console.log(
+            "[Notch debug] load-shared-review (external) handler error",
+            String(e?.message || e)
+          );
           sendResponse({ ok: false, error: String(e?.message || e) });
         }
       })();
       return true;
     });
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg?.action === "load-shared-review") {
+        const uidRaw = msg.uid;
+        const platformRaw = msg.platform;
+        const clipRaw = msg.clip;
+        if (uidRaw == null || String(uidRaw).trim() === "" || platformRaw == null || String(platformRaw).trim() === "" || clipRaw == null || String(clipRaw).trim() === "") {
+          sendResponse({ ok: false, error: "invalid_args" });
+          return false;
+        }
+        const internal = {
+          action: "open-shared-review",
+          uid: String(uidRaw).trim(),
+          platform: String(platformRaw).trim(),
+          clip: String(clipRaw)
+        };
+        const senderTabId = sender?.tab?.id;
+        if (senderTabId == null) {
+          console.log("[Notch debug] load-shared-review (internal) missing sender.tab.id");
+          sendResponse({ ok: false, error: "no_sender_tab" });
+          return false;
+        }
+        void (async () => {
+          console.log("[Notch debug] load-shared-review (internal) received", {
+            uid: internal.uid,
+            platform: internal.platform,
+            clip: internal.clip,
+            senderTabId
+          });
+          console.log(
+            "[Notch debug] load-shared-review (internal) sending open-shared-review via chrome.tabs.sendMessage",
+            { senderTabId }
+          );
+          const delivered = await dispatchOpenSharedReviewToTab(senderTabId, internal);
+          if (delivered) {
+            console.log("[Notch debug] load-shared-review (internal) chrome.tabs.sendMessage OK");
+            sendResponse({ ok: true });
+          } else {
+            console.log(
+              "[Notch debug] load-shared-review (internal) chrome.tabs.sendMessage failed after retries"
+            );
+            sendResponse({ ok: false, error: "tab_message_failed" });
+          }
+        })();
+        return true;
+      }
       if (msg?.type === "NOTCH_OPEN_VIDEO_TAB") {
         const platform = msg.platform;
         const clipId = msg.clipId;

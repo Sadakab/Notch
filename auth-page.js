@@ -17409,7 +17409,7 @@ ${suffix}`;
       init_supabase_client_key();
       init_supabase_config();
       var AUTH_STORAGE_KEY = "sb-notch-auth";
-      var AUTH_CONFIRM_URL = window.location.hostname === "localhost" ? "http://localhost:3000/auth/confirm.html" : "https://notch.video/auth/confirm.html";
+      var AUTH_CONFIRM_URL = `https://notch.video/auth/confirm.html?extid=${chrome.runtime.id}`;
       var MAGIC_LINK_COOLDOWN_SECONDS = 60;
       function createChromeStorageAdapter() {
         return {
@@ -17557,6 +17557,24 @@ ${suffix}`;
           } catch (_) {
           }
           await refreshUi();
+        });
+        window.addEventListener("message", (event) => {
+          if (event.origin !== "https://notch.video") return;
+          if (!event.data || event.data.type !== "NOTCH_SESSION") return;
+          const session = event.data.session;
+          const accessToken = String(session?.access_token || session?.accessToken || "").trim();
+          const refreshToken = String(session?.refresh_token || session?.refreshToken || "").trim();
+          if (!accessToken || !refreshToken) return;
+          void supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken
+          }).then(async () => {
+            try {
+              await chrome.runtime.sendMessage({ type: "MF_AUTH_CHANGED" });
+            } catch (_) {
+            }
+            await refreshUi();
+          });
         });
         void refreshUi();
       }
