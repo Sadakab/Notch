@@ -672,7 +672,6 @@
     if (!force && now < cloudAuthCacheValidUntil) {
       state.cloudUser = cloudAuthCachedUser;
       refreshProGatedToolbar();
-      console.log("[Notch debug] refreshCloudUser result (cache hit)", state.cloudUser);
       return;
     }
     try {
@@ -699,7 +698,6 @@
       state.cloudUser = null;
       cloudAuthCacheValidUntil = 0;
     }
-    console.log("[Notch debug] refreshCloudUser result", state.cloudUser);
     refreshProGatedToolbar();
   }
 
@@ -808,16 +806,7 @@
   }
 
   async function loadPendingSharedReviewFromStorage() {
-    console.log(
-      "[Notch debug] loadPendingSharedReviewFromStorage HAD_NOTCH_REVIEW_PARAM",
-      HAD_NOTCH_REVIEW_PARAM
-    );
     const got = await safeStorageLocalGet("notch_pending_share");
-    console.log(
-      "[Notch debug] loadPendingSharedReviewFromStorage notch_pending_share (always, full storage get)",
-      got?.notch_pending_share,
-      got
-    );
     if (!HAD_NOTCH_REVIEW_PARAM) return;
     const pending = got?.notch_pending_share;
     const uid = String(pending?.uid || "").trim();
@@ -831,23 +820,11 @@
         platform,
         clip,
       };
-      console.log(
-        "[Notch debug] loadPendingSharedReviewFromStorage sending load-shared-review",
-        loadMsg
-      );
       const loadResp = await sendExtensionMessage(loadMsg);
-      console.log(
-        "[Notch debug] loadPendingSharedReviewFromStorage load-shared-review response",
-        JSON.stringify(loadResp)
-      );
       if (loadResp && loadResp.ok === true) {
         pendingSharedReviewResyncSkipsRemaining = 2;
       }
-    } catch (e) {
-      console.log(
-        "[Notch debug] loadPendingSharedReviewFromStorage load-shared-review error (no response)",
-        e
-      );
+    } catch {
     } finally {
       await safeStorageLocalRemove(["notch_pending_share"]);
     }
@@ -863,37 +840,21 @@
     const shellUnlocked = opts?.shellUnlocked === true;
     const autoShowSidebar = await loadAutoShowSidebarSetting();
     const sessionStorageHideKey = sessionStorage.getItem(SESSION_KEY_SIDEBAR_HIDDEN);
-    const logResolve = (returnValue) => {
-      console.log("[Notch debug] resolveEffectiveSidebarVisible", {
-        returnValue,
-        globalPanelStateIsVisible: globalPanelState.isVisible,
-        baseVisible,
-        sessionStorageHideKey,
-        autoShowSidebar,
-      });
-    };
     if (guestInvite) {
-      const out = !!baseVisible && hasClip;
-      logResolve(out);
-      return out;
+      return !!baseVisible && hasClip;
     }
     if (!shellUnlocked || !hasClip) {
-      logResolve(false);
       return false;
     }
     if (sessionStorageHideKey === "true" && !hasNotchReviewUrlParam()) {
-      logResolve(false);
       return false;
     }
     const popupOpen = sessionStorage.getItem(SESSION_KEY_SIDEBAR_POPUP_OPEN) === "1";
     const urlForce = hasNotchReviewUrlParam();
     if (!autoShowSidebar && !popupOpen && !urlForce) {
-      logResolve(false);
       return false;
     }
-    const out = !!baseVisible;
-    logResolve(out);
-    return out;
+    return !!baseVisible;
   }
 
   function isCloudActive() {
@@ -2624,14 +2585,6 @@
     const trimmedCandidate = preferredClipTitleCandidate(liveTitle, storedTitle);
     const resolved = !!trimmedCandidate && !isGenericDisplayTitle(trimmedCandidate);
     const text = trimmedCandidate || defaultClipDisplayTitle(clip);
-    console.log("watchTitleResolvedParts", {
-      text,
-      resolved,
-      liveTitle,
-      storedTitle,
-      trimmedCandidate,
-      clipId: clip?.clipId,
-    });
     return { text, resolved };
   }
 
@@ -2701,11 +2654,6 @@
       if (!state1TitleRetryPollClipStillActive(clip)) return;
 
       const parts = await watchTitleResolvedParts(clip);
-      console.log("[Notch title poll] pollState1TitleRetryTick", {
-        retryCount: state1TitleRetryCount,
-        title: parts.text,
-        resolved: parts.resolved,
-      });
       if (!state1TitleRetryPollClipStillActive(clip)) return;
 
       if (parts.resolved) {
@@ -2716,10 +2664,6 @@
       state1TitleRetryCount++;
       if (state1TitleRetryCount >= STATE1_TITLE_POLL_MAX_RETRIES) {
         if (!state1TitleRetryPollClipStillActive(clip)) return;
-        console.log("[Notch title poll] pollState1TitleRetryTick max retries", {
-          retryCount: state1TitleRetryCount,
-          title: parts.text,
-        });
         await refreshWatchVideoTitle(clip, { forceStartTitleResolved: true });
         clearState1TitleRetryPoll();
         return;
@@ -2741,19 +2685,12 @@
     try {
       clearState1TitleRetryPoll();
       if (!root || !clip) {
-        console.log("[Notch title poll] maybeStartState1TitleRetryPoll skipped", { reason: "!root || !clip" });
         return;
       }
       if (!sidebarState1StartReview(clip)) {
-        console.log("[Notch title poll] maybeStartState1TitleRetryPoll skipped", { reason: "!sidebarState1StartReview" });
         return;
       }
       const initialParts = await watchTitleResolvedParts(clip);
-      console.log("[Notch title poll] maybeStartState1TitleRetryPoll", {
-        retryCount: state1TitleRetryCount,
-        title: initialParts.text,
-        resolved: initialParts.resolved,
-      });
       if (initialParts.resolved) return;
       state1TitleRetryClipStorageKey = clip.storageKey;
       state1TitleRetryCount = 0;
@@ -3821,11 +3758,6 @@
                 void tick();
               }, 500);
             }
-            console.log("[Notch debug] loadClipData result", {
-              rOk: r?.ok,
-              rRecord: r?.record,
-              noOwnerReviewRow: state.noOwnerReviewRow,
-            });
             return;
           }
           await removeLocalClipCacheKeys(clip);
@@ -3836,11 +3768,6 @@
           notchLog("loadClipData cloud: no row — cleared local cache, empty comments", {
             key,
             sharedReviewTarget,
-          });
-          console.log("[Notch debug] loadClipData result", {
-            rOk: r?.ok,
-            rRecord: r?.record,
-            noOwnerReviewRow: state.noOwnerReviewRow,
           });
           return;
         }
@@ -3868,22 +3795,12 @@
         notchLog("loadClipData applied from cloud", { commentCount: state.comments.length });
         invalidateReactionPublicNamesCache();
         scheduleReactionPublicNamesRefresh();
-        console.log("[Notch debug] loadClipData result", {
-          rOk: r?.ok,
-          rRecord: r?.record,
-          noOwnerReviewRow: state.noOwnerReviewRow,
-        });
         return;
       }
       state.comments = [];
       normalizeCommentsShape();
       showToast("Could not load notes from the cloud. Check your connection and try again.");
       notchLog("loadClipData cloud fetch failed — not using local clip cache");
-      console.log("[Notch debug] loadClipData result", {
-        rOk: r?.ok,
-        rRecord: r?.record,
-        noOwnerReviewRow: state.noOwnerReviewRow,
-      });
       return;
     }
 
@@ -3918,11 +3835,6 @@
           invalidateReactionPublicNamesCache();
           scheduleReactionPublicNamesRefresh();
           notchLog("loadClipData guest cloud ok", { commentCount: state.comments.length });
-          console.log("[Notch debug] loadClipData result", {
-            rOk: r?.ok,
-            rRecord: r?.record,
-            noOwnerReviewRow: state.noOwnerReviewRow,
-          });
           return;
         }
         if (r?.ok === true && r.record == null) {
@@ -3936,31 +3848,16 @@
               void tick();
             }, 500);
           }
-          console.log("[Notch debug] loadClipData result", {
-            rOk: r?.ok,
-            rRecord: r?.record,
-            noOwnerReviewRow: state.noOwnerReviewRow,
-          });
           return;
         }
         state.comments = [];
         normalizeCommentsShape();
         showToast("Could not load this shared review. Check your connection.");
-        console.log("[Notch debug] loadClipData result", {
-          rOk: r?.ok,
-          rRecord: r?.record,
-          noOwnerReviewRow: state.noOwnerReviewRow,
-        });
         return;
       }
       state.comments = [];
       normalizeCommentsShape();
       notchLog("loadClipData: Supabase configured but not signed in — skip local clip cache");
-      console.log("[Notch debug] loadClipData result", {
-        rOk: undefined,
-        rRecord: undefined,
-        noOwnerReviewRow: state.noOwnerReviewRow,
-      });
       return;
     }
 
@@ -3989,11 +3886,6 @@
     invalidateReactionPublicNamesCache();
     scheduleReactionPublicNamesRefresh();
     notchLog("loadClipData end (local)", { commentCount: state.comments.length });
-    console.log("[Notch debug] loadClipData result", {
-      rOk: undefined,
-      rRecord: undefined,
-      noOwnerReviewRow: state.noOwnerReviewRow,
-    });
   }
 
   /**
@@ -7300,17 +7192,6 @@
       !guestAuthRouteGate;
     const shellUnlocked = unlocked || guestUnlocked;
 
-    console.log(
-      "[Notch debug] tickInner: shellUnlocked=" +
-        shellUnlocked +
-        " cloudUser=" +
-        !!state.cloudUser +
-        " clip=" +
-        !!clip +
-        " supabaseConfigured=" +
-        supabaseConfigured
-    );
-
     const mount = document.body || document.documentElement;
     if (!mount) return;
 
@@ -7494,7 +7375,6 @@
       pendingSharedReviewResyncSkipsRemaining--;
       return;
     }
-    console.log("pipeline resync scheduled", location.href);
     lastTickSignature = "";
     clearState1TitleRetryPoll();
     activeClipStorageKey = null;
@@ -7518,12 +7398,10 @@
     };
     setInterval(check, 800);
     const onYtNavigateFinish = () => {
-      console.log("yt-navigate-finish fired", location.href);
       last = location.href;
       scheduleYoutubeWatchPipelineResync();
     };
     const onYtPageDataUpdated = () => {
-      console.log("yt-page-data-updated fired", location.href);
       last = location.href;
       scheduleYoutubeWatchPipelineResync();
     };

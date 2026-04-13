@@ -19196,11 +19196,6 @@ var require_sw_main = __commonJS({
     });
     chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
       if (msg?.type === "NOTCH_STORE_PENDING_SHARE") {
-        console.log("NOTCH_STORE_PENDING_SHARE received", {
-          uid: msg?.uid,
-          platform: msg?.platform,
-          clip: msg?.clip
-        });
         const uidRaw2 = msg.uid;
         const platformRaw2 = msg.platform;
         const clipRaw2 = msg.clip;
@@ -19250,11 +19245,6 @@ var require_sw_main = __commonJS({
       };
       void (async () => {
         try {
-          console.log("[Notch debug] load-shared-review (external) received", {
-            uid: stored.uid,
-            platform: stored.platform,
-            clip: stored.clip
-          });
           await chrome.storage.local.set({ [NOTCH_SHARED_REVIEW_STORAGE_KEY]: stored });
           try {
             if (typeof chrome.action?.openPopup === "function") {
@@ -19263,43 +19253,15 @@ var require_sw_main = __commonJS({
           } catch {
           }
           const tabId = await findOrOpenTabForSharedReview(stored.platform, stored.clip);
-          console.log("[Notch debug] load-shared-review (external) tab lookup", {
-            tabId: tabId ?? null,
-            foundOrOpened: tabId != null
-          });
           if (tabId != null) {
-            const delivered = await dispatchOpenSharedReviewToTab(tabId, internal);
-            if (delivered) {
-              console.log(
-                "[Notch debug] load-shared-review (external) dispatchOpenSharedReviewToTab finished",
-                { tabId }
-              );
-            } else {
-              console.log(
-                "[Notch debug] load-shared-review (external) dispatchOpenSharedReviewToTab failed after retries",
-                { tabId }
-              );
-            }
-          } else {
-            console.log(
-              "[Notch debug] load-shared-review (external) no injectable tab; skipped tab dispatch"
-            );
+            await dispatchOpenSharedReviewToTab(tabId, internal);
           }
           try {
             await chrome.runtime.sendMessage(internal);
-            console.log("[Notch debug] load-shared-review (external) chrome.runtime.sendMessage OK");
-          } catch (e) {
-            console.log(
-              "[Notch debug] load-shared-review (external) chrome.runtime.sendMessage failed",
-              String(e?.message || e)
-            );
+          } catch {
           }
           sendResponse({ ok: true, tabId: tabId ?? null });
         } catch (e) {
-          console.log(
-            "[Notch debug] load-shared-review (external) handler error",
-            String(e?.message || e)
-          );
           sendResponse({ ok: false, error: String(e?.message || e) });
         }
       })();
@@ -19322,29 +19284,14 @@ var require_sw_main = __commonJS({
         };
         const senderTabId = sender?.tab?.id;
         if (senderTabId == null) {
-          console.log("[Notch debug] load-shared-review (internal) missing sender.tab.id");
           sendResponse({ ok: false, error: "no_sender_tab" });
           return false;
         }
         void (async () => {
-          console.log("[Notch debug] load-shared-review (internal) received", {
-            uid: internal.uid,
-            platform: internal.platform,
-            clip: internal.clip,
-            senderTabId
-          });
-          console.log(
-            "[Notch debug] load-shared-review (internal) sending open-shared-review via chrome.tabs.sendMessage",
-            { senderTabId }
-          );
           const delivered = await dispatchOpenSharedReviewToTab(senderTabId, internal);
           if (delivered) {
-            console.log("[Notch debug] load-shared-review (internal) chrome.tabs.sendMessage OK");
             sendResponse({ ok: true });
           } else {
-            console.log(
-              "[Notch debug] load-shared-review (internal) chrome.tabs.sendMessage failed after retries"
-            );
             sendResponse({ ok: false, error: "tab_message_failed" });
           }
         })();
