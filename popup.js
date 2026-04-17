@@ -772,9 +772,34 @@
         });
         document.getElementById("np-upgrade-pro")?.addEventListener("click", () => void startUpgradeCheckoutFlow());
         document.getElementById("np-manage-billing")?.addEventListener("click", async () => {
-          const r = await sendMessage("MF_SUPABASE_GET_USER");
-          const url = String(r?.user?.billingPortalUrl || "").trim() || "https://notch.video/billing";
-          void chrome.tabs.create({ url, active: true });
+          let storageSession = null;
+          try {
+            const authBlob = await chrome.storage.local.get("sb-notch-auth");
+            const raw = authBlob?.["sb-notch-auth"];
+            if (typeof raw === "string") storageSession = JSON.parse(raw);
+            else if (raw && typeof raw === "object") storageSession = raw;
+          } catch {
+            storageSession = null;
+          }
+          const userId = String(storageSession?.user?.id || "").trim() || String(settingsSession.user?.id || "").trim();
+          if (!userId) {
+            showToast("Please sign in first.");
+            return;
+          }
+          try {
+            const resp = await fetch("https://notch.video/.netlify/functions/create-portal-session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ userId })
+            });
+            if (!resp.ok) throw new Error(String(resp.status || "portal_failed"));
+            const data = await resp.json();
+            const portalUrl = String(data?.portalUrl || data?.url || "").trim();
+            if (!portalUrl) throw new Error("missing_portal_url");
+            void chrome.tabs.create({ url: portalUrl, active: true });
+          } catch {
+            showToast("Could not open billing.");
+          }
         });
         document.getElementById("np-sign-out")?.addEventListener("click", async () => {
           try {
