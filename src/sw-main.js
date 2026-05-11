@@ -224,6 +224,113 @@ async function dispatchOpenSharedReviewToTab(tabId, payload) {
   return false;
 }
 
+const POPUP_TYPES = new Set([
+  "MF_SUPABASE_CONFIG",
+  "MF_OPEN_TAB",
+  "NOTCH_OPEN_VIDEO_TAB",
+  "NOTCH_SET_GLOBAL_STATE",
+  "FETCH_VIMEO_OEMBED_THUMB",
+  "FETCH_LOOM_OEMBED_THUMB",
+  ...CLOUD_TYPES,
+]);
+
+/** Handles message types originating from the popup (internal or hosted iframe via onMessageExternal). */
+function handlePopupMessage(msg, sendResponse, sender) {
+  const type = msg?.type;
+
+  if (type === "NOTCH_OPEN_VIDEO_TAB") {
+    const platform = msg.platform;
+    const clipId = msg.clipId;
+    if (platform == null || String(platform).trim() === "" || clipId == null || String(clipId) === "") {
+      sendResponse({ ok: false, error: "invalid_args" });
+      return false;
+    }
+    void (async () => {
+      try {
+        const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId), { revealSidebar: true });
+        sendResponse({ ok: true, tabId: tabId ?? null });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "MF_OPEN_TAB") {
+    const url = String(msg.url || "").trim();
+    if (!url || !isInjectableUrl(url)) {
+      sendResponse({ ok: false, error: "invalid_url" });
+      return false;
+    }
+    void chrome.tabs
+      .create({ url, active: true })
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+
+  if (type === "NOTCH_SET_GLOBAL_STATE") {
+    void (async () => {
+      try {
+        const next = await setGlobalNotchStatePatch(msg.patch || {});
+        await broadcastNotchStateUpdate(next);
+        sendResponse({ ok: true, state: next });
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e?.message || e) });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {
+    const watchUrl = "https://vimeo.com/" + encodeURIComponent(String(msg.clipId));
+    const api = "https://vimeo.com/api/oembed.json?url=" + encodeURIComponent(watchUrl) + "&width=640";
+    fetch(api)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((j) => {
+        const thumbnailUrl =
+          j && typeof j.thumbnail_url === "string" && j.thumbnail_url.startsWith("http")
+            ? j.thumbnail_url
+            : null;
+        sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
+      })
+      .catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
+    return true;
+  }
+
+  if (type === "FETCH_LOOM_OEMBED_THUMB" && msg.clipId) {
+    const shareUrl = "https://www.loom.com/share/" + encodeURIComponent(String(msg.clipId).toLowerCase());
+    const api = "https://www.loom.com/v1/oembed?format=json&url=" + encodeURIComponent(shareUrl);
+    fetch(api)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+      .then((j) => {
+        const thumbnailUrl =
+          j && typeof j.thumbnail_url === "string" && j.thumbnail_url.startsWith("http")
+            ? j.thumbnail_url
+            : null;
+        sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
+      })
+      .catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
+    return true;
+  }
+
+  if (type === "MF_SUPABASE_CONFIG") {
+    sendResponse({ ok: true, configured: isSupabaseConfigured(), url: SUPABASE_URL || "" });
+    return false;
+  }
+
+  if (CLOUD_TYPES.has(type)) {
+    try {
+      return handleRuntimeMessage(msg, sendResponse, sender ?? null);
+    } catch (e) {
+      sendCloudFallback(msg, sendResponse);
+      return false;
+    }
+  }
+
+  return false;
+}
+
 function sendCloudFallback(msg, sendResponse) {
   if (!sendResponse) return;
   const t = msg?.type;
@@ -355,6 +462,7 @@ chrome.runtime.onMessageExternal.addListener((msg, _sender, sendResponse) => {
     })();
     return true;
   }
+  if (POPUP_TYPES.has(msg?.type)) return handlePopupMessage(msg, sendResponse);
   if (msg?.action !== "load-shared-review") return false;
   const uidRaw = msg.uid;
   const platformRaw = msg.platform;
@@ -446,84 +554,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === "NOTCH_OPEN_VIDEO_TAB") {
-    const platform = msg.platform;
-    const clipId = msg.clipId;
-    if (platform == null || String(platform).trim() === "" || clipId == null || String(clipId) === "") {
-      sendResponse({ ok: false, error: "invalid_args" });
-      return false;
-    }
-    void (async () => {
-      try {
-        const tabId = await findOrOpenTabForSharedReview(String(platform).trim(), String(clipId), {
-          revealSidebar: true,
-        });
-        sendResponse({ ok: true, tabId: tabId ?? null });
-      } catch (e) {
-        sendResponse({ ok: false, error: String(e?.message || e) });
-      }
-    })();
-    return true;
-  }
-
-  if (msg?.type === "MF_OPEN_TAB") {
-    const url = String(msg.url || "").trim();
-    if (!url || !isInjectableUrl(url)) {
-      sendResponse({ ok: false, error: "invalid_url" });
-      return false;
-    }
-    void chrome.tabs
-      .create({ url, active: true })
-      .then(() => sendResponse({ ok: true }))
-      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
-    return true;
-  }
-
-  if (msg?.type === "NOTCH_SET_GLOBAL_STATE") {
-    void (async () => {
-      try {
-        const next = await setGlobalNotchStatePatch(msg.patch || {});
-        await broadcastNotchStateUpdate(next);
-        sendResponse({ ok: true, state: next });
-      } catch (e) {
-        sendResponse({ ok: false, error: String(e?.message || e) });
-      }
-    })();
-    return true;
-  }
-
-  if (msg?.type === "FETCH_VIMEO_OEMBED_THUMB" && msg.clipId) {
-    const watchUrl = "https://vimeo.com/" + encodeURIComponent(String(msg.clipId));
-    const api =
-      "https://vimeo.com/api/oembed.json?url=" + encodeURIComponent(watchUrl) + "&width=640";
-    fetch(api)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((j) => {
-        const thumbnailUrl =
-          j && typeof j.thumbnail_url === "string" && j.thumbnail_url.startsWith("http")
-            ? j.thumbnail_url
-            : null;
-        sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
-      })
-      .catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
-    return true;
-  }
-  if (msg?.type === "FETCH_LOOM_OEMBED_THUMB" && msg.clipId) {
-    const shareUrl =
-      "https://www.loom.com/share/" + encodeURIComponent(String(msg.clipId).toLowerCase());
-    const api =
-      "https://www.loom.com/v1/oembed?format=json&url=" + encodeURIComponent(shareUrl);
-    fetch(api)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((j) => {
-        const thumbnailUrl =
-          j && typeof j.thumbnail_url === "string" && j.thumbnail_url.startsWith("http")
-            ? j.thumbnail_url
-            : null;
-        sendResponse({ ok: !!thumbnailUrl, thumbnailUrl });
-      })
-      .catch(() => sendResponse({ ok: false, thumbnailUrl: null }));
-    return true;
+  if (POPUP_TYPES.has(msg?.type)) {
+    return handlePopupMessage(msg, sendResponse, sender);
   }
 
   /** Google Drive screengrab: crop visible tab to the embed iframe (cross-origin player). */
@@ -548,27 +580,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg?.type === "MF_SUPABASE_CONFIG") {
-    sendResponse({
-      ok: true,
-      configured: isSupabaseConfigured(),
-      url: SUPABASE_URL || "",
-    });
-    return false;
-  }
-
   /** Content script refreshed `notch_popup_reviews`; popup listens via chrome.storage.onChanged. */
   if (msg?.type === "NOTCH_POPUP_REVIEWS_UPDATED") {
     sendResponse({ ok: true });
-    return false;
-  }
-
-  if (!CLOUD_TYPES.has(msg?.type)) return false;
-
-  try {
-    return handleRuntimeMessage(msg, sendResponse, sender);
-  } catch (e) {
-    sendCloudFallback(msg, sendResponse);
     return false;
   }
 });
